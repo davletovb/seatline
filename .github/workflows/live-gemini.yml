@@ -1,0 +1,31 @@
+name: Live Gemini smoke test
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner label with agy installed and signed in"
+        required: true
+        default: "self-hosted"
+      mode:
+        description: "required fails if unavailable/signed out; 1 skips"
+        required: true
+        default: "required"
+        type: choice
+        options: [required, "1"]
+permissions:
+  contents: read
+jobs:
+  live:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Run Seatline live test
+        env:
+          SEATLINE_LIVE_GEMINI: ${{ inputs.mode }}
+        run: cargo +stable test --locked -p seatline-tests --test live_gemini -- --nocapture
+# Uses Antigravity's existing local Google sign-in.

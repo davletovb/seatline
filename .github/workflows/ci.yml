@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  independence:
+    name: Runtime independence
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - run: node scripts/check-runtime-independence.mjs
+
+  msrv:
+    name: Minimum Rust 1.85
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install 1.85 --profile minimal
+      - run: cargo +1.85 test --workspace --locked
+
+  native:
+    name: Rust ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install stable Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+      - name: Format
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Test release
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --workspace --locked --release
+
+  fuzz:
+    name: Fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Install nightly Rust and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo install cargo-fuzz --locked --version 0.13.2
+      - name: Generate corpus
+        run: node seatline-fuzz/fuzz-support.mjs stream-corpus seatline-fuzz/corpus/stream_lines
+      - name: Smoke-run stream parser
+        run: |
+          max_len=$(node seatline-fuzz/fuzz-support.mjs max-len stream_lines)
+          cargo +nightly fuzz run --fuzz-dir seatline-fuzz stream_lines seatline-fuzz/corpus/stream_lines -- -runs=1000 -max_len="$max_len"

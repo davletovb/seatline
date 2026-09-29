@@ -1,0 +1,36 @@
+name: Live Codex smoke test
+on:
+  workflow_dispatch:
+    inputs:
+      codex_version:
+        description: "Codex CLI version from npm"
+        required: true
+        default: "latest"
+permissions:
+  contents: read
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - run: rustup toolchain install stable --profile minimal
+      - env:
+          CODEX_VERSION: ${{ inputs.codex_version }}
+        run: npm install --global "@openai/codex@${CODEX_VERSION}"
+      - name: Sign in when a test key is configured
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          echo "CODEX_HOME=$RUNNER_TEMP/codex-home" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/codex-home"
+          if [ -n "$OPENAI_API_KEY" ]; then
+            printenv OPENAI_API_KEY | CODEX_HOME="$RUNNER_TEMP/codex-home" codex login --with-api-key >/dev/null 2>&1
+          fi
+      - name: Run Seatline live test
+        env:
+          SEATLINE_LIVE_CODEX: ${{ secrets.OPENAI_API_KEY != '' && 'required' || '1' }}
+        run: cargo +stable test --locked -p seatline-tests --test live_codex -- --nocapture
