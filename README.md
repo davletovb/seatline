@@ -51,3 +51,8 @@ Licensed under either of:
 - MIT License (`LICENSE-MIT`)
 
 at your option.
+
+
+## Consuming Seatline
+
+Until the 0.x API settles, applications should pin the Seatline Git repository to an exact commit revision and update that pin deliberately after their own integration tests pass.
