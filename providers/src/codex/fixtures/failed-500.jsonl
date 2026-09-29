@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a0d66a-1424-75a1-b9cb-d537a537c68c"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `mock-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"error","message":"We’re currently experiencing high demand, which may cause temporary errors."}
+{"type":"turn.failed","error":{"message":"We’re currently experiencing high demand, which may cause temporary errors."}}

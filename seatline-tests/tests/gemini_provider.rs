@@ -1,0 +1,391 @@
+//! The Gemini adapter (Antigravity's one-shot mode) against a fake `agy`, at
+//! the runtime's level: a `Turn` goes in and `Update`s come out. It covers
+//! status, the answer and the sources, what fails closed, and that no
+//! Antigravity transcript outlives a turn. The adapter knows no conversations,
+//! so the tests that pin how an application maps its own to Gemini's stateless
+//! turns belong to that application (TabBeam's are in `test_provider`).
+
+mod support;
+
+use std::time::{Duration, Instant};
+
+use seatline_core::protocol::{Authentication, Availability, ErrorCode};
+use seatline_core::turn::{Message, Role, SessionPolicy, ToolPolicy, Turn};
+use seatline_providers::gemini::{CAPABILITIES, Gemini};
+use seatline_providers::{Provider, Update};
+use support::{FIXTURES, FakeGemini, answer_text, failure, run_to_end};
+
+/// An ephemeral turn of one plain question, to a model the fake serves.
+fn ask(text: &str) -> Turn {
+    Turn {
+        system: None,
+        messages: vec![Message {
+            role: Role::User,
+            text: text.to_owned(),
+        }],
+        model: Some("gemini-test".to_owned()),
+        tools: ToolPolicy::None,
+        session: SessionPolicy::Ephemeral,
+        continuation: None,
+        cleanup_group: None,
+        check_sign_in: true,
+    }
+}
+
+fn search() -> Turn {
+    Turn {
+        tools: ToolPolicy::NativeWebSearch,
+        ..ask("Find the example source")
+    }
+}
+
+fn model(model: &str) -> Turn {
+    Turn {
+        model: Some(model.to_owned()),
+        ..ask("Say hello")
+    }
+}
+
+/// How many transcripts and conversation databases the fake has kept.
+fn transcripts(fake: &FakeGemini) -> usize {
+    fake.kept()
+}
+
+#[test]
+fn status_uses_agy_models_to_confirm_authentication() {
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(fake.adapter().status().as_mut());
+    match &updates[0] {
+        Update::Status {
+            provider_id,
+            status,
+        } => {
+            assert_eq!(provider_id, "gemini");
+            assert_eq!(status.availability, Availability::Available);
+            assert_eq!(status.authentication, Authentication::Authenticated);
+            assert_eq!(status.capabilities, CAPABILITIES);
+        }
+        other => panic!("unexpected update: {other:?}"),
+    }
+    assert_eq!(updates.last(), Some(&Update::Completed));
+}
+
+#[test]
+fn a_question_streams_its_answer() {
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(fake.adapter().send(ask("Say hello")).as_mut());
+    assert!(updates.contains(&Update::Started), "{updates:?}");
+    assert_eq!(answer_text(&updates), "Gemini answer");
+    assert_eq!(updates.last(), Some(&Update::Completed));
+    // A stateless mode keeps no native session for the caller to resume.
+    assert!(
+        !updates
+            .iter()
+            .any(|update| matches!(update, Update::Session(_))),
+        "{updates:?}"
+    );
+}
+
+#[test]
+fn earlier_messages_are_replayed_in_the_prompt() {
+    let fake = FakeGemini::install(FIXTURES);
+    let turn = Turn {
+        messages: vec![
+            Message {
+                role: Role::User,
+                text: "Earlier question".to_owned(),
+            },
+            Message {
+                role: Role::Assistant,
+                text: "Earlier assistant answer".to_owned(),
+            },
+            Message {
+                role: Role::User,
+                text: "Say hello".to_owned(),
+            },
+        ],
+        ..ask("unused")
+    };
+    let updates = run_to_end(fake.adapter().send(turn).as_mut());
+    assert_eq!(answer_text(&updates), "Gemini continued answer");
+    assert_eq!(updates.last(), Some(&Update::Completed));
+}
+
+#[test]
+fn native_search_requires_the_actual_search_tool_and_emits_sources() {
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(fake.adapter().send(search()).as_mut());
+    assert!(
+        !updates
+            .iter()
+            .any(|update| matches!(update, Update::Delta(text) if text.contains("I will search")))
+    );
+    assert!(updates.iter().any(|update| matches!(
+        update,
+        Update::Source(source)
+            if source.backend_id == "gemini"
+                && source.url == "https://example.com/agy-search"
+    )));
+    assert_eq!(updates.last(), Some(&Update::Completed));
+}
+
+#[test]
+fn every_finished_turn_removes_antigravitys_persisted_transcript() {
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(fake.adapter().send(ask("Say hello")).as_mut());
+    assert_eq!(updates.last(), Some(&Update::Completed));
+    assert_eq!(
+        transcripts(&fake),
+        0,
+        "the agy transcript survived the turn"
+    );
+}
+
+#[test]
+fn unexpected_antigravity_tools_fail_closed() {
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(fake.adapter().send(model("gemini-tool-violation")).as_mut());
+    assert_eq!(
+        failure(&updates),
+        (ErrorCode::ProviderFailed, "PROVIDER_BOUNDARY_VIOLATION")
+    );
+    assert_eq!(transcripts(&fake), 0);
+}
+
+#[test]
+fn unknown_antigravity_step_types_fail_closed() {
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(fake.adapter().send(model("gemini-unknown-step")).as_mut());
+    assert_eq!(
+        failure(&updates),
+        (ErrorCode::ProviderFailed, "PROVIDER_BOUNDARY_VIOLATION")
+    );
+}
+
+#[test]
+fn unsafe_init_still_cleans_the_transcript_it_already_created() {
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(fake.adapter().send(model("gemini-bad-init")).as_mut());
+    assert_eq!(
+        failure(&updates),
+        (ErrorCode::ProviderFailed, "PROVIDER_AGENT_NOT_USED")
+    );
+    assert_eq!(
+        transcripts(&fake),
+        0,
+        "unsafe init leaked its Antigravity transcript"
+    );
+}
+
+#[test]
+fn cancellation_before_init_scans_the_unique_workspace_and_cleans_transcript() {
+    let fake = FakeGemini::install(FIXTURES);
+    let mut exchange = fake.adapter().send(model("gemini-slow-init"));
+
+    let transcript_ready = || {
+        std::fs::read_dir(fake.brain()).is_ok_and(|entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                entry
+                    .path()
+                    .join(".system_generated/logs/transcript.jsonl")
+                    .metadata()
+                    .is_ok_and(|metadata| metadata.len() > 0)
+            })
+        })
+    };
+    let give_up = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < give_up && !transcript_ready() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        transcript_ready(),
+        "fake never finished writing its pre-init transcript"
+    );
+
+    exchange.cancel(Duration::from_millis(10));
+    let updates = run_to_end(exchange.as_mut());
+    assert_eq!(updates.last(), Some(&Update::Stopped));
+    assert_eq!(
+        transcripts(&fake),
+        0,
+        "pre-init cancellation leaked its transcript"
+    );
+}
+
+/// Real `agy` echoes the prompt as a `user_input` step and can add
+/// `system_message` steps; neither is answer text or an action, and the
+/// answer's DONE update names only its step.
+#[test]
+fn the_echoed_prompt_and_system_messages_are_not_answer_or_violations() {
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(fake.adapter().send(ask("Say hello")).as_mut());
+    assert_eq!(updates.last(), Some(&Update::Completed), "{updates:?}");
+    let answer = answer_text(&updates);
+    assert_eq!(answer, "Gemini answer");
+    assert!(!answer.contains("Session ready"));
+}
+
+#[test]
+fn a_done_update_that_repeats_the_answer_does_not_double_it() {
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(
+        fake.adapter()
+            .send(model("gemini-cumulative-done"))
+            .as_mut(),
+    );
+    assert_eq!(updates.last(), Some(&Update::Completed), "{updates:?}");
+    assert_eq!(answer_text(&updates), "Gemini answer");
+}
+
+#[test]
+fn narration_before_each_search_is_not_saved_into_the_answer() {
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(
+        fake.adapter()
+            .send(Turn {
+                model: Some("gemini-multi-search".to_owned()),
+                ..search()
+            })
+            .as_mut(),
+    );
+    let answer = answer_text(&updates);
+    assert_eq!(
+        answer,
+        "Gemini search answer [Example](https://example.com/agy-search)."
+    );
+    assert!(!answer.contains("Let me check"));
+    assert_eq!(updates.last(), Some(&Update::Completed));
+}
+
+#[test]
+fn a_turn_runs_as_an_agent_named_after_the_applications_namespace() {
+    let fake = FakeGemini::install(FIXTURES);
+    let adapter = fake.adapter();
+    run_to_end(adapter.send(ask("Say hello")).as_mut());
+    run_to_end(adapter.send(search()).as_mut());
+
+    let agents: Vec<String> = fake
+        .invocations()
+        .iter()
+        .filter_map(|line| {
+            let mut words = line.split(' ');
+            words.find(|word| *word == "--agent")?;
+            words.next().map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(agents, ["seatline-tests-text", "seatline-tests-search"]);
+    let invocations = fake.invocations().concat();
+    assert!(!invocations.contains("pervue"));
+    assert!(!invocations.contains("tabbeam"));
+}
+
+#[test]
+fn a_system_prompt_goes_ahead_of_the_question_and_never_onto_the_command_line() {
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(
+        fake.adapter()
+            .send(Turn {
+                system: Some("Answer in French. SYSTEM-MARKER".to_owned()),
+                ..ask("What is muse?")
+            })
+            .as_mut(),
+    );
+    assert_eq!(updates.last(), Some(&Update::Completed));
+    // Antigravity reads its system prompt from the agent it runs as, and
+    // treats instructions in the user's message as something to resist: so the
+    // question arrives alone, and the instructions end the agent's own.
+    assert_eq!(fake.prompts(), ["What is muse?"]);
+    let agents = fake.read("agy-agents");
+    assert!(
+        agents.contains("\nAnswer in French. SYSTEM-MARKER\n"),
+        "{agents}"
+    );
+    assert!(
+        agents.find("# System Prompt").unwrap() < agents.find("SYSTEM-MARKER").unwrap(),
+        "{agents}"
+    );
+    assert!(
+        !fake.invocations().concat().contains("SYSTEM-MARKER"),
+        "the system prompt reached the command line"
+    );
+}
+
+#[test]
+fn turns_the_adapter_cannot_serve_are_refused_before_agy_runs() {
+    let fake = FakeGemini::install(FIXTURES);
+    let adapter = fake.adapter();
+
+    for (turn, refusal) in [
+        (
+            model("claude-test"),
+            (ErrorCode::InvalidRequest, "MODEL_NOT_SUPPORTED"),
+        ),
+        (
+            // Gemini keeps no session: only the caller's messages continue.
+            Turn {
+                session: SessionPolicy::Persistent,
+                ..ask("hi")
+            },
+            (ErrorCode::InvalidRequest, "PERSISTENT_SESSION_UNSUPPORTED"),
+        ),
+        (
+            Turn {
+                messages: Vec::new(),
+                ..ask("hi")
+            },
+            (ErrorCode::InvalidRequest, "INVALID_TURN"),
+        ),
+        (
+            Turn {
+                cleanup_group: Some("../escape".to_owned()),
+                ..ask("hi")
+            },
+            (ErrorCode::InvalidRequest, "INVALID_TURN"),
+        ),
+    ] {
+        let updates = run_to_end(adapter.send(turn.clone()).as_mut());
+        assert_eq!(updates.len(), 1, "{turn:?}: {updates:?}");
+        assert_eq!(failure(&updates), refusal, "{turn:?}");
+    }
+    assert_eq!(transcripts(&fake), 0);
+    let made = std::fs::read_dir(fake.dir.join("workspace")).map_or(0, |entries| entries.count());
+    assert_eq!(made, 0, "a refused turn made a workspace");
+}
+
+#[test]
+fn a_cleanup_group_names_the_transcripts_a_restarted_adapter_removes() {
+    let fake = FakeGemini::install(FIXTURES);
+    let cleanup_dir = fake.dir.join("durable-cleanups");
+    let group = "conv_0000000000000001";
+    let agy_id = "agy-restart-1";
+
+    // A transcript and a conversation database a turn of this group left
+    // behind, and the record of them.
+    let transcript = fake.brain().join(agy_id).join(".system_generated/logs");
+    std::fs::create_dir_all(&transcript).unwrap();
+    std::fs::write(transcript.join("transcript.jsonl"), "left behind").unwrap();
+    std::fs::create_dir_all(fake.conversations()).unwrap();
+    let database = fake.conversations().join(format!("{agy_id}.db"));
+    std::fs::write(&database, "left behind").unwrap();
+    std::fs::write(format!("{}-wal", database.display()), "left behind").unwrap();
+    let record = cleanup_dir.join(group);
+    std::fs::create_dir_all(&record).unwrap();
+    std::fs::write(record.join(agy_id), "pending\n").unwrap();
+
+    // A fresh adapter has nothing in memory and recovers from the record.
+    let adapter: Gemini = fake.adapter().with_cleanup_dir(cleanup_dir);
+    let cleanup = adapter.cleanup_group(group);
+    (cleanup.work)().expect("the cleanup works");
+    (cleanup.completed)();
+    assert!(!fake.brain().join(agy_id).exists());
+    assert!(!database.exists());
+    assert!(!std::path::Path::new(&format!("{}-wal", database.display())).exists());
+    assert!(!record.exists());
+
+    // A name that isn't a group, or a group with nothing left, is nothing.
+    for group in ["latest", "../conv_0000000000000001", group] {
+        let cleanup = adapter.cleanup_group(group);
+        (cleanup.work)().expect("nothing to remove");
+        (cleanup.completed)();
+    }
+}

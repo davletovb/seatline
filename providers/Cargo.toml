@@ -1,0 +1,16 @@
+[package]
+name = "seatline-providers"
+description = "Provider-runtime adapters: one per execution mode of Codex, Claude, Gemini (Antigravity) and Grok, behind a neutral Turn-based Provider trait"
+license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+seatline-core = { path = "../seatline-core" }
+seatline-platform = { path = "../platform" }
+serde_json = "1.0"
+
+[lints]
+workspace = true

@@ -1,0 +1,32 @@
+[package]
+name = "seatline-fuzz"
+description = "cargo-fuzz targets of the provider runtime"
+license = "MIT OR Apache-2.0"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Only runtime crates: nothing here may depend on an application.
+[dependencies]
+libfuzzer-sys = "0.4"
+seatline-core = { path = "../seatline-core" }
+
+[[bin]]
+name = "stream_lines"
+path = "fuzz_targets/stream_lines.rs"
+test = false
+doc = false
+bench = false
+
+# The fuzz crate has its own workspace, so it does not inherit the main
+# workspace's lints; it forbids `unsafe` itself.
+[lints.rust]
+unsafe_code = "forbid"
+
+# Fuzz targets need nightly and libFuzzer, so they build in their own
+# workspace instead of the main one.
+[workspace]
+members = ["."]

@@ -1,0 +1,18 @@
+[package]
+name = "seatline-platform"
+description = "Provider-runtime platform layer: provider environment, private files and workspaces, per-turn cleanup, and where an application's files live"
+license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+seatline-core = { path = "../seatline-core" }
+
+# Determines the owner of a provider's workspace (SEC-02).
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["user"] }
+
+[lints]
+workspace = true

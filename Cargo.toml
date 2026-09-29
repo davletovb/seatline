@@ -1,0 +1,13 @@
+[workspace]
+members = ["seatline-core", "platform", "providers", "fake-provider", "seatline-tests", "scheduler", "service"]
+exclude = ["seatline-fuzz"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

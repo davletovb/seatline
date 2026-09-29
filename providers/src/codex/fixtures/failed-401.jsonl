@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a0d66a-155c-7390-a5d2-94017a07a409"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `mock-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"error","message":"unexpected status 401 Unauthorized: Incorrect API key provided, url: http://127.0.0.1:18765/v1/responses"}
+{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: Incorrect API key provided, url: http://127.0.0.1:18765/v1/responses"}}
