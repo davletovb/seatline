@@ -5,7 +5,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use interprocess::local_socket::{
     ListenerOptions,
@@ -184,6 +184,20 @@ fn run() -> io::Result<()> {
     }
 }
 
+const MAX_CONNECTIONS: usize = 32;
+/// How long the broker stays up with no connections at all. Exiting when idle
+/// means the next start runs the installed binary, so an upgrade takes effect
+/// without anyone having to stop the old broker. `0` disables the exit.
+const DEFAULT_IDLE_SECONDS: u64 = 600;
+
+fn idle_limit() -> Option<Duration> {
+    let seconds = std::env::var("SEATLINE_BROKER_IDLE_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_IDLE_SECONDS);
+    (seconds > 0).then(|| Duration::from_secs(seconds))
+}
+
 async fn serve(root: PathBuf, hub: std::sync::mpsc::SyncSender<hub::Command>) -> io::Result<()> {
     let listener = ListenerOptions::new()
         .name(client::socket_name(&root)?)
@@ -196,17 +210,40 @@ async fn serve(root: PathBuf, hub: std::sync::mpsc::SyncSender<hub::Command>) ->
             std::fs::Permissions::from_mode(0o600),
         )?;
     }
-    let permits = Arc::new(tokio::sync::Semaphore::new(32));
+    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     let ids = AtomicU64::new(1);
+    // Milliseconds since `started` at which a connection last opened or closed.
+    let started = Instant::now();
+    let last_activity = Arc::new(AtomicU64::new(0));
+    let idle = idle_limit();
+    let check_every = idle
+        .map(|idle| (idle / 4).clamp(Duration::from_millis(50), Duration::from_secs(30)))
+        .unwrap_or(Duration::from_secs(3600));
     loop {
-        let stream = listener.accept().await?;
+        let stream = tokio::select! {
+            accepted = listener.accept() => accepted?,
+            () = tokio::time::sleep(check_every) => {
+                let quiet = (started.elapsed().as_millis() as u64)
+                    .saturating_sub(last_activity.load(Ordering::Relaxed));
+                if idle.is_some_and(|idle| {
+                    permits.available_permits() == MAX_CONNECTIONS && quiet >= idle.as_millis() as u64
+                }) {
+                    #[cfg(unix)]
+                    let _ = std::fs::remove_file(root.join("broker.sock"));
+                    return Ok(());
+                }
+                continue;
+            }
+        };
+        last_activity.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
         let Ok(permit) = permits.clone().try_acquire_owned() else {
             continue;
         };
-        let (root, hub, connection) = (
+        let (root, hub, connection, last_activity) = (
             root.clone(),
             hub.clone(),
             ids.fetch_add(1, Ordering::Relaxed),
+            last_activity.clone(),
         );
         tokio::spawn(async move {
             let _permit = permit;
@@ -217,6 +254,7 @@ async fn serve(root: PathBuf, hub: std::sync::mpsc::SyncSender<hub::Command>) ->
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
+            last_activity.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
         });
     }
 }

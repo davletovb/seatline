@@ -76,8 +76,27 @@ pub fn register(root: &Path) -> io::Result<()> {
     }
     Ok(())
 }
+/// Removes installed copies other than the ones in `keep`, so repeated installs
+/// do not pile up. A copy that cannot be removed (Windows keeps a running
+/// executable locked) is left for the next install.
+pub fn prune_versions(root: &Path, keep: &[&Path]) {
+    let Ok(entries) = std::fs::read_dir(root.join("versions")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ours = entry.file_name().to_str().is_some_and(|name| {
+            name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
+        if ours && path.is_dir() && !keep.iter().any(|kept| kept.starts_with(&path)) {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
 pub fn install(root: &Path) -> io::Result<PathBuf> {
     let _lock = config::lock(root, "registry.lock")?;
+    let previous = executable(root).ok().flatten();
     let folder = root.join("versions").join(config::random_token()?);
     seatline_platform::private_fs::create_private_dir(&folder)?;
     let destination = folder.join(if cfg!(windows) {
@@ -99,5 +118,43 @@ pub fn install(root: &Path) -> io::Result<PathBuf> {
             .as_bytes(),
     )?;
     register(root)?;
+    // Keep the copy that was registered until now next to the new one.
+    let mut keep = vec![destination.as_path()];
+    if let Some(previous) = previous.as_deref() {
+        keep.push(previous);
+    }
+    prune_versions(root, &keep);
     Ok(destination)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_installed_copies_are_pruned_but_the_current_and_previous_stay() {
+        let root = std::env::temp_dir().join(format!(
+            "seatline-install-{}",
+            &config::random_token().unwrap()[..12]
+        ));
+        let versions = root.join("versions");
+        let mut copies = Vec::new();
+        for _ in 0..4 {
+            let folder = versions.join(config::random_token().unwrap());
+            std::fs::create_dir_all(&folder).unwrap();
+            let binary = folder.join("seatline-companion");
+            std::fs::write(&binary, b"binary").unwrap();
+            copies.push(binary);
+        }
+        // Not created by install: never touched.
+        let foreign = versions.join("notes");
+        std::fs::create_dir_all(&foreign).unwrap();
+
+        prune_versions(&root, &[copies[3].as_path(), copies[2].as_path()]);
+
+        assert!(!copies[0].exists() && !copies[1].exists());
+        assert!(copies[2].exists() && copies[3].exists());
+        assert!(foreign.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
