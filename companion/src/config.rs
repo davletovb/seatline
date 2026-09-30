@@ -136,6 +136,15 @@ pub fn lock(root: &Path, name: &str) -> io::Result<fs::File> {
         .read(true)
         .write(true)
         .open(root.join(name))?;
-    fs2::FileExt::try_lock_exclusive(&file)?;
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Seatline lock is in use",
+            ));
+        }
+        Err(error) => return Err(error),
+    }
     Ok(file)
 }

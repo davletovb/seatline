@@ -69,7 +69,11 @@ fn real_ipc_authentication_singleton_and_revocation() {
             .arg("serve")
             .output()
             .unwrap();
-        assert!(second.status.success());
+        assert!(
+            second.status.success(),
+            "{}",
+            String::from_utf8_lossy(&second.stderr)
+        );
         assert!(broker.0.try_wait().unwrap().is_none());
         let mut denied =
             interprocess::local_socket::tokio::Stream::connect(client::socket_name(&root).unwrap())

@@ -104,10 +104,55 @@ pub fn decode_update(value: Value) -> io::Result<Update> {
                 Some("APP_NOT_AUTHORIZED") => "APP_NOT_AUTHORIZED",
                 Some("QUEUE_FULL") => "QUEUE_FULL",
                 Some("PERSISTENT_SESSION_UNSUPPORTED") => "PERSISTENT_SESSION_UNSUPPORTED",
+                Some("AUTH_REJECTED") => "AUTH_REJECTED",
+                Some("PROVIDER_RATE_LIMITED") => "PROVIDER_RATE_LIMITED",
+                Some("PROVIDER_UNAVAILABLE") => "PROVIDER_UNAVAILABLE",
+                Some("WORKSPACE_UNAVAILABLE") => "WORKSPACE_UNAVAILABLE",
+                Some("PROCESS_EXITED") => "PROCESS_EXITED",
+                Some("MALFORMED_PROVIDER_OUTPUT") => "MALFORMED_PROVIDER_OUTPUT",
+                Some("PROVIDER_BOUNDARY_VIOLATION") => "PROVIDER_BOUNDARY_VIOLATION",
+                Some("PROVIDER_AGENT_NOT_USED") => "PROVIDER_AGENT_NOT_USED",
+                Some("PROVIDER_PERMISSIONS_TOO_OPEN") => "PROVIDER_PERMISSIONS_TOO_OPEN",
+                Some("MODEL_NOT_SUPPORTED") => "MODEL_NOT_SUPPORTED",
+                Some("TOOL_ISOLATION_UNAVAILABLE") => "TOOL_ISOLATION_UNAVAILABLE",
+                Some("NATIVE_SEARCH_CONFIGURATION_UNSAFE") => "NATIVE_SEARCH_CONFIGURATION_UNSAFE",
+                Some("SEARCH_UNSUPPORTED") => "SEARCH_UNSUPPORTED",
+                Some("MODEL_MISMATCH") => "MODEL_MISMATCH",
+                Some("WORKSPACE_MISMATCH") => "WORKSPACE_MISMATCH",
+                Some("TOOLSET_MISMATCH") => "TOOLSET_MISMATCH",
+                Some("SKILLS_MISMATCH") => "SKILLS_MISMATCH",
+                Some("MCP_MISMATCH") => "MCP_MISMATCH",
+                Some("INVALID_TURN") => "INVALID_TURN",
+                Some("INVALID_REQUEST") => "INVALID_REQUEST",
+                Some("TURN_DEADLINE_EXCEEDED") => "TURN_DEADLINE_EXCEEDED",
+                Some("ADAPTER_PANICKED") => "ADAPTER_PANICKED",
+                Some("SESSION_STORE_UNAVAILABLE") => "SESSION_STORE_UNAVAILABLE",
+                Some("PROVIDER_DEFAULT_TOOLS_DENIED") => "PROVIDER_DEFAULT_TOOLS_DENIED",
+                Some("INVALID_CLEANUP_GROUP") => "INVALID_CLEANUP_GROUP",
                 _ => "REMOTE_PROVIDER_FAILED",
             };
             Update::Failed(failure(code, reason, value["retryable"] == true))
         }
         _ => return Err(invalid()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_failures_preserve_rate_limits_and_isolation_without_reflecting_output() {
+        for (code, reason, retryable) in [
+            (ErrorCode::ProviderFailed, "PROVIDER_RATE_LIMITED", true),
+            (ErrorCode::InvalidRequest, "TOOL_ISOLATION_UNAVAILABLE", false),
+        ] {
+            let original = failure(code, reason, retryable);
+            let decoded = decode_update(encode_update(&Update::Failed(original))).unwrap();
+            assert!(matches!(decoded, Update::Failed(actual) if actual == original));
+        }
+        let value = json!({"type":"failed","code":"ProviderFailed","reason":"private provider output","retryable":false});
+        let decoded = decode_update(value).unwrap();
+        assert!(matches!(decoded, Update::Failed(error) if error.reason == "REMOTE_PROVIDER_FAILED"));
+    }
 }
