@@ -9,9 +9,14 @@ It provides:
 - `seatline-providers`: adapters for Codex, Claude, Gemini through Antigravity, and Grok;
 - `seatline-scheduler`: bounded concurrent turn scheduling and panic isolation;
 - `seatline-service`: a threaded in-process service API;
+- `seatline-companion`: one shared native installation with app-scoped IPC and encrypted outbound web transport;
 - `seatline-fake-provider`, `seatline-tests`, and `seatline-fuzz`: deterministic test and fuzz infrastructure.
 
 Applications own conversation/product policy. Seatline owns provider execution mechanics.
+
+See the [shared companion setup and protocol](companion/README.md) for using one
+installation from multiple apps and extensions. The companion has no local HTTP
+listener and includes no JavaScript runtime or product orchestration.
 
 ## Status
 

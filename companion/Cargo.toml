@@ -1,0 +1,32 @@
+[package]
+name = "seatline-companion"
+description = "Shared per-user Seatline broker and client transport"
+license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+seatline-core = { path = "../seatline-core" }
+seatline-platform = { path = "../platform" }
+seatline-providers = { path = "../providers" }
+seatline-scheduler = { path = "../scheduler" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+interprocess = { version = "=2.2.3", features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "sync", "time"] }
+getrandom = "0.3"
+fs2 = "0.4"
+
+aes-gcm = "0.10"
+base64 = "0.22"
+futures-util = "0.3"
+tokio-tungstenite = { version = "=0.26.2", features = ["rustls-tls-native-roots"] }
+reqwest = { version = "=0.12.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+# Keep URL's transitive Unicode stack compatible with Rust 1.85.
+url = "=2.5.4"
+idna_adapter = "=1.2.0"
+
+[lints]
+workspace = true
