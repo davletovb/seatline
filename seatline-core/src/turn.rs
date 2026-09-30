@@ -168,7 +168,7 @@ pub enum TurnError {
     InvalidCleanupGroup,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,

@@ -1,0 +1,8 @@
+{
+  "name": "seatline-relay",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-09-30",
+  "durable_objects": { "bindings": [{ "name": "CHANNELS", "class_name": "Channel" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Channel"] }],
+  "vars": { "APP_ORIGINS": "{\"conclave\":[\"https://conclave.example.com\"]}" }
+}

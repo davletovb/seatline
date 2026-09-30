@@ -2,9 +2,9 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use seatline_core::turn::Namespace;
 use seatline_platform::private_fs::create_private_dir;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,6 +15,8 @@ pub struct Grant {
     pub allow_provider_default: bool,
     #[serde(default)]
     pub extension_origins: Vec<String>,
+    #[serde(default)]
+    pub web_origins: Vec<String>,
     #[serde(default)]
     pub worker: Option<Worker>,
 }
@@ -51,7 +53,9 @@ pub fn app_path(root: &Path, app: &str) -> io::Result<PathBuf> {
 }
 
 pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = path.parent().ok_or_else(|| io::Error::other("missing parent"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("missing parent"))?;
     create_private_dir(parent)?;
     let temp = parent.join(format!(".{}.tmp", random_token()?));
     let mut options = OpenOptions::new();
@@ -93,14 +97,20 @@ pub fn load_grant(root: &Path, app: &str) -> io::Result<Grant> {
 }
 
 pub fn same_token(a: &str, b: &str) -> bool {
-    a.len() == 64 && b.len() == 64
-        && a.bytes().zip(b.bytes()).fold(0_u8, |different, (a, b)| different | (a ^ b)) == 0
+    a.len() == 64
+        && b.len() == 64
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0_u8, |different, (a, b)| different | (a ^ b))
+            == 0
 }
 
 pub fn endpoint(root: &Path) -> io::Result<String> {
     #[cfg(not(windows))]
     {
-        root.join("broker.sock").to_str().map(str::to_owned)
+        root.join("broker.sock")
+            .to_str()
+            .map(str::to_owned)
             .ok_or_else(|| io::Error::other("non-UTF8 IPC path"))
     }
     #[cfg(windows)]
@@ -115,7 +125,11 @@ pub fn endpoint(root: &Path) -> io::Result<String> {
 
 pub fn lock(root: &Path, name: &str) -> io::Result<fs::File> {
     create_private_dir(root)?;
-    let file = OpenOptions::new().create(true).truncate(false).read(true).write(true)
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
         .open(root.join(name))?;
     fs2::FileExt::try_lock_exclusive(&file)?;
     Ok(file)
