@@ -22,15 +22,14 @@ pub struct Grant {
     #[serde(default)]
     pub cache_title: Option<String>,
     #[serde(default)]
-    pub worker: Option<Worker>,
+    pub native_adapter: Option<NativeAdapter>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Worker {
+pub struct NativeAdapter {
     pub executable: PathBuf,
     pub args: Vec<String>,
-    pub protocol: String,
 }
 
 pub fn data_dir() -> io::Result<PathBuf> {

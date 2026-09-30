@@ -13,7 +13,7 @@ use interprocess::local_socket::{
 };
 use seatline_companion::{
     PROTOCOL_VERSION, client,
-    config::{self, Grant, Worker},
+    config::{self, Grant, NativeAdapter},
     hub, wire,
 };
 use serde_json::{Value, json};
@@ -25,7 +25,7 @@ fn main() {
     }
 }
 
-#[allow(clippy::disallowed_methods)] // Launches only workers registered by the local administrator, with inherited stdio.
+#[allow(clippy::disallowed_methods)] // Launches only native adapters registered by the local administrator, with inherited stdio.
 fn run() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let root = config::data_dir()?;
@@ -114,48 +114,50 @@ fn run() -> io::Result<()> {
                     .iter()
                     .skip(3)
                     .find_map(|arg| arg.strip_prefix("--cache-title=").map(str::to_owned)),
-                worker: None,
+                native_adapter: None,
             };
             config::write_private(
                 &config::app_path(&root, &grant.app)?,
                 &serde_json::to_vec_pretty(&grant)?,
             )?;
-            if seatline_companion::install::executable(&root)?.is_some() {seatline_companion::install::register(&root)?;}
+            if seatline_companion::install::executable(&root)?.is_some() {
+                seatline_companion::install::register(&root)?;
+            }
             println!("Authorized {}", grant.app);
             Ok(())
         }
-        Some("register-worker") if args.len() >= 4 => {
-            let _lock = config::lock(&root, "registry.lock")?;
-            let mut grant = config::load_grant(&root, &args[1])?;
-            if !["native", "rpc"].contains(&args[2].as_str()) {
-                return Err(io::Error::other("unsupported worker protocol"));
-            }
-            let executable = std::fs::canonicalize(&args[3])?;
-            if !executable.is_file() {
-                return Err(io::Error::other("worker executable missing"));
-            }
-            grant.worker = Some(Worker {
-                executable,
-                args: args[4..].to_vec(),
-                protocol: args[2].clone(),
-            });
-            config::write_private(
-                &config::app_path(&root, &grant.app)?,
-                &serde_json::to_vec_pretty(&grant)?,
-            )
-        }
+        Some("register-native") if args.len()>=3 => {
+            let _lock = config::lock(&root,"registry.lock")?;
+            let mut grant = config::load_grant(&root,&args[1])?;
+            let executable = std::fs::canonicalize(&args[2])?;
+            if !executable.is_file() {return Err(io::Error::other("native adapter executable missing"));}
+            grant.native_adapter = Some(NativeAdapter {executable,args:args[3..].to_vec()});
+            config::write_private(&config::app_path(&root,&grant.app)?,&serde_json::to_vec_pretty(&grant)?)?;
+            if seatline_companion::install::executable(&root)?.is_some() {seatline_companion::install::register(&root)?;}
+            Ok(())
+        },
         Some("revoke") if args.len() == 2 => {
             let _lock = config::lock(&root, "registry.lock")?;
             std::fs::remove_file(config::app_path(&root, &args[1])?)?;
-            if seatline_companion::install::executable(&root)?.is_some() {seatline_companion::install::register(&root)?;}
+            if seatline_companion::install::executable(&root)?.is_some() {
+                seatline_companion::install::register(&root)?;
+            }
             Ok(())
         }
-        Some("install") if args.len()==1 => {
-            println!("Seatline installed at {}",seatline_companion::install::install(&root)?.display()); Ok(())
-        },
-        Some("manifest") if args.len()==1 => {
-            println!("{}",seatline_companion::install::manifest(&root,&std::env::current_exe()?)?); Ok(())
-        },
+        Some("install") if args.len() == 1 => {
+            println!(
+                "Seatline installed at {}",
+                seatline_companion::install::install(&root)?.display()
+            );
+            Ok(())
+        }
+        Some("manifest") if args.len() == 1 => {
+            println!(
+                "{}",
+                seatline_companion::install::manifest(&root, &std::env::current_exe()?)?
+            );
+            Ok(())
+        }
         Some(origin) if valid_origin(origin) && args.len() <= 2 => {
             let mut matches = Vec::new();
             for entry in std::fs::read_dir(root.join("apps"))?.flatten() {
@@ -166,22 +168,25 @@ fn run() -> io::Result<()> {
                             .iter()
                             .any(|allowed| allowed == origin)
                         {
-                            if grant.worker.as_ref().is_none_or(|worker| worker.protocol=="native") {matches.push(grant);}
+                            matches.push(grant);
                         }
                     }
                 }
             }
             if matches.len() != 1 {
                 return Err(io::Error::other(
-                    "extension has no unique authorized worker",
+                    "extension has no unique authorized app",
                 ));
             }
             let grant = matches.remove(0);
-            let Some(worker) = grant.worker.clone() else {
-                return tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(bridge(root,grant));
+            let Some(adapter) = grant.native_adapter.clone() else {
+                return tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?
+                    .block_on(bridge(root, grant));
             };
-            let status = Command::new(worker.executable)
-                .args(worker.args)
+            let status = Command::new(adapter.executable)
+                .args(adapter.args)
                 .args(&args)
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
@@ -190,11 +195,11 @@ fn run() -> io::Result<()> {
             if status.success() {
                 Ok(())
             } else {
-                Err(io::Error::other("app worker failed"))
+                Err(io::Error::other("native adapter failed"))
             }
         }
         _ => Err(io::Error::other(
-            "usage: seatline-companion serve | connect APP | authorize APP PROVIDERS [EXTENSION_ORIGIN...] | register-worker APP native|rpc EXECUTABLE [ARGS...] | revoke APP | manifest",
+            "usage: seatline-companion serve | connect APP | authorize APP PROVIDERS [EXTENSION_ORIGIN...] | register-native APP EXECUTABLE [ARGS...] | revoke APP | manifest",
         )),
     }
 }

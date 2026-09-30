@@ -157,14 +157,14 @@ pub async fn pair(root: &Path, app: &str, relay: &str, site: &str, launch: bool)
         if !config::same_token(&current.token, &grant.token) {
             return Err(error("app authorization revoked"));
         }
-        let result = async {
+        let result: io::Result<()> = async {
             let (mut socket,_) = tokio_tungstenite::connect_async(endpoint.as_str()).await.map_err(io::Error::other)?;
             socket.send(Message::Text(json!({"type":"auth","token":pair["helper"]}).to_string().into())).await.map_err(io::Error::other)?;
             let mut broker_writer = None;
             let mut broker_reader: Option<tokio::task::JoinHandle<()>> = None;
             let (output,mut events) = tokio::sync::mpsc::channel::<Value>(64);
             let mut check = tokio::time::interval(Duration::from_secs(1));
-            let result = async {
+            let result: io::Result<()> = async {
                 loop {
                     tokio::select! {
                         _ = check.tick() => {

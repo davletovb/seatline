@@ -725,7 +725,7 @@ mod tests {
                 web_origins: Vec::new(),
                 web_relays: Vec::new(),
                 cache_title: None,
-                worker: None,
+                native_adapter: None,
             };
             config::write_private(
                 &config::app_path(&hub.root, app).unwrap(),

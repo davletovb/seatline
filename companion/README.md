@@ -13,8 +13,8 @@ Build with `cargo build --workspace --locked -p seatline-companion`. Install the
 binary once, then approve apps with `authorize APP codex,claude,gemini,grok`.
 Chrome uses `com.seatline.host`; the registry selects the app by its exact
 extension origin. Product-specific adapters remain in their own repositories.
-`register-worker` is an optional compatibility adapter for a product's existing
-native protocol. Apps using the neutral protocol need no worker.
+`register-native` is an optional compatibility adapter for a product's existing
+native protocol. Apps using the neutral protocol need no native adapter.
 
 Protocol 1 uses four-byte little-endian length-prefixed UTF-8 JSON, max 1 MiB.
 Authenticate with `{version:1,app,token}`; receive `{type:"ready",version:1}`.
