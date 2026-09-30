@@ -27,6 +27,7 @@ pub fn socket_name(root: &Path) -> io::Result<interprocess::local_socket::Name<'
     }
 }
 
+#[allow(clippy::disallowed_methods)] // Starts only the locally configured companion, never a request-supplied executable.
 pub async fn connect(root: &Path) -> io::Result<Stream> {
     let name = socket_name(root)?;
     if let Ok(stream) = Stream::connect(name).await {

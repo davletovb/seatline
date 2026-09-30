@@ -25,6 +25,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // Launches only workers registered by the local administrator, with inherited stdio.
 fn run() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let root = config::data_dir()?;
@@ -79,7 +80,12 @@ fn run() -> io::Result<()> {
                 return Err(io::Error::other("invalid extension origin"));
             }
             // Explicit local authorization rotates credentials, cancelling old connections.
-            let web_origins = args.iter().skip(3).filter(|arg| arg.starts_with("https://")).cloned().collect();
+            let web_origins = args
+                .iter()
+                .skip(3)
+                .filter(|arg| arg.starts_with("https://"))
+                .cloned()
+                .collect();
             let grant = Grant {
                 app: args[1].clone(),
                 token: config::random_token()?,
@@ -87,6 +93,7 @@ fn run() -> io::Result<()> {
                 allow_provider_default: false,
                 extension_origins: origins,
                 web_origins,
+                cache_title: args.iter().skip(3).find_map(|arg| arg.strip_prefix("--cache-title=").map(str::to_owned)),
                 worker: None,
             };
             config::write_private(

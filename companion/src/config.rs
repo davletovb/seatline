@@ -18,6 +18,8 @@ pub struct Grant {
     #[serde(default)]
     pub web_origins: Vec<String>,
     #[serde(default)]
+    pub cache_title: Option<String>,
+    #[serde(default)]
     pub worker: Option<Worker>,
 }
 
@@ -36,7 +38,7 @@ pub fn data_dir() -> io::Result<PathBuf> {
     #[cfg(windows)]
     let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     #[cfg(not(windows))]
-    let base = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"));
+    let base = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")));
     base.map(|base| base.join("seatline"))
         .ok_or_else(|| io::Error::other("Seatline user directory is unavailable"))
 }

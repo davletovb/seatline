@@ -478,13 +478,20 @@ impl Hub {
         }
     }
 
+    #[allow(clippy::map_entry)] // Admission errors also need mutable access to the connection table.
     fn admit(&mut self, request: Request) {
         let key = (request.app.clone(), request.provider.clone());
         if !self.providers.contains_key(&key) {
             let Ok(namespace) = Namespace::fixed(&request.app) else {
                 return;
             };
-            let layout = Layout::new(namespace);
+            let layout = match self.connections[&request.connection].grant.cache_title.as_deref() {
+                Some(title) => match Layout::with_cache_title(namespace,title) {
+                    Ok(layout) => layout,
+                    Err(_) => { self.event(&request,Update::Failed(wire::failure(ErrorCode::InvalidRequest,"INVALID_REQUEST",false))); return; }
+                },
+                None => Layout::new(namespace),
+            };
             let provider: Box<dyn Provider> = match request.provider.as_str() {
                 "codex" => Box::new(codex::Codex::installed(&layout)),
                 "claude" => Box::new(claude::Claude::installed(&layout)),
