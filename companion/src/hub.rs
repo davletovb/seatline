@@ -395,11 +395,17 @@ impl Hub {
                     let pending = self.cleanup.swap_remove(index);
                     let result = result.and_then(|()| {
                         (pending.completed)();
-                        let removed: Vec<_> = pending.sessions.into_iter().filter_map(|token| {
-                            self.sessions.remove(&token).map(|session| (token,session))
-                        }).collect();
+                        let removed: Vec<_> = pending
+                            .sessions
+                            .into_iter()
+                            .filter_map(|token| {
+                                self.sessions.remove(&token).map(|session| (token, session))
+                            })
+                            .collect();
                         let saved = self.save_sessions();
-                        if saved.is_err() { self.sessions.extend(removed); }
+                        if saved.is_err() {
+                            self.sessions.extend(removed);
+                        }
                         saved
                     });
                     self.event(
@@ -665,68 +671,169 @@ mod tests {
 
     struct Fixture;
     impl Provider for Fixture {
-        fn id(&self) -> &str { "codex" }
-        fn capabilities(&self) -> Capabilities { codex::CAPABILITIES }
-        fn timeouts(&self) -> Timeouts { Timeouts { start:Duration::from_secs(30),idle:Duration::from_secs(30),max_turn:Duration::from_secs(30),stop_grace:Duration::ZERO } }
-        fn supports_persistent_session(&self) -> bool { true }
-        fn status(&self) -> Box<dyn Exchange> { Box::new(Scripted::new([Update::Completed])) }
-        fn send(&self, _: Turn) -> Box<dyn Exchange> { Box::new(Scripted::new([Update::Session("raw-native-handle".into()),Update::Started,Update::Delta("answer".into()),Update::Completed])) }
+        fn id(&self) -> &str {
+            "codex"
+        }
+        fn capabilities(&self) -> Capabilities {
+            codex::CAPABILITIES
+        }
+        fn timeouts(&self) -> Timeouts {
+            Timeouts {
+                start: Duration::from_secs(30),
+                idle: Duration::from_secs(30),
+                max_turn: Duration::from_secs(30),
+                stop_grace: Duration::ZERO,
+            }
+        }
+        fn supports_persistent_session(&self) -> bool {
+            true
+        }
+        fn status(&self) -> Box<dyn Exchange> {
+            Box::new(Scripted::new([Update::Completed]))
+        }
+        fn send(&self, _: Turn) -> Box<dyn Exchange> {
+            Box::new(Scripted::new([
+                Update::Session("raw-native-handle".into()),
+                Update::Started,
+                Update::Delta("answer".into()),
+                Update::Completed,
+            ]))
+        }
     }
     fn setup() -> (Hub, Vec<tokio::sync::mpsc::Receiver<Value>>) {
-        let root = std::env::temp_dir().join(format!("seatline-hub-{}",config::random_token().unwrap()));
-        let mut hub = Hub {root,connections:BTreeMap::new(),queue:VecDeque::new(),providers:BTreeMap::new(),supervisor:Supervisor::new(),active:BTreeMap::new(),sessions:BTreeMap::new(),cleanup:Vec::new(),next_check:Instant::now()+Duration::from_secs(60)};
+        let root =
+            std::env::temp_dir().join(format!("seatline-hub-{}", config::random_token().unwrap()));
+        let mut hub = Hub {
+            root,
+            connections: BTreeMap::new(),
+            queue: VecDeque::new(),
+            providers: BTreeMap::new(),
+            supervisor: Supervisor::new(),
+            active: BTreeMap::new(),
+            sessions: BTreeMap::new(),
+            cleanup: Vec::new(),
+            next_check: Instant::now() + Duration::from_secs(60),
+        };
         let mut outputs = Vec::new();
-        for (id,app) in [(1,"first"),(2,"second")] {
-            let grant = Grant {app:app.into(),token:config::random_token().unwrap(),providers:vec!["codex".into()],allow_provider_default:false,extension_origins:Vec::new(),web_origins:Vec::new(),web_relays:Vec::new(),cache_title:None,worker:None};
-            config::write_private(&config::app_path(&hub.root,app).unwrap(),&serde_json::to_vec(&grant).unwrap()).unwrap();
-            let (output,mut receive) = tokio::sync::mpsc::channel(64);
-            hub.command(Command::Open {connection:id,grant,output});
-            assert_eq!(receive.try_recv().unwrap()["type"],"ready");
-            hub.providers.insert((app.into(),"codex".into()),Box::new(Fixture));
+        for (id, app) in [(1, "first"), (2, "second")] {
+            let grant = Grant {
+                app: app.into(),
+                token: config::random_token().unwrap(),
+                providers: vec!["codex".into()],
+                allow_provider_default: false,
+                extension_origins: Vec::new(),
+                web_origins: Vec::new(),
+                web_relays: Vec::new(),
+                cache_title: None,
+                worker: None,
+            };
+            config::write_private(
+                &config::app_path(&hub.root, app).unwrap(),
+                &serde_json::to_vec(&grant).unwrap(),
+            )
+            .unwrap();
+            let (output, mut receive) = tokio::sync::mpsc::channel(64);
+            hub.command(Command::Open {
+                connection: id,
+                grant,
+                output,
+            });
+            assert_eq!(receive.try_recv().unwrap()["type"], "ready");
+            hub.providers
+                .insert((app.into(), "codex".into()), Box::new(Fixture));
             outputs.push(receive);
         }
-        (hub,outputs)
+        (hub, outputs)
     }
     fn turn(continuation: Option<&str>) -> Value {
         json!({"system":null,"messages":[{"role":"user","text":"hello"}],"model":null,"tools":"none","session":"persistent","continuation":continuation,"cleanup_group":null,"check_sign_in":false})
     }
-    fn request(hub: &mut Hub, connection:u64, id:&str, method:&str, params:Value) {
-        hub.command(Command::Request {connection,value:json!({"id":id,"provider":"codex","method":method,"params":params})});
+    fn request(hub: &mut Hub, connection: u64, id: &str, method: &str, params: Value) {
+        hub.command(Command::Request {
+            connection,
+            value: json!({"id":id,"provider":"codex","method":method,"params":params}),
+        });
     }
     fn drain(output: &mut tokio::sync::mpsc::Receiver<Value>) -> Vec<Value> {
-        let mut values = Vec::new(); while let Ok(value) = output.try_recv() { values.push(value); } values
+        let mut values = Vec::new();
+        while let Ok(value) = output.try_recv() {
+            values.push(value);
+        }
+        values
     }
     #[test]
     fn session_tokens_are_app_scoped_and_native_handles_stay_private() {
-        let (mut hub,mut output) = setup();
-        request(&mut hub,1,"a","send",turn(None)); request(&mut hub,2,"b","send",turn(None));
-        for _ in 0..5 { hub.tick(); }
-        let first = drain(&mut output[0]); let second = drain(&mut output[1]);
-        let token = |events: &[Value]| events.iter().find(|v| v["event"]["type"] == "session").unwrap()["event"]["handle"].as_str().unwrap().to_owned();
-        let (a,b) = (token(&first),token(&second));
-        assert_ne!(a,b); assert_eq!(a.len(),64);
-        assert!(!serde_json::to_string(&first).unwrap().contains("raw-native-handle"));
-        request(&mut hub,2,"steal","send",turn(Some(&a)));
-        request(&mut hub,2,"forget-other","forget",json!({"sessions":[a]}));
-        for _ in 0..5 { hub.tick(); }
+        let (mut hub, mut output) = setup();
+        request(&mut hub, 1, "a", "send", turn(None));
+        request(&mut hub, 2, "b", "send", turn(None));
+        for _ in 0..5 {
+            hub.tick();
+        }
+        let first = drain(&mut output[0]);
+        let second = drain(&mut output[1]);
+        let token = |events: &[Value]| {
+            events
+                .iter()
+                .find(|v| v["event"]["type"] == "session")
+                .unwrap()["event"]["handle"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let (a, b) = (token(&first), token(&second));
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 64);
+        assert!(
+            !serde_json::to_string(&first)
+                .unwrap()
+                .contains("raw-native-handle")
+        );
+        request(&mut hub, 2, "steal", "send", turn(Some(&a)));
+        request(
+            &mut hub,
+            2,
+            "forget-other",
+            "forget",
+            json!({"sessions":[a]}),
+        );
+        for _ in 0..5 {
+            hub.tick();
+        }
         let failures = drain(&mut output[1]);
-        assert_eq!(failures.len(),2);
-        assert!(failures.iter().all(|value| value["event"]["type"] == "failed"));
-        assert_eq!(hub.sessions.len(),2);
+        assert_eq!(failures.len(), 2);
+        assert!(
+            failures
+                .iter()
+                .all(|value| value["event"]["type"] == "failed")
+        );
+        assert_eq!(hub.sessions.len(), 2);
         std::fs::remove_dir_all(&hub.root).unwrap();
     }
     #[test]
     fn cancellation_ids_and_revocation_do_not_cross_connections() {
-        let (mut hub,mut output) = setup();
-        request(&mut hub,1,"same","send",turn(None)); request(&mut hub,2,"same","send",turn(None));
-        hub.command(Command::Request {connection:1,value:json!({"id":"cancel","method":"cancel","target":"same"})});
-        assert_eq!(hub.queue.len(),1); assert_eq!(hub.queue[0].connection,2);
-        assert_eq!(drain(&mut output[0])[0]["event"]["type"],"stopped");
-        std::fs::remove_file(config::app_path(&hub.root,"first").unwrap()).unwrap();
-        hub.next_check = Instant::now(); hub.tick();
-        assert!(!hub.connections.contains_key(&1)); assert!(hub.connections.contains_key(&2));
-        for _ in 0..5 { hub.tick(); }
-        assert!(drain(&mut output[1]).iter().any(|value| value["event"]["type"] == "completed"));
+        let (mut hub, mut output) = setup();
+        request(&mut hub, 1, "same", "send", turn(None));
+        request(&mut hub, 2, "same", "send", turn(None));
+        hub.command(Command::Request {
+            connection: 1,
+            value: json!({"id":"cancel","method":"cancel","target":"same"}),
+        });
+        assert_eq!(hub.queue.len(), 1);
+        assert_eq!(hub.queue[0].connection, 2);
+        assert_eq!(drain(&mut output[0])[0]["event"]["type"], "stopped");
+        std::fs::remove_file(config::app_path(&hub.root, "first").unwrap()).unwrap();
+        hub.next_check = Instant::now();
+        hub.tick();
+        assert!(!hub.connections.contains_key(&1));
+        assert!(hub.connections.contains_key(&2));
+        for _ in 0..5 {
+            hub.tick();
+        }
+        assert!(
+            drain(&mut output[1])
+                .iter()
+                .any(|value| value["event"]["type"] == "completed")
+        );
         std::fs::remove_dir_all(&hub.root).unwrap();
     }
 }

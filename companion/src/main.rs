@@ -54,9 +54,17 @@ fn run() -> io::Result<()> {
                 .block_on(serve(root, hub))
         }
         Some("pair") if args.len() == 4 || (args.len() == 5 && args[4] == "--open") => {
-            tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(
-                seatline_companion::web::pair(&root,&args[1],&args[2],&args[3],args.len()==5))
-        },
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(seatline_companion::web::pair(
+                    &root,
+                    &args[1],
+                    &args[2],
+                    &args[3],
+                    args.len() == 5,
+                ))
+        }
         Some("connect") if args.len() == 2 => {
             let grant = config::load_grant(&root, &args[1])?;
             tokio::runtime::Builder::new_current_thread()
@@ -97,7 +105,11 @@ fn run() -> io::Result<()> {
                 allow_provider_default: false,
                 extension_origins: origins,
                 web_origins,
-                web_relays: args.iter().skip(3).filter_map(|arg| arg.strip_prefix("--relay=").map(str::to_owned)).collect(),
+                web_relays: args
+                    .iter()
+                    .skip(3)
+                    .filter_map(|arg| arg.strip_prefix("--relay=").map(str::to_owned))
+                    .collect(),
                 cache_title: args
                     .iter()
                     .skip(3)

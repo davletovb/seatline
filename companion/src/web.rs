@@ -1,71 +1,168 @@
 //! Generic outbound connection for an authorized hosted app. App orchestration
 //! and relay hosting live outside Seatline. Only neutral provider frames pass.
+use crate::{PROTOCOL_VERSION, client, config, wire};
+use aes_gcm::{
+    Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit, Payload},
+};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{Value, json};
 use std::io;
 use std::path::Path;
 use std::time::Duration;
-use aes_gcm::{Aes256Gcm, Nonce, aead::{Aead, KeyInit, Payload}};
-use base64::{Engine, engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}};
-use futures_util::{SinkExt, StreamExt};
-use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
-use crate::{PROTOCOL_VERSION, client, config, wire};
 
-fn error(message: &str) -> io::Error { io::Error::other(message) }
-fn aad(direction: &str, sequence: u64) -> Vec<u8> { format!("seatline:1:{direction}:{sequence}").into_bytes() }
+fn error(message: &str) -> io::Error {
+    io::Error::other(message)
+}
+fn aad(direction: &str, sequence: u64) -> Vec<u8> {
+    format!("seatline:1:{direction}:{sequence}").into_bytes()
+}
 
-pub fn encrypt(key: &Aes256Gcm, direction: &str, sequence: u64, value: &Value) -> io::Result<Value> {
-    let mut iv = [0_u8;12]; getrandom::fill(&mut iv).map_err(|_| error("randomness unavailable"))?;
+pub fn encrypt(
+    key: &Aes256Gcm,
+    direction: &str,
+    sequence: u64,
+    value: &Value,
+) -> io::Result<Value> {
+    let mut iv = [0_u8; 12];
+    getrandom::fill(&mut iv).map_err(|_| error("randomness unavailable"))?;
     let data = serde_json::to_vec(value)?;
-    let encrypted = key.encrypt(Nonce::from_slice(&iv),Payload {msg:&data,aad:&aad(direction,sequence)}).map_err(|_| error("encryption failed"))?;
-    Ok(json!({"type":"data","seq":sequence,"iv":STANDARD.encode(iv),"body":STANDARD.encode(encrypted)}))
+    let encrypted = key
+        .encrypt(
+            Nonce::from_slice(&iv),
+            Payload {
+                msg: &data,
+                aad: &aad(direction, sequence),
+            },
+        )
+        .map_err(|_| error("encryption failed"))?;
+    Ok(
+        json!({"type":"data","seq":sequence,"iv":STANDARD.encode(iv),"body":STANDARD.encode(encrypted)}),
+    )
 }
 pub fn decrypt(key: &Aes256Gcm, direction: &str, envelope: &Value) -> io::Result<Value> {
-    let sequence = envelope["seq"].as_u64().filter(|n| *n > 0 && *n <= 9_007_199_254_740_991).ok_or_else(|| error("invalid sequence"))?;
-    let iv = STANDARD.decode(envelope["iv"].as_str().ok_or_else(|| error("missing IV"))?).map_err(|_| error("invalid IV"))?;
-    if iv.len()!=12 { return Err(error("invalid IV")); }
-    let body = STANDARD.decode(envelope["body"].as_str().ok_or_else(|| error("missing ciphertext"))?).map_err(|_| error("invalid ciphertext"))?;
-    let clear = key.decrypt(Nonce::from_slice(&iv),Payload {msg:&body,aad:&aad(direction,sequence)}).map_err(|_| error("invalid encrypted message"))?;
-    if clear.len()>wire::MAX_FRAME { return Err(error("message too large")); }
+    let sequence = envelope["seq"]
+        .as_u64()
+        .filter(|n| *n > 0 && *n <= 9_007_199_254_740_991)
+        .ok_or_else(|| error("invalid sequence"))?;
+    let iv = STANDARD
+        .decode(envelope["iv"].as_str().ok_or_else(|| error("missing IV"))?)
+        .map_err(|_| error("invalid IV"))?;
+    if iv.len() != 12 {
+        return Err(error("invalid IV"));
+    }
+    let body = STANDARD
+        .decode(
+            envelope["body"]
+                .as_str()
+                .ok_or_else(|| error("missing ciphertext"))?,
+        )
+        .map_err(|_| error("invalid ciphertext"))?;
+    let clear = key
+        .decrypt(
+            Nonce::from_slice(&iv),
+            Payload {
+                msg: &body,
+                aad: &aad(direction, sequence),
+            },
+        )
+        .map_err(|_| error("invalid encrypted message"))?;
+    if clear.len() > wire::MAX_FRAME {
+        return Err(error("message too large"));
+    }
     serde_json::from_slice(&clear).map_err(io::Error::other)
 }
 
 pub async fn pair(root: &Path, app: &str, relay: &str, site: &str, launch: bool) -> io::Result<()> {
-    let grant = config::load_grant(root,app)?;
+    let grant = config::load_grant(root, app)?;
     let relay = reqwest::Url::parse(relay).map_err(io::Error::other)?;
     let mut site = reqwest::Url::parse(site).map_err(io::Error::other)?;
-    if relay.scheme()!="https" || site.scheme()!="https" || !relay.username().is_empty() || !site.username().is_empty()
-        || relay.password().is_some() || site.password().is_some() || relay.query().is_some() || relay.fragment().is_some()
-        || !grant.web_origins.contains(&site.origin().ascii_serialization())
-        || !grant.web_relays.contains(&relay.origin().ascii_serialization()) {
-        return Err(error("website and relay must be locally authorized HTTPS origins"));
+    if relay.scheme() != "https"
+        || site.scheme() != "https"
+        || !relay.username().is_empty()
+        || !site.username().is_empty()
+        || relay.password().is_some()
+        || site.password().is_some()
+        || relay.query().is_some()
+        || relay.fragment().is_some()
+        || !grant
+            .web_origins
+            .contains(&site.origin().ascii_serialization())
+        || !grant
+            .web_relays
+            .contains(&relay.origin().ascii_serialization())
+    {
+        return Err(error(
+            "website and relay must be locally authorized HTTPS origins",
+        ));
     }
-    let _lock = config::lock(root,&format!("{app}-web.lock"))?;
-    let http = reqwest::Client::builder().timeout(Duration::from_secs(15)).redirect(reqwest::redirect::Policy::none()).build().map_err(io::Error::other)?;
-    let response = http.post(relay.join("/pair").map_err(io::Error::other)?).json(&json!({"app":app,"origin":site.origin().ascii_serialization()})).send().await.map_err(io::Error::other)?;
-    if !response.status().is_success() { return Err(error("relay refused pairing")); }
+    let _lock = config::lock(root, &format!("{app}-web.lock"))?;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(io::Error::other)?;
+    let response = http
+        .post(relay.join("/pair").map_err(io::Error::other)?)
+        .json(&json!({"app":app,"origin":site.origin().ascii_serialization()}))
+        .send()
+        .await
+        .map_err(io::Error::other)?;
+    if !response.status().is_success() {
+        return Err(error("relay refused pairing"));
+    }
     let bytes = response.bytes().await.map_err(io::Error::other)?;
-    if bytes.len()>4096 { return Err(error("invalid pairing response")); }
-    let pair: Value = serde_json::from_slice(&bytes)?;
-    for name in ["id","helper","browser"] {
-        if !pair[name].as_str().is_some_and(|s| s.len()==64 && s.bytes().all(|b| b.is_ascii_hexdigit())) { return Err(error("invalid pairing response")); }
+    if bytes.len() > 4096 {
+        return Err(error("invalid pairing response"));
     }
-    let mut key_bytes = [0_u8;32]; getrandom::fill(&mut key_bytes).map_err(|_| error("randomness unavailable"))?;
+    let pair: Value = serde_json::from_slice(&bytes)?;
+    for name in ["id", "helper", "browser"] {
+        if !pair[name]
+            .as_str()
+            .is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(error("invalid pairing response"));
+        }
+    }
+    let mut key_bytes = [0_u8; 32];
+    getrandom::fill(&mut key_bytes).map_err(|_| error("randomness unavailable"))?;
     let key = Aes256Gcm::new_from_slice(&key_bytes).map_err(|_| error("invalid key"))?;
-    site.set_fragment(Some(&format!("seatline={}:{}:{}",pair["id"].as_str().unwrap(),pair["browser"].as_str().unwrap(),URL_SAFE_NO_PAD.encode(key_bytes))));
+    site.set_fragment(Some(&format!(
+        "seatline={}:{}:{}",
+        pair["id"].as_str().unwrap(),
+        pair["browser"].as_str().unwrap(),
+        URL_SAFE_NO_PAD.encode(key_bytes)
+    )));
     println!("Open this private pairing link:\n{site}");
-    if launch { open_website(site.as_str())?; }
-    let mut endpoint = relay.join(&format!("/channels/{}/helper",pair["id"].as_str().unwrap())).map_err(io::Error::other)?;
-    endpoint.set_scheme("wss").map_err(|_| error("invalid relay scheme"))?;
-    let (mut sent,mut received) = (0_u64,0_u64);
+    if launch {
+        open_website(site.as_str())?;
+    }
+    let mut endpoint = relay
+        .join(&format!(
+            "/channels/{}/helper",
+            pair["id"].as_str().unwrap()
+        ))
+        .map_err(io::Error::other)?;
+    endpoint
+        .set_scheme("wss")
+        .map_err(|_| error("invalid relay scheme"))?;
+    let (mut sent, mut received) = (0_u64, 0_u64);
     loop {
-        let current = config::load_grant(root,app)?;
-        if !config::same_token(&current.token,&grant.token) { return Err(error("app authorization revoked")); }
+        let current = config::load_grant(root, app)?;
+        if !config::same_token(&current.token, &grant.token) {
+            return Err(error("app authorization revoked"));
+        }
         let result = async {
             let (mut socket,_) = tokio_tungstenite::connect_async(endpoint.as_str()).await.map_err(io::Error::other)?;
             socket.send(Message::Text(json!({"type":"auth","token":pair["helper"]}).to_string().into())).await.map_err(io::Error::other)?;
             let mut broker_writer = None;
             let mut broker_reader: Option<tokio::task::JoinHandle<()>> = None;
-            let (output,mut events) = tokio::sync::mpsc::channel(64);
+            let (output,mut events) = tokio::sync::mpsc::channel::<Value>(64);
             let mut check = tokio::time::interval(Duration::from_secs(1));
             let result = async {
                 loop {
@@ -126,23 +223,34 @@ pub async fn pair(root: &Path, app: &str, relay: &str, site: &str, launch: bool)
             drop(broker_writer);
             result
         }.await;
-        if result.is_err() {tokio::time::sleep(Duration::from_secs(1)).await;}
+        if result.is_err() {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     }
 }
 
 #[allow(clippy::disallowed_methods)] // Opens a locally authorized HTTPS website with a fixed OS launcher; no shell.
 fn open_website(url: &str) -> io::Result<()> {
-    #[cfg(target_os="windows")]
+    #[cfg(target_os = "windows")]
     let mut command = {
-        let path = std::env::var_os("WINDIR").ok_or_else(|| error("Windows directory unavailable"))?;
-        let mut command = std::process::Command::new(std::path::PathBuf::from(path).join("System32/rundll32.exe"));
-        command.arg("url.dll,FileProtocolHandler"); command
+        let path =
+            std::env::var_os("WINDIR").ok_or_else(|| error("Windows directory unavailable"))?;
+        let mut command = std::process::Command::new(
+            std::path::PathBuf::from(path).join("System32/rundll32.exe"),
+        );
+        command.arg("url.dll,FileProtocolHandler");
+        command
     };
-    #[cfg(target_os="macos")]
+    #[cfg(target_os = "macos")]
     let mut command = std::process::Command::new("/usr/bin/open");
-    #[cfg(all(unix,not(target_os="macos")))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     let mut command = std::process::Command::new("/usr/bin/xdg-open");
-    command.arg(url).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()?;
+    command
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
     Ok(())
 }
 
@@ -151,14 +259,22 @@ mod tests {
     use super::*;
     #[test]
     fn encrypted_provider_frames_reject_reflection_tampering_and_wrong_keys() {
-        let key = Aes256Gcm::new_from_slice(&[1;32]).unwrap();
+        let key = Aes256Gcm::new_from_slice(&[1; 32]).unwrap();
         let value = json!({"id":"hello","method":"send","text":"private prompt"});
-        let frame = encrypt(&key,"browser",1,&value).unwrap();
-        assert_eq!(decrypt(&key,"browser",&frame).unwrap(),value);
+        let frame = encrypt(&key, "browser", 1, &value).unwrap();
+        assert_eq!(decrypt(&key, "browser", &frame).unwrap(), value);
         assert!(!frame.to_string().contains("private prompt"));
-        assert!(decrypt(&key,"helper",&frame).is_err());
-        let mut tampered = frame.clone(); tampered["seq"] = json!(2);
-        assert!(decrypt(&key,"browser",&tampered).is_err());
-        assert!(decrypt(&Aes256Gcm::new_from_slice(&[2;32]).unwrap(),"browser",&frame).is_err());
+        assert!(decrypt(&key, "helper", &frame).is_err());
+        let mut tampered = frame.clone();
+        tampered["seq"] = json!(2);
+        assert!(decrypt(&key, "browser", &tampered).is_err());
+        assert!(
+            decrypt(
+                &Aes256Gcm::new_from_slice(&[2; 32]).unwrap(),
+                "browser",
+                &frame
+            )
+            .is_err()
+        );
     }
 }
