@@ -119,7 +119,9 @@ pub async fn pair(root: &Path, app: &str, relay: &str, site: &str, launch: bool)
     let mut response = response;
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(io::Error::other)? {
-        if bytes.len()+chunk.len()>4096 {return Err(error("invalid pairing response"));}
+        if bytes.len() + chunk.len() > 4096 {
+            return Err(error("invalid pairing response"));
+        }
         bytes.extend_from_slice(&chunk);
     }
     if bytes.len() > 4096 {

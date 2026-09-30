@@ -126,16 +126,26 @@ fn run() -> io::Result<()> {
             println!("Authorized {}", grant.app);
             Ok(())
         }
-        Some("register-native") if args.len()>=3 => {
-            let _lock = config::lock(&root,"registry.lock")?;
-            let mut grant = config::load_grant(&root,&args[1])?;
+        Some("register-native") if args.len() >= 3 => {
+            let _lock = config::lock(&root, "registry.lock")?;
+            let mut grant = config::load_grant(&root, &args[1])?;
             let executable = std::fs::canonicalize(&args[2])?;
-            if !executable.is_file() {return Err(io::Error::other("native adapter executable missing"));}
-            grant.native_adapter = Some(NativeAdapter {executable,args:args[3..].to_vec()});
-            config::write_private(&config::app_path(&root,&grant.app)?,&serde_json::to_vec_pretty(&grant)?)?;
-            if seatline_companion::install::executable(&root)?.is_some() {seatline_companion::install::register(&root)?;}
+            if !executable.is_file() {
+                return Err(io::Error::other("native adapter executable missing"));
+            }
+            grant.native_adapter = Some(NativeAdapter {
+                executable,
+                args: args[3..].to_vec(),
+            });
+            config::write_private(
+                &config::app_path(&root, &grant.app)?,
+                &serde_json::to_vec_pretty(&grant)?,
+            )?;
+            if seatline_companion::install::executable(&root)?.is_some() {
+                seatline_companion::install::register(&root)?;
+            }
             Ok(())
-        },
+        }
         Some("revoke") if args.len() == 2 => {
             let _lock = config::lock(&root, "registry.lock")?;
             std::fs::remove_file(config::app_path(&root, &args[1])?)?;
@@ -174,9 +184,7 @@ fn run() -> io::Result<()> {
                 }
             }
             if matches.len() != 1 {
-                return Err(io::Error::other(
-                    "extension has no unique authorized app",
-                ));
+                return Err(io::Error::other("extension has no unique authorized app"));
             }
             let grant = matches.remove(0);
             let Some(adapter) = grant.native_adapter.clone() else {
