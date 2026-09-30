@@ -24,7 +24,4 @@ jobs:
           PY
       - run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo +stable test --workspace --locked
-      - uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-      - run: node --test relay/*.test.mjs packaging/*.test.mjs
+

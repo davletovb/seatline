@@ -4,3 +4,5 @@ pub mod client;
 pub mod config;
 pub mod hub;
 pub mod wire;
+
+pub mod web;

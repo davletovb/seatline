@@ -19,5 +19,14 @@ tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "sync", "
 getrandom = "0.3"
 fs2 = "0.4"
 
+aes-gcm = "0.10"
+base64 = "0.22"
+futures-util = "0.3"
+tokio-tungstenite = { version = "=0.26.2", features = ["rustls-tls-native-roots"] }
+reqwest = { version = "=0.12.12", default-features = false, features = ["json", "rustls-tls"] }
+# Keep URL's transitive Unicode stack compatible with Rust 1.85.
+url = "=2.5.4"
+idna_adapter = "=1.2.0"
+
 [lints]
 workspace = true

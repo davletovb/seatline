@@ -18,6 +18,8 @@ pub struct Grant {
     #[serde(default)]
     pub web_origins: Vec<String>,
     #[serde(default)]
+    pub web_relays: Vec<String>,
+    #[serde(default)]
     pub cache_title: Option<String>,
     #[serde(default)]
     pub worker: Option<Worker>,

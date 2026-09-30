@@ -677,7 +677,7 @@ mod tests {
         let mut hub = Hub {root,connections:BTreeMap::new(),queue:VecDeque::new(),providers:BTreeMap::new(),supervisor:Supervisor::new(),active:BTreeMap::new(),sessions:BTreeMap::new(),cleanup:Vec::new(),next_check:Instant::now()+Duration::from_secs(60)};
         let mut outputs = Vec::new();
         for (id,app) in [(1,"first"),(2,"second")] {
-            let grant = Grant {app:app.into(),token:config::random_token().unwrap(),providers:vec!["codex".into()],allow_provider_default:false,extension_origins:Vec::new(),web_origins:Vec::new(),cache_title:None,worker:None};
+            let grant = Grant {app:app.into(),token:config::random_token().unwrap(),providers:vec!["codex".into()],allow_provider_default:false,extension_origins:Vec::new(),web_origins:Vec::new(),web_relays:Vec::new(),cache_title:None,worker:None};
             config::write_private(&config::app_path(&hub.root,app).unwrap(),&serde_json::to_vec(&grant).unwrap()).unwrap();
             let (output,mut receive) = tokio::sync::mpsc::channel(64);
             hub.command(Command::Open {connection:id,grant,output});
