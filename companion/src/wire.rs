@@ -145,7 +145,11 @@ mod tests {
     fn remote_failures_preserve_rate_limits_and_isolation_without_reflecting_output() {
         for (code, reason, retryable) in [
             (ErrorCode::ProviderFailed, "PROVIDER_RATE_LIMITED", true),
-            (ErrorCode::InvalidRequest, "TOOL_ISOLATION_UNAVAILABLE", false),
+            (
+                ErrorCode::InvalidRequest,
+                "TOOL_ISOLATION_UNAVAILABLE",
+                false,
+            ),
         ] {
             let original = failure(code, reason, retryable);
             let decoded = decode_update(encode_update(&Update::Failed(original))).unwrap();
@@ -153,6 +157,8 @@ mod tests {
         }
         let value = json!({"type":"failed","code":"ProviderFailed","reason":"private provider output","retryable":false});
         let decoded = decode_update(value).unwrap();
-        assert!(matches!(decoded, Update::Failed(error) if error.reason == "REMOTE_PROVIDER_FAILED"));
+        assert!(
+            matches!(decoded, Update::Failed(error) if error.reason == "REMOTE_PROVIDER_FAILED")
+        );
     }
 }
