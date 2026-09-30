@@ -67,6 +67,17 @@ jobs:
       - name: Test release
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --workspace --locked --release
+      - name: Client-only companion build
+        run: |
+          cargo clippy -p seatline-companion --no-default-features --locked -- -D warnings
+          cargo test -p seatline-companion --no-default-features --locked
+      - name: Client-only build links no network or crypto stack
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          if cargo tree -p seatline-companion --no-default-features --edges normal --locked | grep -E 'reqwest|tungstenite|rustls|aes-gcm'; then
+            echo "The client-only companion build must not link the hosted transport's dependencies." >&2
+            exit 1
+          fi
       - name: Build companion
         run: cargo build --release --locked -p seatline-companion
       - uses: actions/upload-artifact@v4
