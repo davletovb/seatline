@@ -142,3 +142,12 @@ removes older ones.
   pipe to the current user needs that user's SID, which cannot be obtained
   without `unsafe` code, so it is not done yet; treat shared Windows machines
   accordingly.
+
+## Using the client from another program
+
+An app that only talks to the local broker (a native host, for example) can
+depend on `seatline-companion` with `default-features = false` and use
+`client::RemoteProvider`. That build has no pairing command and links none of
+the hosted transport's TLS, WebSocket or crypto dependencies; CI checks the
+dependency tree. The `seatline-companion` executable itself needs the default
+`web` feature.

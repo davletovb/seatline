@@ -7,6 +7,38 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# The hosted-app transport: pairing and the encrypted relay connection. A
+# library user that only talks to the local broker (a native host, say) builds
+# with `default-features = false` and links no TLS, WebSocket or crypto stack.
+default = ["web"]
+web = ["dep:aes-gcm", "dep:base64", "dep:futures-util", "dep:tokio-tungstenite", "dep:reqwest"]
+
+[[bin]]
+name = "seatline-companion"
+path = "src/main.rs"
+required-features = ["web"]
+
+[[test]]
+name = "authorize"
+required-features = ["web"]
+
+[[test]]
+name = "busy"
+required-features = ["web"]
+
+[[test]]
+name = "ipc"
+required-features = ["web"]
+
+[[test]]
+name = "lifecycle"
+required-features = ["web"]
+
+[[test]]
+name = "web_v2"
+required-features = ["web"]
+
 [dependencies]
 seatline-core = { path = "../seatline-core" }
 seatline-platform = { path = "../platform" }
@@ -19,11 +51,11 @@ tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "sync", "
 getrandom = "0.3"
 fs2 = "0.4"
 
-aes-gcm = "0.10"
-base64 = "0.22"
-futures-util = "0.3"
-tokio-tungstenite = { version = "=0.26.2", features = ["rustls-tls-native-roots"] }
-reqwest = { version = "=0.12.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+aes-gcm = { version = "0.10", optional = true }
+base64 = { version = "0.22", optional = true }
+futures-util = { version = "0.3", optional = true }
+tokio-tungstenite = { version = "=0.26.2", features = ["rustls-tls-native-roots"], optional = true }
+reqwest = { version = "=0.12.12", default-features = false, features = ["json", "rustls-tls-native-roots"], optional = true }
 # Keep URL's transitive Unicode stack compatible with Rust 1.85.
 url = "=2.5.4"
 idna_adapter = "=1.2.0"
