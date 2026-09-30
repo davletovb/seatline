@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const MAX_MODEL_ID_BYTES: usize = 128;
 pub const MAX_MODEL_LABEL_BYTES: usize = 64;
@@ -34,20 +34,23 @@ pub fn is_session_handle(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     User,
     Assistant,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Message {
     pub role: Role,
     pub text: String,
 }
 
 /// What the provider may do besides answering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolPolicy {
     /// No tools at all. For turns whose text the application doesn't control:
     /// it can only inform the answer, never make the provider act. An adapter
@@ -61,13 +64,15 @@ pub enum ToolPolicy {
     ProviderDefault,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionPolicy {
     Ephemeral,
     Persistent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Turn {
     /// The application's own instructions for the conversation, as opposed to
     /// what its user said. It never goes on a command line, where anyone on the
@@ -184,7 +189,7 @@ fn non_decreasing(previous: Option<u64>, next: Option<u64>) -> bool {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignInClassification {
     Subscription,

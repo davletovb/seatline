@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::turn::SignInClassification;
 
@@ -33,7 +33,7 @@ pub enum ErrorCode {
 /// A normalized source attached to an answer. Provider adapters fill this
 /// provider-neutral shape from their native search results, and the host emits
 /// it through `response.source`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
     pub id: String,
     pub backend_id: String,
@@ -55,7 +55,7 @@ pub struct Failure {
 }
 
 /// Provider availability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Availability {
     Available,
@@ -65,7 +65,7 @@ pub enum Availability {
 }
 
 /// Provider authentication state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Authentication {
     Authenticated,
@@ -93,7 +93,7 @@ impl Serialize for Capability {
 
 /// What an execution mode can do. Whether a product offers page context or
 /// attachments on top of that is the application's policy, not the runtime's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
     pub streaming: Capability,
     pub continuation: Capability,
@@ -110,7 +110,7 @@ pub struct Capabilities {
 
 /// A model an adapter suggests (`status.models`). Suggestions, not the
 /// complete set: a provider may accept other valid model IDs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelOption {
     /// Provider-native model ID. Live discovery can own this value.
     pub id: Cow<'static, str>,
@@ -119,7 +119,7 @@ pub struct ModelOption {
 }
 
 /// One provider's availability, sign-in and capabilities.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderState {
     pub availability: Availability,
     pub authentication: Authentication,
@@ -130,4 +130,15 @@ pub struct ProviderState {
     /// How the provider is signed in, when the adapter can tell. Applications
     /// decide whether to accept it, and whether to show account or billing mode.
     pub sign_in: Option<SignInClassification>,
+}
+
+impl<'de> Deserialize<'de> for Capability {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::Bool(true) => Ok(Self::Supported),
+            serde_json::Value::Bool(false) => Ok(Self::Unsupported),
+            serde_json::Value::String(value) if value == "unknown" => Ok(Self::Unknown),
+            _ => Err(serde::de::Error::custom("invalid capability")),
+        }
+    }
 }
