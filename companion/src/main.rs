@@ -74,48 +74,8 @@ fn run() -> io::Result<()> {
         }
         Some("authorize") if args.len() >= 3 => {
             let _lock = config::lock(&root, "registry.lock")?;
-            config::app_path(&root, &args[1])?;
-            let providers: Vec<_> = args[2].split(',').map(str::to_owned).collect();
-            if providers
-                .iter()
-                .any(|p| !["codex", "claude", "gemini", "grok"].contains(&p.as_str()))
-            {
-                return Err(io::Error::other("unknown provider"));
-            }
-            let origins: Vec<_> = args
-                .iter()
-                .skip(3)
-                .filter(|arg| arg.starts_with("chrome-extension://"))
-                .cloned()
-                .collect();
-            if origins.iter().any(|origin| !valid_origin(origin)) {
-                return Err(io::Error::other("invalid extension origin"));
-            }
             // Explicit local authorization rotates credentials, cancelling old connections.
-            let web_origins = args
-                .iter()
-                .skip(3)
-                .filter(|arg| arg.starts_with("https://"))
-                .cloned()
-                .collect();
-            let grant = Grant {
-                app: args[1].clone(),
-                token: config::random_token()?,
-                providers,
-                allow_provider_default: false,
-                extension_origins: origins,
-                web_origins,
-                web_relays: args
-                    .iter()
-                    .skip(3)
-                    .filter_map(|arg| arg.strip_prefix("--relay=").map(str::to_owned))
-                    .collect(),
-                cache_title: args
-                    .iter()
-                    .skip(3)
-                    .find_map(|arg| arg.strip_prefix("--cache-title=").map(str::to_owned)),
-                native_adapter: None,
-            };
+            let grant = config::grant_from_args(&args[1], &args[2], &args[3..])?;
             config::write_private(
                 &config::app_path(&root, &grant.app)?,
                 &serde_json::to_vec_pretty(&grant)?,
@@ -123,7 +83,19 @@ fn run() -> io::Result<()> {
             if seatline_companion::install::executable(&root)?.is_some() {
                 seatline_companion::install::register(&root)?;
             }
-            println!("Authorized {}", grant.app);
+            println!(
+                "Authorized {} for {}: {} extension origin(s), {} website origin(s), {} relay origin(s); provider-default tools {}.",
+                grant.app,
+                grant.providers.join(","),
+                grant.extension_origins.len(),
+                grant.web_origins.len(),
+                grant.web_relays.len(),
+                if grant.allow_provider_default {
+                    "allowed"
+                } else {
+                    "denied"
+                },
+            );
             Ok(())
         }
         Some("register-native") if args.len() >= 3 => {
@@ -168,7 +140,7 @@ fn run() -> io::Result<()> {
             );
             Ok(())
         }
-        Some(origin) if valid_origin(origin) && args.len() <= 2 => {
+        Some(origin) if config::valid_extension_origin(origin) && args.len() <= 2 => {
             let mut matches = Vec::new();
             for entry in std::fs::read_dir(root.join("apps"))?.flatten() {
                 if let Some(app) = entry.path().file_stem().and_then(|name| name.to_str()) {
@@ -207,16 +179,9 @@ fn run() -> io::Result<()> {
             }
         }
         _ => Err(io::Error::other(
-            "usage: seatline-companion install | serve | connect APP | pair APP RELAY SITE [--open] | authorize APP PROVIDERS [EXTENSION_ORIGIN...] [SITE_ORIGIN...] [--relay=RELAY_ORIGIN] [--cache-title=TITLE] | register-native APP EXECUTABLE [ARGS...] | revoke APP | manifest",
+            "usage: seatline-companion install | serve | connect APP | pair APP RELAY SITE [--open] | authorize APP PROVIDERS [EXTENSION_ORIGIN...] [SITE_ORIGIN...] [--relay=RELAY_ORIGIN] [--cache-title=TITLE] [--allow-provider-default] | register-native APP EXECUTABLE [ARGS...] | revoke APP | manifest",
         )),
     }
-}
-
-fn valid_origin(origin: &str) -> bool {
-    origin
-        .strip_prefix("chrome-extension://")
-        .and_then(|s| s.strip_suffix('/'))
-        .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b)))
 }
 
 async fn serve(root: PathBuf, hub: std::sync::mpsc::SyncSender<hub::Command>) -> io::Result<()> {
