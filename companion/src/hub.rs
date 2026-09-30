@@ -1,6 +1,6 @@
 //! One owner of all provider adapters and exchanges. IO threads can submit
 //! bounded commands but cannot choose namespaces, executables or environments.
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
@@ -28,6 +28,11 @@ const MAX_APP_QUEUE: usize = 8;
 const MAX_RUNNING: usize = 8;
 const MAX_APP_RUNNING: usize = 2;
 const MAX_PROVIDER_RUNNING: usize = 2;
+/// Persistent sessions kept across all apps, and by any one app, so a single
+/// app cannot use up the ledger the others depend on.
+const MAX_SESSIONS: usize = 10_000;
+const MAX_APP_SESSIONS: usize = 2_000;
+const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 
 pub enum Command {
     Open {
@@ -91,6 +96,8 @@ pub fn start(root: PathBuf) -> io::Result<SyncSender<Command>> {
             sessions,
             cleanup: Vec::new(),
             next_check: Instant::now(),
+            next_prune: Instant::now() + PRUNE_INTERVAL,
+            missing_grants: BTreeSet::new(),
         }
         .run(receive);
     });
@@ -107,6 +114,16 @@ struct Hub {
     sessions: BTreeMap<String, Session>,
     cleanup: Vec<PendingCleanup>,
     next_check: Instant,
+    next_prune: Instant,
+    /// Apps whose grant was missing at the previous sweep. Only apps missing at
+    /// two sweeps in a row lose their sessions, so a grant that is being
+    /// rewritten is never mistaken for a revoked one.
+    missing_grants: BTreeSet<String>,
+}
+
+enum LedgerError {
+    Full,
+    Storage,
 }
 
 impl Hub {
@@ -208,7 +225,7 @@ impl Hub {
                     .as_str()
                     .filter(|p| entry.grant.providers.iter().any(|allowed| allowed == p))
                 else {
-                    self.emit(connection, json!({"id":id,"event":wire::encode_update(&Update::Failed(wire::failure(ErrorCode::InvalidRequest,"APP_NOT_AUTHORIZED",false)))}));
+                    self.emit(connection, json!({"id":id,"event":wire::encode_update(&Update::Failed(wire::failure(ErrorCode::InvalidRequest,wire::reason::APP_NOT_AUTHORIZED,false)))}));
                     return;
                 };
                 let request = Request {
@@ -241,7 +258,7 @@ impl Hub {
                         &request,
                         Update::Failed(wire::failure(
                             ErrorCode::ProviderFailed,
-                            "QUEUE_FULL",
+                            wire::reason::QUEUE_FULL,
                             true,
                         )),
                     );
@@ -295,6 +312,77 @@ impl Hub {
         }
     }
 
+    /// The broker token for a provider-native session, creating it on first use.
+    /// A session that already has a token costs nothing: no cap check, no write.
+    fn session_token(
+        &mut self,
+        app: &str,
+        provider: &str,
+        native: String,
+    ) -> Result<String, LedgerError> {
+        if let Some((token, _)) = self.sessions.iter().find(|(_, session)| {
+            session.app == app && session.provider == provider && session.native == native
+        }) {
+            return Ok(token.clone());
+        }
+        let app_sessions = self.sessions.values().filter(|s| s.app == app).count();
+        if self.sessions.len() >= MAX_SESSIONS || app_sessions >= MAX_APP_SESSIONS {
+            return Err(LedgerError::Full);
+        }
+        let token = config::random_token().map_err(|_| LedgerError::Storage)?;
+        self.sessions.insert(
+            token.clone(),
+            Session {
+                app: app.to_owned(),
+                provider: provider.to_owned(),
+                native,
+            },
+        );
+        if self.save_sessions().is_err() {
+            self.sessions.remove(&token);
+            return Err(LedgerError::Storage);
+        }
+        Ok(token)
+    }
+
+    /// Drops the sessions of apps whose grant no longer exists, so revoking an
+    /// app also frees its share of the ledger and its tokens stop being usable.
+    fn prune_revoked_sessions(&mut self) {
+        let apps: BTreeSet<String> = self.sessions.values().map(|s| s.app.clone()).collect();
+        let missing: BTreeSet<String> = apps
+            .into_iter()
+            .filter(|app| {
+                config::app_path(&self.root, app).is_ok_and(|path| {
+                    matches!(std::fs::symlink_metadata(path),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound)
+                })
+            })
+            .collect();
+        let revoked: Vec<String> = missing
+            .iter()
+            .filter(|app| self.missing_grants.contains(*app))
+            .cloned()
+            .collect();
+        self.missing_grants = missing;
+        if revoked.is_empty() {
+            return;
+        }
+        let removed: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| revoked.contains(&session.app))
+            .map(|(token, _)| token.clone())
+            .collect();
+        let removed: Vec<_> = removed
+            .into_iter()
+            .filter_map(|token| self.sessions.remove(&token).map(|session| (token, session)))
+            .collect();
+        if self.save_sessions().is_err() {
+            // Keep them in memory too, and try again at the next sweep.
+            self.sessions.extend(removed);
+        }
+    }
+
     fn save_sessions(&self) -> io::Result<()> {
         config::write_private(
             &self.root.join("sessions.json"),
@@ -315,6 +403,10 @@ impl Hub {
             }
             self.next_check = Instant::now() + Duration::from_secs(1);
         }
+        if Instant::now() >= self.next_prune {
+            self.prune_revoked_sessions();
+            self.next_prune = Instant::now() + PRUNE_INTERVAL;
+        }
         for event in self.supervisor.poll(Duration::from_millis(1)) {
             match event {
                 Event::Update { turn_id, update } => {
@@ -323,38 +415,22 @@ impl Hub {
                     };
                     let update = match update {
                         Update::Session(native) if active.persistent => {
-                            let token = self
-                                .sessions
-                                .iter()
-                                .find(|(_, session)| {
-                                    session.app == active.request.app
-                                        && session.provider == active.request.provider
-                                        && session.native == native
-                                })
-                                .map(|(token, _)| token.clone())
-                                .map(Ok)
-                                .unwrap_or_else(config::random_token);
-                            match token.and_then(|token| {
-                                if self.sessions.len() >= 10000 {
-                                    return Err(io::Error::other("session limit"));
-                                }
-                                self.sessions.insert(
-                                    token.clone(),
-                                    Session {
-                                        app: active.request.app.clone(),
-                                        provider: active.request.provider.clone(),
-                                        native,
-                                    },
-                                );
-                                self.save_sessions()?;
-                                Ok(token)
-                            }) {
+                            let app = active.request.app.clone();
+                            let provider = active.request.provider.clone();
+                            match self.session_token(&app, &provider, native) {
                                 Ok(token) => Update::Session(token),
-                                Err(_) => {
+                                Err(error) => {
                                     self.supervisor.cancel(turn_id);
                                     Update::Failed(wire::failure(
                                         ErrorCode::InternalError,
-                                        "SESSION_STORE_FAILED",
+                                        match error {
+                                            LedgerError::Full => {
+                                                wire::reason::SESSION_LIMIT_REACHED
+                                            }
+                                            LedgerError::Storage => {
+                                                wire::reason::SESSION_STORE_FAILED
+                                            }
+                                        },
                                         false,
                                     ))
                                 }
@@ -379,12 +455,12 @@ impl Hub {
                                 EndReason::Failed(error) => Update::Failed(error),
                                 EndReason::Timeout(_) => Update::Failed(wire::failure(
                                     ErrorCode::ProviderFailed,
-                                    "PROVIDER_TIMEOUT",
+                                    wire::reason::PROVIDER_TIMEOUT,
                                     true,
                                 )),
                                 _ => Update::Failed(wire::failure(
                                     ErrorCode::InternalError,
-                                    "PROVIDER_FAILED",
+                                    wire::reason::PROVIDER_FAILED,
                                     true,
                                 )),
                             },
@@ -420,7 +496,7 @@ impl Hub {
                         } else {
                             Update::Failed(wire::failure(
                                 ErrorCode::InternalError,
-                                "CLEANUP_FAILED",
+                                wire::reason::CLEANUP_FAILED,
                                 true,
                             ))
                         },
@@ -433,7 +509,7 @@ impl Hub {
                         &pending.request,
                         Update::Failed(wire::failure(
                             ErrorCode::InternalError,
-                            "CLEANUP_FAILED",
+                            wire::reason::CLEANUP_FAILED,
                             true,
                         )),
                     );
@@ -510,7 +586,7 @@ impl Hub {
                             &request,
                             Update::Failed(wire::failure(
                                 ErrorCode::InvalidRequest,
-                                "INVALID_REQUEST",
+                                wire::reason::INVALID_REQUEST,
                                 false,
                             )),
                         );
@@ -529,7 +605,7 @@ impl Hub {
                         &request,
                         Update::Failed(wire::failure(
                             ErrorCode::ProviderNotFound,
-                            "EXECUTABLE_NOT_FOUND",
+                            wire::reason::EXECUTABLE_NOT_FOUND,
                             false,
                         )),
                     );
@@ -569,7 +645,7 @@ impl Hub {
                 &request,
                 Update::Failed(wire::failure(
                     ErrorCode::InternalError,
-                    "PROVIDER_FAILED",
+                    wire::reason::PROVIDER_FAILED,
                     true,
                 )),
             ),
@@ -581,7 +657,13 @@ impl Hub {
         request: &Request,
         key: &(String, String),
     ) -> Result<Built, seatline_core::protocol::Failure> {
-        let invalid = || wire::failure(ErrorCode::InvalidRequest, "INVALID_REQUEST", false);
+        let invalid = || {
+            wire::failure(
+                ErrorCode::InvalidRequest,
+                wire::reason::INVALID_REQUEST,
+                false,
+            )
+        };
         let provider = self.providers[key].as_ref();
         let limits = Timeouts {
             max_turn: Duration::from_secs(15 * 60).min(provider.timeouts().max_turn),
@@ -607,14 +689,19 @@ impl Hub {
                         .grant
                         .allow_provider_default
                 {
-                    return Err(invalid());
+                    // The app can act on this: it is refused by local policy, not malformed.
+                    return Err(wire::failure(
+                        ErrorCode::InvalidRequest,
+                        wire::reason::PROVIDER_DEFAULT_TOOLS_DENIED,
+                        false,
+                    ));
                 }
                 if turn.session == SessionPolicy::Persistent
                     && !provider.supports_persistent_session()
                 {
                     return Err(wire::failure(
                         ErrorCode::InvalidRequest,
-                        "PERSISTENT_SESSION_UNSUPPORTED",
+                        wire::reason::PERSISTENT_SESSION_UNSUPPORTED,
                         false,
                     ));
                 }
@@ -626,7 +713,11 @@ impl Hub {
                             session.app == request.app && session.provider == request.provider
                         })
                         .ok_or_else(|| {
-                            wire::failure(ErrorCode::InvalidRequest, "UNKNOWN_SESSION", false)
+                            wire::failure(
+                                ErrorCode::InvalidRequest,
+                                wire::reason::UNKNOWN_SESSION,
+                                false,
+                            )
                         })?;
                     turn.continuation = Some(session.native.clone());
                 }
@@ -718,6 +809,8 @@ mod tests {
             sessions: BTreeMap::new(),
             cleanup: Vec::new(),
             next_check: Instant::now() + Duration::from_secs(60),
+            next_prune: Instant::now() + Duration::from_secs(3600),
+            missing_grants: BTreeSet::new(),
         };
         let mut outputs = Vec::new();
         for (id, app) in [(1, "first"), (2, "second")] {
@@ -839,6 +932,163 @@ mod tests {
                 .iter()
                 .any(|value| value["event"]["type"] == "completed")
         );
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    fn turn_with_tools(tools: &str) -> Value {
+        let mut value = turn(None);
+        value["tools"] = json!(tools);
+        value
+    }
+    fn failure_reason(events: &[Value]) -> Option<String> {
+        events
+            .iter()
+            .find(|value| value["event"]["type"] == "failed")
+            .and_then(|value| value["event"]["reason"].as_str())
+            .map(str::to_owned)
+    }
+    #[test]
+    fn provider_default_tools_are_refused_with_a_visible_reason_until_the_grant_allows_them() {
+        let (mut hub, mut output) = setup();
+        request(&mut hub, 1, "plain", "send", turn_with_tools("none"));
+        request(
+            &mut hub,
+            1,
+            "default",
+            "send",
+            turn_with_tools("provider_default"),
+        );
+        for _ in 0..8 {
+            hub.tick();
+        }
+        let events = drain(&mut output[0]);
+        let outcome = |id: &str| -> Vec<Value> {
+            events
+                .iter()
+                .filter(|value| value["id"] == id)
+                .cloned()
+                .collect()
+        };
+        assert!(
+            outcome("plain")
+                .iter()
+                .any(|value| value["event"]["type"] == "completed")
+        );
+        assert_eq!(
+            failure_reason(&outcome("default")).as_deref(),
+            Some("PROVIDER_DEFAULT_TOOLS_DENIED")
+        );
+
+        // The local administrator opts in; the change takes effect for the next request.
+        let mut grant = config::load_grant(&hub.root, "first").unwrap();
+        grant.allow_provider_default = true;
+        config::write_private(
+            &config::app_path(&hub.root, "first").unwrap(),
+            &serde_json::to_vec(&grant).unwrap(),
+        )
+        .unwrap();
+        // A changed grant closes the old connection; the app reconnects with the new one.
+        request(&mut hub, 1, "after-change", "status", Value::Null);
+        assert!(!hub.connections.contains_key(&1));
+        let (send, mut reopened) = tokio::sync::mpsc::channel(64);
+        hub.command(Command::Open {
+            connection: 3,
+            grant: Box::new(grant),
+            output: send,
+        });
+        assert_eq!(reopened.try_recv().unwrap()["type"], "ready");
+        request(
+            &mut hub,
+            3,
+            "allowed",
+            "send",
+            turn_with_tools("provider_default"),
+        );
+        for _ in 0..8 {
+            hub.tick();
+        }
+        let events = drain(&mut reopened);
+        assert_eq!(failure_reason(&events), None);
+        assert!(
+            events
+                .iter()
+                .any(|value| value["event"]["type"] == "completed")
+        );
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    fn fill_ledger(hub: &mut Hub, app: &str, count: usize) {
+        for index in 0..count {
+            hub.sessions.insert(
+                format!("{app}-{index:060}"),
+                Session {
+                    app: app.into(),
+                    provider: "codex".into(),
+                    native: format!("native-{app}-{index}"),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn one_app_cannot_use_up_the_session_ledger_for_the_others() {
+        let (mut hub, _output) = setup();
+        fill_ledger(&mut hub, "first", MAX_APP_SESSIONS);
+        assert!(matches!(
+            hub.session_token("first", "codex", "brand-new".into()),
+            Err(LedgerError::Full)
+        ));
+        // A session that already has a token keeps working at the cap, without a rewrite.
+        assert!(
+            hub.session_token("first", "codex", "native-first-7".into())
+                .is_ok()
+        );
+        // Other apps still have room.
+        let token = hub
+            .session_token("second", "codex", "another".into())
+            .unwrap_or_else(|_| panic!("second app was locked out"));
+        assert_eq!(hub.sessions[&token].app, "second");
+        // The global cap still applies.
+        let room = MAX_SESSIONS - hub.sessions.len();
+        fill_ledger(&mut hub, "third", room);
+        assert!(matches!(
+            hub.session_token("second", "codex", "over-the-cap".into()),
+            Err(LedgerError::Full)
+        ));
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn revoking_an_app_frees_its_sessions_after_two_sweeps() {
+        let (mut hub, _output) = setup();
+        fill_ledger(&mut hub, "first", 3);
+        fill_ledger(&mut hub, "second", 2);
+        hub.save_sessions().unwrap();
+        std::fs::remove_file(config::app_path(&hub.root, "first").unwrap()).unwrap();
+        hub.prune_revoked_sessions();
+        assert_eq!(hub.sessions.len(), 5, "one sweep is not enough");
+        hub.prune_revoked_sessions();
+        assert_eq!(hub.sessions.len(), 2);
+        assert!(hub.sessions.values().all(|session| session.app == "second"));
+        let saved: BTreeMap<String, Session> =
+            serde_json::from_slice(&std::fs::read(hub.root.join("sessions.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved.len(), 2);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn a_grant_that_reappears_between_sweeps_keeps_its_sessions() {
+        let (mut hub, _output) = setup();
+        fill_ledger(&mut hub, "first", 2);
+        let path = config::app_path(&hub.root, "first").unwrap();
+        let grant = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        hub.prune_revoked_sessions();
+        std::fs::write(&path, grant).unwrap();
+        hub.prune_revoked_sessions();
+        hub.prune_revoked_sessions();
+        assert_eq!(hub.sessions.len(), 2);
         std::fs::remove_dir_all(&hub.root).unwrap();
     }
 }

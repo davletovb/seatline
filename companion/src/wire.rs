@@ -6,6 +6,62 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const MAX_FRAME: usize = 1024 * 1024;
 
+/// Every failure reason the broker or a provider adapter can put on the wire.
+/// The decoder accepts only these, so provider output can never be reflected
+/// back as a reason. Defining the constants and the list together keeps the two
+/// from drifting: a reason the hub emits is always one the client recognises.
+macro_rules! reasons {
+    ($($name:ident),* $(,)?) => {
+        pub mod reason {
+            $(pub const $name: &str = stringify!($name);)*
+        }
+        pub const KNOWN_REASONS: &[&str] = &[$(reason::$name),*];
+    };
+}
+
+reasons!(
+    UNKNOWN_SESSION,
+    LOGIN_REQUIRED,
+    EXECUTABLE_NOT_FOUND,
+    APP_NOT_AUTHORIZED,
+    QUEUE_FULL,
+    PERSISTENT_SESSION_UNSUPPORTED,
+    AUTH_REJECTED,
+    PROVIDER_RATE_LIMITED,
+    PROVIDER_UNAVAILABLE,
+    WORKSPACE_UNAVAILABLE,
+    PROCESS_EXITED,
+    MALFORMED_PROVIDER_OUTPUT,
+    PROVIDER_BOUNDARY_VIOLATION,
+    PROVIDER_AGENT_NOT_USED,
+    PROVIDER_PERMISSIONS_TOO_OPEN,
+    MODEL_NOT_SUPPORTED,
+    TOOL_ISOLATION_UNAVAILABLE,
+    NATIVE_SEARCH_CONFIGURATION_UNSAFE,
+    SEARCH_UNSUPPORTED,
+    MODEL_MISMATCH,
+    WORKSPACE_MISMATCH,
+    TOOLSET_MISMATCH,
+    SKILLS_MISMATCH,
+    MCP_MISMATCH,
+    INVALID_TURN,
+    INVALID_REQUEST,
+    TURN_DEADLINE_EXCEEDED,
+    ADAPTER_PANICKED,
+    SESSION_STORE_UNAVAILABLE,
+    PROVIDER_DEFAULT_TOOLS_DENIED,
+    INVALID_CLEANUP_GROUP,
+    // Raised by the broker itself.
+    PROVIDER_TIMEOUT,
+    PROVIDER_FAILED,
+    SESSION_STORE_FAILED,
+    SESSION_LIMIT_REACHED,
+    CLEANUP_FAILED,
+    // Raised by clients of the broker.
+    COMPANION_DISCONNECTED,
+    REMOTE_PROVIDER_FAILED,
+);
+
 pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Value> {
     let length = reader.read_u32_le().await? as usize;
     if length == 0 || length > MAX_FRAME {
@@ -97,40 +153,10 @@ pub fn decode_update(value: Value) -> io::Result<Update> {
                 _ => ErrorCode::ProviderFailed,
             };
             // Failure reasons remain static and cannot carry provider output.
-            let reason = match value["reason"].as_str() {
-                Some("UNKNOWN_SESSION") => "UNKNOWN_SESSION",
-                Some("LOGIN_REQUIRED") => "LOGIN_REQUIRED",
-                Some("EXECUTABLE_NOT_FOUND") => "EXECUTABLE_NOT_FOUND",
-                Some("APP_NOT_AUTHORIZED") => "APP_NOT_AUTHORIZED",
-                Some("QUEUE_FULL") => "QUEUE_FULL",
-                Some("PERSISTENT_SESSION_UNSUPPORTED") => "PERSISTENT_SESSION_UNSUPPORTED",
-                Some("AUTH_REJECTED") => "AUTH_REJECTED",
-                Some("PROVIDER_RATE_LIMITED") => "PROVIDER_RATE_LIMITED",
-                Some("PROVIDER_UNAVAILABLE") => "PROVIDER_UNAVAILABLE",
-                Some("WORKSPACE_UNAVAILABLE") => "WORKSPACE_UNAVAILABLE",
-                Some("PROCESS_EXITED") => "PROCESS_EXITED",
-                Some("MALFORMED_PROVIDER_OUTPUT") => "MALFORMED_PROVIDER_OUTPUT",
-                Some("PROVIDER_BOUNDARY_VIOLATION") => "PROVIDER_BOUNDARY_VIOLATION",
-                Some("PROVIDER_AGENT_NOT_USED") => "PROVIDER_AGENT_NOT_USED",
-                Some("PROVIDER_PERMISSIONS_TOO_OPEN") => "PROVIDER_PERMISSIONS_TOO_OPEN",
-                Some("MODEL_NOT_SUPPORTED") => "MODEL_NOT_SUPPORTED",
-                Some("TOOL_ISOLATION_UNAVAILABLE") => "TOOL_ISOLATION_UNAVAILABLE",
-                Some("NATIVE_SEARCH_CONFIGURATION_UNSAFE") => "NATIVE_SEARCH_CONFIGURATION_UNSAFE",
-                Some("SEARCH_UNSUPPORTED") => "SEARCH_UNSUPPORTED",
-                Some("MODEL_MISMATCH") => "MODEL_MISMATCH",
-                Some("WORKSPACE_MISMATCH") => "WORKSPACE_MISMATCH",
-                Some("TOOLSET_MISMATCH") => "TOOLSET_MISMATCH",
-                Some("SKILLS_MISMATCH") => "SKILLS_MISMATCH",
-                Some("MCP_MISMATCH") => "MCP_MISMATCH",
-                Some("INVALID_TURN") => "INVALID_TURN",
-                Some("INVALID_REQUEST") => "INVALID_REQUEST",
-                Some("TURN_DEADLINE_EXCEEDED") => "TURN_DEADLINE_EXCEEDED",
-                Some("ADAPTER_PANICKED") => "ADAPTER_PANICKED",
-                Some("SESSION_STORE_UNAVAILABLE") => "SESSION_STORE_UNAVAILABLE",
-                Some("PROVIDER_DEFAULT_TOOLS_DENIED") => "PROVIDER_DEFAULT_TOOLS_DENIED",
-                Some("INVALID_CLEANUP_GROUP") => "INVALID_CLEANUP_GROUP",
-                _ => "REMOTE_PROVIDER_FAILED",
-            };
+            let reason = value["reason"]
+                .as_str()
+                .and_then(|reason| KNOWN_REASONS.iter().copied().find(|known| *known == reason))
+                .unwrap_or(reason::REMOTE_PROVIDER_FAILED);
             Update::Failed(failure(code, reason, value["retryable"] == true))
         }
         _ => return Err(invalid()),
@@ -160,5 +186,31 @@ mod tests {
         assert!(
             matches!(decoded, Update::Failed(error) if error.reason == "REMOTE_PROVIDER_FAILED")
         );
+    }
+
+    #[test]
+    fn every_known_reason_survives_the_wire_unchanged() {
+        for reason in KNOWN_REASONS {
+            let original = failure(ErrorCode::ProviderFailed, reason, true);
+            let decoded = decode_update(encode_update(&Update::Failed(original))).unwrap();
+            assert!(
+                matches!(decoded, Update::Failed(actual) if actual.reason == *reason),
+                "{reason} was rewritten by the decoder"
+            );
+        }
+    }
+
+    #[test]
+    fn reasons_are_unique_screaming_snake_case() {
+        let mut seen = std::collections::BTreeSet::new();
+        for reason in KNOWN_REASONS {
+            assert!(
+                reason
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b == b'_' || b.is_ascii_digit()),
+                "{reason}"
+            );
+            assert!(seen.insert(*reason), "{reason} is listed twice");
+        }
     }
 }
