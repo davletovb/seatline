@@ -207,7 +207,7 @@ fn run() -> io::Result<()> {
             }
         }
         _ => Err(io::Error::other(
-            "usage: seatline-companion serve | connect APP | authorize APP PROVIDERS [EXTENSION_ORIGIN...] | register-native APP EXECUTABLE [ARGS...] | revoke APP | manifest",
+            "usage: seatline-companion install | serve | connect APP | pair APP RELAY SITE [--open] | authorize APP PROVIDERS [EXTENSION_ORIGIN...] [SITE_ORIGIN...] [--relay=RELAY_ORIGIN] [--cache-title=TITLE] | register-native APP EXECUTABLE [ARGS...] | revoke APP | manifest",
         )),
     }
 }
@@ -279,7 +279,7 @@ async fn connection_loop(
     let (output, mut events) = tokio::sync::mpsc::channel(64);
     hub.try_send(hub::Command::Open {
         connection,
-        grant,
+        grant: Box::new(grant),
         output,
     })
     .map_err(|_| io::Error::other("broker busy"))?;

@@ -9,12 +9,34 @@ named pipe. There is no local HTTP listener. App grants control providers, tool
 policy and exact extension/website origins. Sessions, cancellation and cleanup
 are scoped to the authenticated app; all apps share bounded scheduling.
 
-Build with `cargo build --workspace --locked -p seatline-companion`. Install the
-binary once, then approve apps with `authorize APP codex,claude,gemini,grok`.
+Build with `cargo build --release --locked -p seatline-companion`, then run the
+resulting executable with `install` once. CI attaches native binaries for review;
+signed installers and automatic updates are not included in this change. Users
+still install and sign in to their chosen provider CLIs separately.
+
+```sh
+seatline-companion install
+seatline-companion authorize my_app codex,claude https://app.example.com --relay=https://relay.example.com
+seatline-companion pair my_app https://relay.example.com https://app.example.com --open
+```
+
+`pair` opens the hosted app with a private link and keeps an outbound encrypted
+connection active. It never opens a local HTTP port. Keep that process running
+while using the website. Pairing authorization is scoped to the exact approved
+website and relay origins. Treat pairing links as secrets; do not share them.
+
+Extensions use the same installation:
+
+```sh
+seatline-companion authorize my_extension codex chrome-extension://abcdefghijklmnopabcdefghijklmnop/
+```
+
 Chrome uses `com.seatline.host`; the registry selects the app by its exact
 extension origin. Product-specific adapters remain in their own repositories.
 `register-native` is an optional compatibility adapter for a product's existing
 native protocol. Apps using the neutral protocol need no native adapter.
+`revoke APP` removes authorization and closes active requests. Reauthorizing an
+app rotates its credentials and resets any compatibility adapter registration.
 
 Protocol 1 uses four-byte little-endian length-prefixed UTF-8 JSON, max 1 MiB.
 Authenticate with `{version:1,app,token}`; receive `{type:"ready",version:1}`.

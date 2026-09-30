@@ -16,7 +16,7 @@ impl Drop for Broker {
 #[allow(clippy::disallowed_methods)] // Exercise the installed binary, never provider execution.
 fn real_ipc_authentication_singleton_and_revocation() {
     let root =
-        std::env::temp_dir().join(format!("seatline-ipc-{}", config::random_token().unwrap()));
+        std::env::temp_dir().join(format!("seatline-ipc-{}", &config::random_token().unwrap()[..12]));
     let exe = env!("CARGO_BIN_EXE_seatline-companion");
     let authorized = Command::new(exe)
         .env("SEATLINE_DATA_DIR", &root)

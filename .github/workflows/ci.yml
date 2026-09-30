@@ -67,6 +67,15 @@ jobs:
       - name: Test release
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --workspace --locked --release
+      - name: Build companion
+        run: cargo build --release --locked -p seatline-companion
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seatline-companion-${{ matrix.os }}
+          path: |
+            target/release/seatline-companion
+            target/release/seatline-companion.exe
+          if-no-files-found: error
 
   fuzz:
     name: Fuzz smoke

@@ -32,7 +32,7 @@ const MAX_PROVIDER_RUNNING: usize = 2;
 pub enum Command {
     Open {
         connection: u64,
-        grant: Grant,
+        grant: Box<Grant>,
         output: tokio::sync::mpsc::Sender<Value>,
     },
     Request {
@@ -153,7 +153,7 @@ impl Hub {
                     return;
                 }
                 self.connections
-                    .insert(connection, Connection { grant, output });
+                    .insert(connection, Connection { grant: *grant, output });
                 if !self.authorized(connection) {
                     self.close(connection);
                     return;
@@ -735,7 +735,7 @@ mod tests {
             let (output, mut receive) = tokio::sync::mpsc::channel(64);
             hub.command(Command::Open {
                 connection: id,
-                grant,
+                grant: Box::new(grant),
                 output,
             });
             assert_eq!(receive.try_recv().unwrap()["type"], "ready");
