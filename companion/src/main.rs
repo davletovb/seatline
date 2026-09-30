@@ -120,6 +120,7 @@ fn run() -> io::Result<()> {
                 &config::app_path(&root, &grant.app)?,
                 &serde_json::to_vec_pretty(&grant)?,
             )?;
+            if seatline_companion::install::executable(&root)?.is_some() {seatline_companion::install::register(&root)?;}
             println!("Authorized {}", grant.app);
             Ok(())
         }
@@ -145,34 +146,16 @@ fn run() -> io::Result<()> {
         }
         Some("revoke") if args.len() == 2 => {
             let _lock = config::lock(&root, "registry.lock")?;
-            std::fs::remove_file(config::app_path(&root, &args[1])?)
-        }
-        Some("manifest") if args.len() == 1 => {
-            let mut origins = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(root.join("apps")) {
-                for entry in entries.flatten() {
-                    if let Some(app) = entry.path().file_stem().and_then(|name| name.to_str()) {
-                        if let Ok(grant) = config::load_grant(&root, app) {
-                            if grant
-                                .worker
-                                .as_ref()
-                                .is_some_and(|w| w.protocol == "native")
-                            {
-                                origins.extend(grant.extension_origins);
-                            }
-                        }
-                    }
-                }
-            }
-            origins.sort();
-            origins.dedup();
-            println!(
-                "{}",
-                json!({"name":"com.seatline.host","description":"Seatline shared companion",
-                "path":std::env::current_exe()?,"type":"stdio","allowed_origins":origins})
-            );
+            std::fs::remove_file(config::app_path(&root, &args[1])?)?;
+            if seatline_companion::install::executable(&root)?.is_some() {seatline_companion::install::register(&root)?;}
             Ok(())
         }
+        Some("install") if args.len()==1 => {
+            println!("Seatline installed at {}",seatline_companion::install::install(&root)?.display()); Ok(())
+        },
+        Some("manifest") if args.len()==1 => {
+            println!("{}",seatline_companion::install::manifest(&root,&std::env::current_exe()?)?); Ok(())
+        },
         Some(origin) if valid_origin(origin) && args.len() <= 2 => {
             let mut matches = Vec::new();
             for entry in std::fs::read_dir(root.join("apps"))?.flatten() {
@@ -183,11 +166,7 @@ fn run() -> io::Result<()> {
                             .iter()
                             .any(|allowed| allowed == origin)
                         {
-                            if let Some(worker) =
-                                grant.worker.filter(|worker| worker.protocol == "native")
-                            {
-                                matches.push(worker);
-                            }
+                            if grant.worker.as_ref().is_none_or(|worker| worker.protocol=="native") {matches.push(grant);}
                         }
                     }
                 }
@@ -197,7 +176,10 @@ fn run() -> io::Result<()> {
                     "extension has no unique authorized worker",
                 ));
             }
-            let worker = matches.remove(0);
+            let grant = matches.remove(0);
+            let Some(worker) = grant.worker.clone() else {
+                return tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(bridge(root,grant));
+            };
             let status = Command::new(worker.executable)
                 .args(worker.args)
                 .args(&args)

@@ -35,6 +35,7 @@ pub async fn connect(root: &Path) -> io::Result<Stream> {
     }
     let executable = std::env::var_os("SEATLINE_COMPANION_BIN")
         .map(PathBuf::from)
+        .or(crate::install::executable(root)?)
         .unwrap_or(std::env::current_exe()?.with_file_name(if cfg!(windows) {
             "seatline-companion.exe"
         } else {

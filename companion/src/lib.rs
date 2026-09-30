@@ -6,3 +6,5 @@ pub mod hub;
 pub mod wire;
 
 pub mod web;
+
+pub mod install;
