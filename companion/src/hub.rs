@@ -152,8 +152,13 @@ impl Hub {
                 if self.connections.len() >= MAX_CONNECTIONS {
                     return;
                 }
-                self.connections
-                    .insert(connection, Connection { grant: *grant, output });
+                self.connections.insert(
+                    connection,
+                    Connection {
+                        grant: *grant,
+                        output,
+                    },
+                );
                 if !self.authorized(connection) {
                     self.close(connection);
                     return;
