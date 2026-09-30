@@ -237,6 +237,15 @@ async fn serve(root: PathBuf, hub: std::sync::mpsc::SyncSender<hub::Command>) ->
         };
         last_activity.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
         let Ok(permit) = permits.clone().try_acquire_owned() else {
+            // Say why instead of just hanging up, so the client can back off and retry.
+            tokio::spawn(async move {
+                let mut stream = stream;
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    wire::write_frame(&mut stream, &json!({"type":"busy"})),
+                )
+                .await;
+            });
             continue;
         };
         let (root, hub, connection, last_activity) = (

@@ -1,0 +1,51 @@
+{
+  "description": "Web transport protocol 2 test vectors. key is 32 bytes 00..1f; every case gives the exact AES-256-GCM inputs (iv, aad, plaintext bytes) and the expected body = base64(ciphertext || 16-byte tag). Generated with Node's OpenSSL, independently of the Rust implementation. An implementation must reproduce every body and decrypt it back. Nonces are 16 bytes in lowercase hex; hello frames carry envelope seq 0.",
+  "protocol": 2,
+  "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "cases": [
+    {
+      "name": "browser hello",
+      "kind": "hello",
+      "direction": "browser",
+      "seq": 0,
+      "iv": "EBESExQVFhcYGRob",
+      "aad": "seatline:2:hello:browser",
+      "plaintext": "{\"echo\":null,\"nonce\":\"11111111111111111111111111111111\",\"type\":\"hello\"}",
+      "body": "Btz9dSGmGImkAGRxI1sHPLkzKywh4GaA1sjTVm9lZeph2GYyxJdf3k8Ho2C7qSIqIo12QtK6e96eakNBlrWeSW2dU08mnHai5gt6ZDwHZBddm3pGnKdT"
+    },
+    {
+      "name": "helper hello answering the browser's",
+      "kind": "hello",
+      "direction": "helper",
+      "seq": 0,
+      "iv": "ICEiIyQlJicoKSor",
+      "aad": "seatline:2:hello:helper",
+      "plaintext": "{\"echo\":\"11111111111111111111111111111111\",\"nonce\":\"22222222222222222222222222222222\",\"type\":\"hello\"}",
+      "body": "qRjDEwT3ODQ4TXP/8CnFyOF43a22sVLfXcddI3i7bzhEv9Q1vxQE6yXfQrA2ZnGrhwjWrKgOH1P8UE0vfoA47+oU/zmkpdekuVjbFYlvC1PnpQE2ldekarY/pwggPva5bjhBdLV22fGxFZh82jlLUin3mr0v"
+    },
+    {
+      "name": "first browser request",
+      "kind": "data",
+      "direction": "browser",
+      "helper_nonce": "22222222222222222222222222222222",
+      "browser_nonce": "11111111111111111111111111111111",
+      "seq": 1,
+      "iv": "MDEyMzQ1Njc4OTo7",
+      "aad": "seatline:2:browser:22222222222222222222222222222222:11111111111111111111111111111111:1",
+      "plaintext": "{\"id\":\"status\",\"method\":\"status\",\"params\":null,\"provider\":\"codex\"}",
+      "body": "yBdYpMtVaHBeUvqZYbsSSvFCOz+sWmY/Bc0lLZzGDRxvQnwFXqH21IwefDwWqv8P3j4yP0LVoFWPekM3Lyw0jHIbzE1iyaqDpnRMjoNCeHgNvw=="
+    },
+    {
+      "name": "second helper event",
+      "kind": "data",
+      "direction": "helper",
+      "helper_nonce": "22222222222222222222222222222222",
+      "browser_nonce": "11111111111111111111111111111111",
+      "seq": 2,
+      "iv": "QEFCQ0RFRkdISUpL",
+      "aad": "seatline:2:helper:22222222222222222222222222222222:11111111111111111111111111111111:2",
+      "plaintext": "{\"event\":{\"text\":\"hello é\",\"type\":\"delta\"},\"id\":\"status\"}",
+      "body": "mZvLVUNS8yH3vzVC/hxneUPkOjnbWWADtO5sybVnlKv9KsmOutyzIEDWdkOzZLv48VPZRVKzl3qjZ/hsdJakzBc4wzegbfnAeNs="
+    }
+  ]
+}

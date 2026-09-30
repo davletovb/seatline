@@ -1,14 +1,8 @@
 //! Generic outbound connection for an authorized hosted app. App orchestration
 //! and relay hosting live outside Seatline. Only neutral provider frames pass.
-use crate::{PROTOCOL_VERSION, client, config, wire};
-use aes_gcm::{
-    Aes256Gcm, Nonce,
-    aead::{Aead, KeyInit, Payload},
-};
-use base64::{
-    Engine,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
+use crate::{PROTOCOL_VERSION, client, config, secure, wire};
+use aes_gcm::{Aes256Gcm, aead::KeyInit};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::convert::Infallible;
@@ -20,65 +14,6 @@ use tokio_tungstenite::tungstenite::{self, Message};
 fn error(message: &str) -> io::Error {
     io::Error::other(message)
 }
-fn aad(direction: &str, sequence: u64) -> Vec<u8> {
-    format!("seatline:1:{direction}:{sequence}").into_bytes()
-}
-
-pub fn encrypt(
-    key: &Aes256Gcm,
-    direction: &str,
-    sequence: u64,
-    value: &Value,
-) -> io::Result<Value> {
-    let mut iv = [0_u8; 12];
-    getrandom::fill(&mut iv).map_err(|_| error("randomness unavailable"))?;
-    let data = serde_json::to_vec(value)?;
-    let encrypted = key
-        .encrypt(
-            Nonce::from_slice(&iv),
-            Payload {
-                msg: &data,
-                aad: &aad(direction, sequence),
-            },
-        )
-        .map_err(|_| error("encryption failed"))?;
-    Ok(
-        json!({"type":"data","seq":sequence,"iv":STANDARD.encode(iv),"body":STANDARD.encode(encrypted)}),
-    )
-}
-pub fn decrypt(key: &Aes256Gcm, direction: &str, envelope: &Value) -> io::Result<Value> {
-    let sequence = envelope["seq"]
-        .as_u64()
-        .filter(|n| *n > 0 && *n <= 9_007_199_254_740_991)
-        .ok_or_else(|| error("invalid sequence"))?;
-    let iv = STANDARD
-        .decode(envelope["iv"].as_str().ok_or_else(|| error("missing IV"))?)
-        .map_err(|_| error("invalid IV"))?;
-    if iv.len() != 12 {
-        return Err(error("invalid IV"));
-    }
-    let body = STANDARD
-        .decode(
-            envelope["body"]
-                .as_str()
-                .ok_or_else(|| error("missing ciphertext"))?,
-        )
-        .map_err(|_| error("invalid ciphertext"))?;
-    let clear = key
-        .decrypt(
-            Nonce::from_slice(&iv),
-            Payload {
-                msg: &body,
-                aad: &aad(direction, sequence),
-            },
-        )
-        .map_err(|_| error("invalid encrypted message"))?;
-    if clear.len() > wire::MAX_FRAME {
-        return Err(error("message too large"));
-    }
-    serde_json::from_slice(&clear).map_err(io::Error::other)
-}
-
 /// How long the helper waits, retries and probes the relay.
 #[derive(Clone, Copy)]
 pub struct Timing {
@@ -246,24 +181,10 @@ pub async fn run_channel(
     key: &Aes256Gcm,
     timing: Timing,
 ) -> io::Result<()> {
-    // Counters outlive connections: the browser keeps its own across reconnects.
-    let (mut sent, mut received) = (0_u64, 0_u64);
     let mut delay = timing.backoff_start;
     loop {
         let started = Instant::now();
-        let end = match connection(
-            root,
-            app,
-            token,
-            endpoint,
-            helper,
-            key,
-            timing,
-            &mut sent,
-            &mut received,
-        )
-        .await
-        {
+        let end = match connection(root, app, token, endpoint, helper, key, timing).await {
             Ok(never) => match never {},
             Err(end) => end,
         };
@@ -299,7 +220,22 @@ fn grant_ended(root: &Path, app: &str, token: &str) -> Option<End> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+type BrokerWriter = tokio::io::WriteHalf<interprocess::local_socket::tokio::Stream>;
+
+/// Drops the helper's connection to the broker, which cancels whatever the
+/// browser had running, and discards events that were already on their way.
+fn release_broker(
+    writer: &mut Option<BrokerWriter>,
+    reader: &mut Option<tokio::task::JoinHandle<()>>,
+    events: &mut tokio::sync::mpsc::Receiver<Value>,
+) {
+    *writer = None;
+    if let Some(reader) = reader.take() {
+        reader.abort();
+    }
+    while events.try_recv().is_ok() {}
+}
+
 async fn connection(
     root: &Path,
     app: &str,
@@ -308,8 +244,6 @@ async fn connection(
     helper: &str,
     key: &Aes256Gcm,
     timing: Timing,
-    sent: &mut u64,
-    received: &mut u64,
 ) -> Result<Infallible, End> {
     let connecting =
         tokio::time::timeout(timing.connect, tokio_tungstenite::connect_async(endpoint));
@@ -334,13 +268,17 @@ async fn connection(
         ))
         .await
         .map_err(io::Error::other)?;
-    let mut broker_writer = None;
+    let mut broker_writer: Option<BrokerWriter> = None;
     let mut broker_reader: Option<tokio::task::JoinHandle<()>> = None;
     let (output, mut events) = tokio::sync::mpsc::channel::<Value>(64);
     let mut check = tokio::time::interval(Duration::from_secs(1));
     let mut probe = tokio::time::interval(timing.ping_every);
     probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (mut authenticated, mut last_seen) = (false, Instant::now());
+    // Set by the browser's hello. Sequence numbers count from 1 within it, so
+    // nothing carries over from an earlier connection of either side.
+    let mut epoch: Option<secure::Epoch> = None;
+    let (mut sent, mut received) = (0_u64, 0_u64);
     let result: Result<Infallible, End> = async {
         loop {
             tokio::select! {
@@ -360,8 +298,10 @@ async fn connection(
                 event = events.recv(), if broker_writer.is_some() => {
                     let event = event.ok_or_else(|| error("broker disconnected"))?;
                     if event.is_null() { return Err(End::retry("broker disconnected")); }
-                    *sent = sent.checked_add(1).ok_or_else(|| End::fatal("sequence exhausted"))?;
-                    socket.send(Message::Text(encrypt(key,"helper",*sent,&event)?.to_string().into())).await.map_err(io::Error::other)?;
+                    // Events that outlived their epoch are dropped, never sent under another.
+                    let Some(current) = epoch.as_ref() else { continue };
+                    sent = sent.checked_add(1).ok_or_else(|| End::fatal("sequence exhausted"))?;
+                    socket.send(Message::Text(secure::seal_frame(key,"helper",current,sent,&event)?.to_string().into())).await.map_err(io::Error::other)?;
                 },
                 message = socket.next() => {
                     let Some(message) = message else { return Err(End::retry("relay disconnected")); };
@@ -386,13 +326,25 @@ async fn connection(
                             if kind == "ready" { authenticated = true; }
                             let connected = value["peer"]==true || value["connected"]==true;
                             if !connected {
-                                broker_writer = None;
-                                if let Some(reader) = broker_reader.take() {reader.abort();}
-                                while events.try_recv().is_ok() {}
-                            } else if broker_writer.is_none() {
+                                epoch = None;
+                                release_broker(&mut broker_writer, &mut broker_reader, &mut events);
+                            }
+                            // A peer that has just connected opens the handshake itself.
+                        },
+                        Some("data") => {
+                            let sequence = secure::envelope_sequence(&value)?;
+                            if sequence == 0 {
+                                // A new epoch: the browser's nonce plus a fresh one of ours. Whatever the
+                                // previous epoch had running is cancelled, so nothing crosses over.
+                                let (browser_nonce, echo) = secure::open_hello(key, "browser", &value)?;
+                                if echo.is_some() { return Err(End::retry("the browser answered a hello instead of starting one")); }
+                                release_broker(&mut broker_writer, &mut broker_reader, &mut events);
+                                let current = secure::Epoch { helper: secure::fresh_nonce()?, browser: browser_nonce };
+                                (epoch, sent, received) = (Some(current), 0, 0);
                                 let mut stream = client::connect(root).await?;
                                 wire::write_frame(&mut stream,&json!({"version":PROTOCOL_VERSION,"app":app,"token":token})).await?;
                                 let hello = wire::read_frame(&mut stream).await?;
+                                if hello["type"]=="busy" {return Err(End::retry("broker is at its connection limit"));}
                                 if hello["type"]!="ready" {return Err(End::retry("broker refused app"));}
                                 let (mut reader,writer) = tokio::io::split(stream);
                                 broker_writer = Some(writer);
@@ -403,14 +355,21 @@ async fn connection(
                                         Err(_) => {let _ = output.send(Value::Null).await;break;},
                                     }}
                                 }));
+                                let reply = secure::seal_hello(key, "helper", &current.helper, Some(&current.browser))?;
+                                socket.send(Message::Text(reply.to_string().into())).await.map_err(io::Error::other)?;
+                            } else {
+                                let Some(current) = epoch.as_ref() else {
+                                    return Err(End::retry("data arrived before a handshake; the peer may speak an older protocol"));
+                                };
+                                // Exactly the next frame. A gap is a lost frame, a repeat is a replay:
+                                // either way the connection ends and the next handshake starts clean.
+                                if sequence != received + 1 {
+                                    return Err(End::retry(format!("frame {sequence} arrived after {received}: a frame was lost, repeated or replayed")));
+                                }
+                                let request = secure::open_frame(key, "browser", current, &value)?;
+                                received = sequence;
+                                if let Some(writer) = &mut broker_writer {wire::write_frame(writer,&request).await?;}
                             }
-                        },
-                        Some("data") => {
-                            let sequence = value["seq"].as_u64().ok_or_else(|| End::retry("invalid sequence"))?;
-                            if sequence<=*received {continue;}
-                            let request = decrypt(key,"browser",&value)?;
-                            *received = sequence;
-                            if let Some(writer) = &mut broker_writer {wire::write_frame(writer,&request).await?;}
                         },
                         Some("pong") => {},
                         _ => return Err(End::retry("invalid relay frame")),
@@ -493,27 +452,6 @@ fn open_website(page: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn encrypted_provider_frames_reject_reflection_tampering_and_wrong_keys() {
-        let key = Aes256Gcm::new_from_slice(&[1; 32]).unwrap();
-        let value = json!({"id":"hello","method":"send","text":"private prompt"});
-        let frame = encrypt(&key, "browser", 1, &value).unwrap();
-        assert_eq!(decrypt(&key, "browser", &frame).unwrap(), value);
-        assert!(!frame.to_string().contains("private prompt"));
-        assert!(decrypt(&key, "helper", &frame).is_err());
-        let mut tampered = frame.clone();
-        tampered["seq"] = json!(2);
-        assert!(decrypt(&key, "browser", &tampered).is_err());
-        assert!(
-            decrypt(
-                &Aes256Gcm::new_from_slice(&[2; 32]).unwrap(),
-                "browser",
-                &frame
-            )
-            .is_err()
-        );
-    }
-
     use std::future::Future;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

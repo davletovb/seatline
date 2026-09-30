@@ -186,6 +186,14 @@ impl RemoteExchange {
                     )
                     .await?;
                     let hello = wire::read_frame(&mut stream).await?;
+                    if hello["type"] == "busy" {
+                        let _ = send.send(Update::Failed(wire::failure(
+                            ErrorCode::ProviderFailed,
+                            wire::reason::QUEUE_FULL,
+                            true,
+                        )));
+                        return Ok(());
+                    }
                     if hello["type"] != "ready" {
                         return Err(io::Error::other("authorization refused"));
                     }
