@@ -20,10 +20,32 @@ seatline-companion authorize my_app codex,claude https://app.example.com --relay
 seatline-companion pair my_app https://relay.example.com https://app.example.com --open
 ```
 
+`authorize` accepts extension origins (`chrome-extension://<32 letters a-p>/`),
+bare `https://` website origins, and the options `--relay=ORIGIN`,
+`--cache-title=TITLE` and `--allow-provider-default`. Anything else, including
+an `http://` origin or an origin with a path, is an error, so a typo cannot
+silently authorize nothing. Reauthorizing replaces the app's whole grant, so
+repeat every origin and option you still want.
+
+Apps may not ask for the provider's own tool configuration (`tools:
+"provider_default"`) unless `--allow-provider-default` is given; without it the
+request fails with `PROVIDER_DEFAULT_TOOLS_DENIED`. Grant it only to apps whose
+own prompts you trust, since the provider's usual tools then apply.
+
 `pair` opens the hosted app with a private link and keeps an outbound encrypted
 connection active. It never opens a local HTTP port. Keep that process running
 while using the website. Pairing authorization is scoped to the exact approved
 website and relay origins. Treat pairing links as secrets; do not share them.
+`--open` hands the link to your browser through a private one-shot page that is
+removed after a minute, so the link never appears in a process list.
+
+The helper reconnects with growing delays (1 s up to 60 s) and stops when the
+pairing cannot work any more: the relay refuses it (HTTP 401/403/404/410 or a
+1008 close, as for an expired pairing), or the app is revoked or reauthorized.
+It sends `{"type":"ping"}` every 25 s once authenticated and treats 75 s
+without any frame as a dead link, so a relay must answer `ping` with
+`{"type":"pong"}`. The relay cannot read frames, but it can delay or drop them;
+sequence numbers reject replays and reordering, not omissions.
 
 Extensions use the same installation:
 
@@ -35,8 +57,10 @@ Chrome uses `com.seatline.host`; the registry selects the app by its exact
 extension origin. Product-specific adapters remain in their own repositories.
 `register-native` is an optional compatibility adapter for a product's existing
 native protocol. Apps using the neutral protocol need no native adapter.
-`revoke APP` removes authorization and closes active requests. Reauthorizing an
-app rotates its credentials and resets any compatibility adapter registration.
+`revoke APP` removes authorization, closes active requests, and frees the app's
+stored sessions. Reauthorizing an app rotates its credentials and resets any
+compatibility adapter registration; a running `pair` for it stops and asks you
+to pair again.
 
 Protocol 1 uses four-byte little-endian length-prefixed UTF-8 JSON, max 1 MiB.
 Authenticate with `{version:1,app,token}`; receive `{type:"ready",version:1}`.
@@ -46,10 +70,19 @@ Methods: `status`, `send` (neutral Turn), `forget` (`sessions`), `cleanup`
 session tokens replace raw provider handles and cannot cross app/provider scope.
 
 The limits are 8 running operations, 2 per app and 2 per provider, 64 queued
-requests (8 per app), 32 connections, and 15 minutes per turn. Output is bounded;
-slow/disconnected clients are cancelled. Revoking a grant cancels its connected
+requests (8 per app), 32 connections, 2,000 stored sessions per app (10,000 in
+all), and 15 minutes per turn. Output is bounded; slow/disconnected clients are
+cancelled. Revoking a grant cancels its connected
 requests within one second. A process running as the same user can read local
 app credentials; app isolation does not sandbox malicious local code.
 
 Provider adapters still launch one process per turn. This change centralizes
 installation and execution; it does not change warming or provider sign-in.
+
+## Lifecycle and upgrades
+
+Clients start the broker on demand from the installed binary. It exits after ten
+minutes with no connections (`SEATLINE_BROKER_IDLE_SECS` changes this; `0` keeps
+it running), so after running `install` again the next start uses the new
+version. `install` keeps the new copy and the one registered before it and
+removes older ones.
