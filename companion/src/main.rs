@@ -93,7 +93,10 @@ fn run() -> io::Result<()> {
                 allow_provider_default: false,
                 extension_origins: origins,
                 web_origins,
-                cache_title: args.iter().skip(3).find_map(|arg| arg.strip_prefix("--cache-title=").map(str::to_owned)),
+                cache_title: args
+                    .iter()
+                    .skip(3)
+                    .find_map(|arg| arg.strip_prefix("--cache-title=").map(str::to_owned)),
                 worker: None,
             };
             config::write_private(
