@@ -1,0 +1,290 @@
+//! One simulated application: a process that runs its requests against the
+//! broker the way an app's client does, one authenticated connection per
+//! request, and times each from its own side.
+//!
+//! It is a process of its own so that a cold start goes through the shipped
+//! client's `connect`, which starts the broker when none is running, and so
+//! that several applications compete the way separate programs do.
+
+use std::io::{self, BufRead, Write};
+use std::time::{Duration, Instant};
+
+use seatline_companion::client::RemoteProvider;
+use seatline_companion::config::{self, Grant};
+use seatline_companion::{PROTOCOL_VERSION, client, wire};
+use seatline_core::exchange::{Exchange, Scripted, Timeouts, Update};
+use seatline_core::protocol::{Capabilities, Capability};
+use seatline_core::turn::{Message, Role, SessionPolicy, ToolPolicy, Turn};
+use seatline_providers::Provider;
+use serde_json::{Value, json};
+
+use crate::workload::{Method, Req, Sample, Spec, Via};
+
+/// How long one request may take, from connecting to its end.
+const REQUEST_LIMIT: Duration = Duration::from_secs(300);
+
+/// Runs `spec`: says it is ready, waits to be told to start, then makes every
+/// request in turn and prints a [`Sample`] for each.
+pub fn run(spec: Spec) -> io::Result<()> {
+    let grant = config::load_grant(&spec.root, &spec.app)?;
+    let mut out = io::stdout().lock();
+    writeln!(out, "{}", json!({"ready": true}))?;
+    out.flush()?;
+    let mut go = String::new();
+    io::stdin().lock().read_line(&mut go)?;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let mut handle: Option<String> = None;
+    for req in &spec.requests {
+        if req.gap_ms > 0 {
+            std::thread::sleep(Duration::from_millis(req.gap_ms));
+        }
+        let sample = match req.via {
+            Via::Wire => runtime.block_on(request(&spec, &grant, req, &mut handle)),
+            Via::Adapter => through_adapter(&spec, req, &mut handle),
+        };
+        writeln!(out, "{}", serde_json::to_string(&sample)?)?;
+        out.flush()?;
+    }
+    writeln!(out, "{}", json!({"done": true}))?;
+    out.flush()
+}
+
+fn micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn turn(req: &Req, handle: &Option<String>) -> Turn {
+    Turn {
+        system: None,
+        messages: vec![Message {
+            role: Role::User,
+            text: req.prompt.clone(),
+        }],
+        model: None,
+        tools: ToolPolicy::None,
+        session: if req.persistent {
+            SessionPolicy::Persistent
+        } else {
+            SessionPolicy::Ephemeral
+        },
+        continuation: if req.resume { handle.clone() } else { None },
+        cleanup_group: None,
+        check_sign_in: req.check_sign_in,
+    }
+}
+
+fn blank(spec: &Spec, req: &Req) -> Sample {
+    Sample {
+        id: req.id.clone(),
+        app: spec.app.clone(),
+        method: req.method,
+        measured: req.measured,
+        via: req.via,
+        outcome: "error".to_owned(),
+        detail: None,
+        connect_us: None,
+        handshake_us: None,
+        prepare_us: None,
+        submit_to_launched_us: None,
+        submit_to_started_us: None,
+        submit_to_first_text_us: None,
+        submit_to_complete_us: None,
+        total_us: 0,
+        broker: None,
+    }
+}
+
+/// What the shipped client needs to know about a provider: not how to run it.
+struct Metadata(String);
+
+impl Provider for Metadata {
+    fn id(&self) -> &str {
+        &self.0
+    }
+
+    fn timeouts(&self) -> Timeouts {
+        Timeouts {
+            start: REQUEST_LIMIT,
+            idle: REQUEST_LIMIT,
+            max_turn: REQUEST_LIMIT,
+            stop_grace: Duration::from_secs(2),
+        }
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        let supported = Capability::Supported;
+        Capabilities {
+            streaming: supported,
+            continuation: supported,
+            web_search: supported,
+            model_selection: supported,
+            cancellation: supported,
+            tool_isolation: supported,
+        }
+    }
+
+    fn supports_persistent_session(&self) -> bool {
+        true
+    }
+
+    fn status(&self) -> Box<dyn Exchange> {
+        Box::new(Scripted::new([]))
+    }
+
+    fn send(&self, _turn: Turn) -> Box<dyn Exchange> {
+        Box::new(Scripted::new([]))
+    }
+}
+
+/// The request as an application's adapter makes it, through `RemoteProvider`.
+/// The exchange it returns starts a thread, a runtime and a connection of its
+/// own, so none of that can be timed apart: only what shows from outside.
+fn through_adapter(spec: &Spec, req: &Req, handle: &mut Option<String>) -> Sample {
+    let mut sample = blank(spec, req);
+    let provider = RemoteProvider::new(&spec.app, &Metadata(spec.provider.clone()));
+    let begun = Instant::now();
+    let mut exchange = match req.method {
+        Method::Send => provider.send(turn(req, handle)),
+        Method::Status => provider.status(),
+    };
+    let deadline = begun + REQUEST_LIMIT;
+    loop {
+        let Some(update) = exchange.next(deadline) else {
+            sample.detail = Some("timeout".to_owned());
+            break;
+        };
+        let since = micros(begun.elapsed());
+        match update {
+            Update::Launched => {
+                sample.submit_to_launched_us.get_or_insert(since);
+            }
+            Update::Started => {
+                sample.submit_to_started_us.get_or_insert(since);
+            }
+            Update::Delta(text) if !text.is_empty() => {
+                sample.submit_to_first_text_us.get_or_insert(since);
+            }
+            Update::Session(session) => *handle = Some(session),
+            Update::Completed => {
+                sample.submit_to_complete_us = Some(since);
+                sample.outcome = "completed".to_owned();
+                break;
+            }
+            Update::Stopped => {
+                sample.submit_to_complete_us = Some(since);
+                sample.outcome = "stopped".to_owned();
+                break;
+            }
+            Update::Failed(failure) => {
+                sample.submit_to_complete_us = Some(since);
+                sample.outcome = "failed".to_owned();
+                sample.detail = Some(failure.reason.to_owned());
+                break;
+            }
+            _ => {}
+        }
+    }
+    sample.total_us = micros(begun.elapsed());
+    sample
+}
+
+async fn request(spec: &Spec, grant: &Grant, req: &Req, handle: &mut Option<String>) -> Sample {
+    let mut sample = blank(spec, req);
+    let begun = Instant::now();
+    let result = tokio::time::timeout(
+        REQUEST_LIMIT,
+        exchange(spec, grant, req, handle, &mut sample),
+    )
+    .await;
+    sample.total_us = micros(begun.elapsed());
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => sample.detail = Some(format!("io:{:?}", error.kind())),
+        Err(_) => sample.detail = Some("timeout".to_owned()),
+    }
+    sample
+}
+
+/// One connection, one request, read to its end. Fills `sample` as it goes, so
+/// that what was seen before a break is kept.
+async fn exchange(
+    spec: &Spec,
+    grant: &Grant,
+    req: &Req,
+    handle: &mut Option<String>,
+    sample: &mut Sample,
+) -> io::Result<()> {
+    let begun = Instant::now();
+    let mut stream = client::connect(&spec.root).await?;
+    let connected = Instant::now();
+    sample.connect_us = Some(micros(connected - begun));
+    wire::write_frame(
+        &mut stream,
+        &json!({"version": PROTOCOL_VERSION, "app": grant.app, "token": grant.token}),
+    )
+    .await?;
+    let hello = wire::read_frame(&mut stream).await?;
+    let ready = Instant::now();
+    sample.handshake_us = Some(micros(ready - connected));
+    sample.prepare_us = Some(micros(ready - begun));
+    if hello["type"] == "busy" {
+        sample.outcome = "failed".to_owned();
+        sample.detail = Some("QUEUE_FULL".to_owned());
+        return Ok(());
+    }
+    if hello["type"] != "ready" {
+        sample.detail = Some("authorization_refused".to_owned());
+        return Ok(());
+    }
+
+    let params = match req.method {
+        Method::Send => json!(turn(req, handle)),
+        Method::Status => Value::Null,
+    };
+    let submitted = Instant::now();
+    wire::write_frame(
+        &mut stream,
+        &json!({"id": req.id, "provider": spec.provider, "method": req.method.name(), "params": params}),
+    )
+    .await?;
+    loop {
+        let frame = wire::read_frame(&mut stream).await?;
+        if frame["id"] != req.id.as_str() {
+            continue;
+        }
+        let since = micros(submitted.elapsed());
+        let event = &frame["event"];
+        match event["type"].as_str().unwrap_or_default() {
+            "launched" => {
+                sample.submit_to_launched_us.get_or_insert(since);
+            }
+            "started" => {
+                sample.submit_to_started_us.get_or_insert(since);
+            }
+            "delta" if event["text"].as_str().is_some_and(|text| !text.is_empty()) => {
+                sample.submit_to_first_text_us.get_or_insert(since);
+            }
+            "session" => *handle = event["handle"].as_str().map(str::to_owned),
+            "completed" => {
+                sample.submit_to_complete_us = Some(since);
+                sample.outcome = "completed".to_owned();
+                return Ok(());
+            }
+            "stopped" => {
+                sample.submit_to_complete_us = Some(since);
+                sample.outcome = "stopped".to_owned();
+                return Ok(());
+            }
+            "failed" => {
+                sample.submit_to_complete_us = Some(since);
+                sample.outcome = "failed".to_owned();
+                sample.detail = event["reason"].as_str().map(str::to_owned);
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+}

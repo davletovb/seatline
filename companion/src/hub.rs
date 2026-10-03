@@ -4,11 +4,13 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
 use seatline_core::exchange::{Timeouts, Update};
 use seatline_core::protocol::ErrorCode;
+use seatline_core::telemetry::Sink;
 use seatline_core::turn::{Namespace, SessionPolicy, ToolPolicy, Turn, is_cleanup_group};
 use seatline_platform::layout::Layout;
 use seatline_providers::{Cleanup, Provider, claude, codex, gemini, grok};
@@ -19,6 +21,7 @@ use serde_json::{Value, json};
 use crate::{
     PROTOCOL_VERSION,
     config::{self, Grant},
+    telemetry::Telemetry,
     wire,
 };
 
@@ -33,6 +36,21 @@ const MAX_PROVIDER_RUNNING: usize = 2;
 const MAX_SESSIONS: usize = 10_000;
 const MAX_APP_SESSIONS: usize = 2_000;
 const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// The hub's limits, by name, as telemetry reports a broker's configuration.
+pub fn limits() -> BTreeMap<&'static str, u64> {
+    BTreeMap::from([
+        ("max_connections", MAX_CONNECTIONS as u64),
+        ("max_queue", MAX_QUEUE as u64),
+        ("max_app_queue", MAX_APP_QUEUE as u64),
+        ("max_running", MAX_RUNNING as u64),
+        ("max_app_running", MAX_APP_RUNNING as u64),
+        ("max_provider_running", MAX_PROVIDER_RUNNING as u64),
+        ("max_sessions", MAX_SESSIONS as u64),
+        ("max_app_sessions", MAX_APP_SESSIONS as u64),
+        ("prune_interval_ms", PRUNE_INTERVAL.as_millis() as u64),
+    ])
+}
 
 pub enum Command {
     Open {
@@ -78,6 +96,14 @@ struct PendingCleanup {
 }
 
 pub fn start(root: PathBuf) -> io::Result<SyncSender<Command>> {
+    start_with(root, None)
+}
+
+/// [`start`], with phase telemetry going to `telemetry` when it is given.
+pub fn start_with(
+    root: PathBuf,
+    telemetry: Option<Arc<dyn Sink>>,
+) -> io::Result<SyncSender<Command>> {
     let ledger = root.join("sessions.json");
     let sessions = match std::fs::read(&ledger) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
@@ -98,6 +124,7 @@ pub fn start(root: PathBuf) -> io::Result<SyncSender<Command>> {
             next_check: Instant::now(),
             next_prune: Instant::now() + PRUNE_INTERVAL,
             missing_grants: BTreeSet::new(),
+            telemetry: telemetry.map_or_else(Telemetry::disabled, Telemetry::new),
         }
         .run(receive);
     });
@@ -119,6 +146,7 @@ struct Hub {
     /// two sweeps in a row lose their sessions, so a grant that is being
     /// rewritten is never mistaken for a revoked one.
     missing_grants: BTreeSet<String>,
+    telemetry: Telemetry,
 }
 
 enum LedgerError {
@@ -246,6 +274,13 @@ impl Hub {
                     self.close(connection);
                     return;
                 }
+                self.telemetry.received(
+                    connection,
+                    &request.id,
+                    &request.app,
+                    &request.provider,
+                    &request.method,
+                );
                 if self.queue.len() >= MAX_QUEUE
                     || self
                         .queue
@@ -271,6 +306,11 @@ impl Hub {
 
     fn close(&mut self, connection: u64) {
         self.connections.remove(&connection);
+        for request in &self.queue {
+            if request.connection == connection {
+                self.telemetry.abandoned(connection, &request.id);
+            }
+        }
         self.queue
             .retain(|request| request.connection != connection);
         for (turn, active) in &self.active {
@@ -291,6 +331,12 @@ impl Hub {
     }
 
     fn event(&mut self, request: &Request, update: Update) {
+        if update.is_terminal() {
+            // Only a request that never reached the scheduler still has its
+            // timeline here; a scheduled one is recorded when it ends.
+            self.telemetry
+                .unscheduled(request.connection, &request.id, &update);
+        }
         if let Update::Delta(text) = update {
             let mut rest = text.as_str();
             while !rest.is_empty() {
@@ -446,6 +492,7 @@ impl Hub {
                     self.active.insert(turn_id, active);
                 }
                 Event::Ended { turn_id, reason } => {
+                    self.telemetry.ended(turn_id, &reason, &mut self.supervisor);
                     if let Some(active) = self.active.remove(&turn_id) {
                         self.event(
                             &active.request,
@@ -569,6 +616,7 @@ impl Hub {
 
     #[allow(clippy::map_entry)] // Admission errors also need mutable access to the connection table.
     fn admit(&mut self, request: Request) {
+        self.telemetry.admitted(request.connection, &request.id);
         let key = (request.app.clone(), request.provider.clone());
         if !self.providers.contains_key(&key) {
             let Ok(namespace) = Namespace::fixed(&request.app) else {
@@ -617,9 +665,17 @@ impl Hub {
         let result = catch_unwind(AssertUnwindSafe(|| self.build(&request, &key)));
         match result {
             Ok(Ok(Built::Exchange(exchange, timeouts, persistent))) => {
-                let turn = self
-                    .supervisor
-                    .start(exchange, Some(timeouts), Duration::from_secs(2));
+                let grace = Duration::from_secs(2);
+                let turn = match self.telemetry.hand_off(request.connection, &request.id) {
+                    Some((identity, timeline)) => {
+                        let turn =
+                            self.supervisor
+                                .start_timed(exchange, Some(timeouts), grace, timeline);
+                        self.telemetry.scheduled(turn, identity);
+                        turn
+                    }
+                    None => self.supervisor.start(exchange, Some(timeouts), grace),
+                };
                 self.active.insert(
                     turn,
                     Active {
@@ -811,6 +867,7 @@ mod tests {
             next_check: Instant::now() + Duration::from_secs(60),
             next_prune: Instant::now() + Duration::from_secs(3600),
             missing_grants: BTreeSet::new(),
+            telemetry: Telemetry::disabled(),
         };
         let mut outputs = Vec::new();
         for (id, app) in [(1, "first"), (2, "second")] {
@@ -1089,6 +1146,212 @@ mod tests {
         hub.prune_revoked_sessions();
         hub.prune_revoked_sessions();
         assert_eq!(hub.sessions.len(), 2);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    use seatline_core::telemetry::{Memory, Outcome, Record, RequestRecord};
+
+    /// [`setup`], with phase telemetry going to the returned sink.
+    fn telemetry_setup() -> (Hub, Vec<tokio::sync::mpsc::Receiver<Value>>, Arc<Memory>) {
+        let (mut hub, output) = setup();
+        let memory = Arc::new(Memory::new());
+        hub.telemetry = Telemetry::new(memory.clone());
+        (hub, output, memory)
+    }
+
+    fn requests(memory: &Memory) -> Vec<RequestRecord> {
+        memory
+            .take()
+            .into_iter()
+            .filter_map(|record| match record {
+                Record::Request(record) => Some(*record),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ticks(hub: &mut Hub, count: usize) {
+        for _ in 0..count {
+            hub.tick();
+        }
+    }
+
+    #[test]
+    fn a_send_leaves_one_record_whose_marks_are_in_order_and_whose_phases_tile() {
+        let (mut hub, mut output, memory) = telemetry_setup();
+        request(&mut hub, 1, "a", "send", turn(None));
+        ticks(&mut hub, 6);
+        let events = drain(&mut output[0]);
+        let records = requests(&memory);
+        assert_eq!(records.len(), 1, "{records:?}");
+        let record = &records[0];
+        assert_eq!(
+            (
+                record.connection,
+                record.request.as_str(),
+                record.app.as_str()
+            ),
+            (1, "a", "first")
+        );
+        assert_eq!(
+            (record.provider.as_str(), record.method.as_str()),
+            ("codex", "send")
+        );
+        assert_eq!(record.outcome, Outcome::Completed);
+        assert!(record.text);
+        let marks = record.marks_us;
+        let order = [
+            marks.admitted,
+            marks.built,
+            marks.started,
+            marks.first_text,
+            marks.terminal,
+            marks.released,
+        ];
+        assert!(order.iter().all(Option::is_some), "{marks:?}");
+        let order: Vec<u64> = order.into_iter().flatten().collect();
+        assert!(order.windows(2).all(|pair| pair[0] <= pair[1]), "{marks:?}");
+        assert_eq!(record.phases_us.sum(), record.total_us);
+
+        // Nothing the request or the provider said is in the record.
+        let json = serde_json::to_string(&records).unwrap();
+        let token = events
+            .iter()
+            .find(|v| v["event"]["type"] == "session")
+            .and_then(|v| v["event"]["handle"].as_str())
+            .unwrap();
+        for private in ["hello", "answer", "raw-native-handle", token] {
+            assert!(!json.contains(private), "{private} leaked into {json}");
+        }
+        assert_eq!(hub.telemetry.in_flight(), 0);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn a_request_cancelled_while_queued_is_recorded_as_waiting_and_cancelled() {
+        let (mut hub, _output, memory) = telemetry_setup();
+        for id in ["a", "b", "c"] {
+            request(&mut hub, 1, id, "send", turn(None));
+        }
+        // One app runs two at a time: the third is still queued.
+        hub.tick();
+        assert_eq!(hub.queue.len(), 1);
+        hub.command(Command::Request {
+            connection: 1,
+            value: json!({"id":"cancel","method":"cancel","target":"c"}),
+        });
+        let records = requests(&memory);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].request, "c");
+        assert_eq!(records[0].outcome, Outcome::Cancelled);
+        assert!(records[0].phases_us.queue_wait.is_some());
+        assert_eq!(records[0].phases_us.provider_init, None);
+        assert_eq!(records[0].phases_us.sum(), records[0].total_us);
+        ticks(&mut hub, 4);
+        assert_eq!(requests(&memory).len(), 2, "the other two ran");
+        assert_eq!(hub.telemetry.in_flight(), 0);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn a_full_queue_is_a_recorded_refusal_with_its_reason() {
+        let (mut hub, _output, memory) = telemetry_setup();
+        for index in 0..=MAX_APP_QUEUE {
+            request(&mut hub, 1, &format!("r{index}"), "send", turn(None));
+        }
+        let records = requests(&memory);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].outcome, Outcome::Failed);
+        assert_eq!(records[0].detail, Some("QUEUE_FULL"));
+        assert_eq!(records[0].request, format!("r{MAX_APP_QUEUE}"));
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn closing_a_connection_ends_the_records_of_its_queued_and_running_requests() {
+        let (mut hub, _output, memory) = telemetry_setup();
+        for id in ["a", "b", "c"] {
+            request(&mut hub, 1, id, "send", turn(None));
+        }
+        hub.tick();
+        hub.command(Command::Close(1));
+        ticks(&mut hub, 4);
+        let mut records = requests(&memory);
+        records.sort_by(|a, b| a.request.cmp(&b.request));
+        assert_eq!(
+            records
+                .iter()
+                .map(|r| r.request.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert!(records.iter().all(|r| r.outcome == Outcome::Cancelled));
+        // The two that were running were asked to stop; the queued one never ran.
+        assert!(records[0].marks_us.stop_requested.is_some());
+        assert_eq!(records[2].marks_us.admitted, None);
+        assert!(records.iter().all(|r| r.phases_us.sum() == r.total_us));
+        assert_eq!(hub.telemetry.in_flight(), 0);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn status_and_cleanup_requests_are_recorded_by_their_own_kind() {
+        let (mut hub, _output, memory) = telemetry_setup();
+        request(&mut hub, 1, "s", "status", Value::Null);
+        request(&mut hub, 2, "f", "forget", json!({"sessions": []}));
+        let give_up = Instant::now() + Duration::from_secs(5);
+        let mut records = Vec::new();
+        while records.len() < 2 && Instant::now() < give_up {
+            hub.tick();
+            records.extend(requests(&memory));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(records.len(), 2, "{records:?}");
+        records.sort_by(|a, b| a.method.cmp(&b.method));
+        assert_eq!(records[0].method, "forget");
+        assert!(records[0].phases_us.cleanup.is_some());
+        assert_eq!(records[0].phases_us.provider_init, None);
+        assert_eq!(records[1].method, "status");
+        assert!(records.iter().all(|r| r.outcome == Outcome::Completed));
+        assert!(records.iter().all(|r| r.phases_us.sum() == r.total_us));
+        assert_eq!(hub.telemetry.in_flight(), 0);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn every_request_gets_exactly_one_record() {
+        let (mut hub, _output, memory) = telemetry_setup();
+        for (connection, id) in [(1, "a"), (1, "b"), (2, "a"), (2, "b"), (2, "c")] {
+            request(&mut hub, connection, id, "send", turn(None));
+        }
+        ticks(&mut hub, 12);
+        let mut seen: Vec<(u64, String)> = requests(&memory)
+            .into_iter()
+            .map(|record| (record.connection, record.request))
+            .collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            [(1, "a"), (1, "b"), (2, "a"), (2, "b"), (2, "c")].map(|(c, id)| (c, id.to_owned()))
+        );
+        assert_eq!(hub.telemetry.in_flight(), 0);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn with_telemetry_off_the_hub_keeps_no_timelines() {
+        let (mut hub, mut output) = setup();
+        request(&mut hub, 1, "a", "send", turn(None));
+        request(&mut hub, 2, "b", "send", turn(None));
+        ticks(&mut hub, 6);
+        assert!(!hub.telemetry.enabled());
+        assert_eq!(hub.telemetry.in_flight(), 0);
+        // The requests still ran.
+        assert!(
+            drain(&mut output[0])
+                .iter()
+                .any(|v| v["event"]["type"] == "completed")
+        );
         std::fs::remove_dir_all(&hub.root).unwrap();
     }
 }

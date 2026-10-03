@@ -1,0 +1,34 @@
+[package]
+name = "seatline-bench"
+description = "Reproducible benchmark harness for the provider runtime: deterministic fake providers by default, live providers opt-in"
+license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "seatline-bench"
+path = "src/main.rs"
+
+# The fake provider every package that runs it builds a binary of its own
+# around `seatline_fake_provider::run()`.
+[[bin]]
+name = "seatline-bench-fake-provider"
+path = "src/fake_provider.rs"
+
+[dependencies]
+seatline-core = { path = "../seatline-core" }
+# The harness is a client of the broker: it needs no hosted transport.
+seatline-companion = { path = "../companion", default-features = false }
+seatline-fake-provider = { path = "../fake-provider" }
+seatline-platform = { path = "../platform" }
+seatline-providers = { path = "../providers" }
+seatline-scheduler = { path = "../scheduler" }
+interprocess = { version = "=2.2.3", features = ["tokio"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt", "time", "io-util"] }
+
+[lints]
+workspace = true

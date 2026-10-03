@@ -35,6 +35,7 @@ use seatline_core::protocol::{
 };
 use seatline_core::search::{NATIVE_SEARCH_NO_SOURCES, SourceCollector, codex_message_sources};
 use seatline_core::stream::{BUSY_LIMIT, LineStream, Output};
+use seatline_core::telemetry::Span;
 use seatline_core::turn::{SessionPolicy, ToolPolicy, Turn as TurnRequest};
 use seatline_platform::discovery;
 use seatline_platform::environment;
@@ -367,12 +368,15 @@ impl Provider for Codex {
             held: None,
             outcome: None,
             finish_by: None,
+            probe_span: None,
         };
+        let probe_began = request.check_sign_in.then(Instant::now);
         let probe = request
             .check_sign_in
             .then(|| probe(&turn.launch, &turn.executable));
         match probe {
             Some(Ok(process)) => {
+                turn.probe_span = probe_began.map(Span::begin);
                 turn.stage = Stage::Probing {
                     process,
                     give_up: after(self.limits.probe),
@@ -751,6 +755,8 @@ struct Turn {
     outcome: Option<Result<(), ErrorBody>>,
     /// When to stop waiting for Codex to exit after the turn ended.
     finish_by: Option<Instant>,
+    /// The sign-in probe, when the request asked for one: for telemetry.
+    probe_span: Option<Span>,
 }
 
 enum Stage {
@@ -766,6 +772,7 @@ enum Stage {
 impl Turn {
     /// Starts `codex exec` and hands it the question.
     fn start(&mut self) {
+        self.probe_over();
         let Ok(workspace) = self.launch.workspace() else {
             return self.end(Update::Failed(NO_WORKSPACE));
         };
@@ -796,8 +803,17 @@ impl Turn {
 
     /// Queues the terminal update and drops any process, which reaps it.
     fn end(&mut self, update: Update) {
+        self.probe_over();
         self.queue.push_back(update);
         self.stage = Stage::Done;
+    }
+
+    /// The sign-in probe, if there was one, is over: it exited, timed out, or
+    /// the request ended while it ran.
+    fn probe_over(&mut self) {
+        if let Some(span) = self.probe_span.as_mut() {
+            span.finish(Instant::now());
+        }
     }
 
     /// Acts on one line of Codex output.
@@ -911,6 +927,10 @@ impl Turn {
 }
 
 impl Exchange for Turn {
+    fn probe_span(&self) -> Option<Span> {
+        self.probe_span
+    }
+
     fn next(&mut self, deadline: Instant) -> Option<Update> {
         let busy_until = deadline.max(after(BUSY_LIMIT));
         loop {

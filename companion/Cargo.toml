@@ -36,6 +36,10 @@ name = "lifecycle"
 required-features = ["web"]
 
 [[test]]
+name = "telemetry"
+required-features = ["web"]
+
+[[test]]
 name = "web_v2"
 required-features = ["web"]
 

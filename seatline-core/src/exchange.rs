@@ -79,6 +79,13 @@ pub trait Exchange {
     /// `Stopped`, or another terminal update if the work ended first. A
     /// process that outlives `grace` after being asked to stop is killed.
     fn cancel(&mut self, grace: Duration);
+
+    /// The sign-in probe this exchange ran before its turn, as it measured
+    /// it, for [`crate::telemetry`]. Its updates do not show a probe, so an
+    /// adapter that runs one reports it here; the default says it ran none.
+    fn probe_span(&self) -> Option<crate::telemetry::Span> {
+        None
+    }
 }
 
 /// How long the host lets a provider's requests take.

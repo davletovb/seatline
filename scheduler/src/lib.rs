@@ -4,11 +4,13 @@
 //! browser or Native Messaging concepts. The supervisor is the panic boundary
 //! shared by synchronous and service-thread entry points.
 
+use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
 
 use seatline_core::exchange::{Exchange, Timeouts, Update};
 use seatline_core::protocol::Failure;
+use seatline_core::telemetry::Timeline;
 
 const STOP_SLACK: Duration = Duration::from_secs(1);
 
@@ -54,6 +56,8 @@ struct Running {
     started: bool,
     stop: Option<StopReason>,
     stop_limit: Option<Instant>,
+    /// Phase marks, kept only when the host asked for them.
+    timeline: Option<Timeline>,
 }
 
 impl Running {
@@ -96,9 +100,41 @@ impl Running {
         catch_unwind(AssertUnwindSafe(|| exchange.next(deadline))).map_err(|_| ())
     }
 
+    /// Stamps what `update` shows. A stopped turn's updates are suppressed, so
+    /// only its terminal one counts.
+    fn observe(&mut self, update: &Update) {
+        let stopped = self.stop.is_some();
+        if let Some(timeline) = self.timeline.as_mut() {
+            if !stopped || update.is_terminal() {
+                timeline.observe(update, Instant::now());
+            }
+        }
+    }
+
+    /// Closes the timeline of a turn that is being removed: its terminal mark
+    /// if it never saw one, the probe its exchange measured, and the time its
+    /// exchange took to drop, which is when its process is killed and reaped.
+    fn finish_timeline(&mut self) -> Option<Timeline> {
+        let mut timeline = self.timeline.take()?;
+        timeline.terminal(Instant::now());
+        if let Some(span) = self
+            .exchange
+            .as_ref()
+            .and_then(|exchange| exchange.probe_span())
+        {
+            timeline.set_probe(span);
+        }
+        self.drop_exchange();
+        timeline.released(Instant::now());
+        Some(timeline)
+    }
+
     fn begin_stop(&mut self, reason: StopReason, grace: Duration, now: Instant) -> bool {
         if self.stop.is_some() {
             return false;
+        }
+        if let Some(timeline) = self.timeline.as_mut() {
+            timeline.stop_requested(now);
         }
         let cancel_panicked = self.cancel_exchange(grace).is_err();
         self.stop = Some(reason);
@@ -128,6 +164,8 @@ impl Drop for Running {
 pub struct Scheduler {
     next_id: TurnId,
     running: Vec<Running>,
+    /// Timelines of turns that ended, until the host takes them.
+    finished: BTreeMap<TurnId, Timeline>,
     #[cfg(test)]
     panic_next_poll: bool,
     #[cfg(test)]
@@ -149,6 +187,7 @@ impl Scheduler {
         Self {
             next_id,
             running: Vec::new(),
+            finished: BTreeMap::new(),
             #[cfg(test)]
             panic_next_poll: false,
             #[cfg(test)]
@@ -166,6 +205,29 @@ impl Scheduler {
         timeouts: Option<Timeouts>,
         status_stop_grace: Duration,
     ) -> TurnId {
+        self.start_with(exchange, timeouts, status_stop_grace, None)
+    }
+
+    /// [`Scheduler::start`] that also stamps `timeline` with what the turn
+    /// does. Take the finished timeline with [`Scheduler::take_timeline`] once
+    /// the turn has ended.
+    pub fn start_timed(
+        &mut self,
+        exchange: Box<dyn Exchange>,
+        timeouts: Option<Timeouts>,
+        status_stop_grace: Duration,
+        timeline: Timeline,
+    ) -> TurnId {
+        self.start_with(exchange, timeouts, status_stop_grace, Some(timeline))
+    }
+
+    fn start_with(
+        &mut self,
+        exchange: Box<dyn Exchange>,
+        timeouts: Option<Timeouts>,
+        status_stop_grace: Duration,
+        timeline: Option<Timeline>,
+    ) -> TurnId {
         let id = self.next_id;
         self.next_id = self
             .next_id
@@ -182,8 +244,15 @@ impl Scheduler {
             started: false,
             stop: None,
             stop_limit: None,
+            timeline,
         });
         id
+    }
+
+    /// The timeline of a timed turn that has ended, once. A turn that was not
+    /// started with a timeline, or whose timeline was taken, has none.
+    pub fn take_timeline(&mut self, id: TurnId) -> Option<Timeline> {
+        self.finished.remove(&id)
     }
 
     pub fn contains(&self, id: TurnId) -> bool {
@@ -256,6 +325,7 @@ impl Scheduler {
                     }
                 };
 
+                self.running[index].observe(&update);
                 if self.running[index].stop.is_none() {
                     if Running::recognized_work(&update) {
                         self.running[index].last_work = Instant::now();
@@ -292,6 +362,9 @@ impl Scheduler {
             if let Some(reason) = finished {
                 let mut running = self.running.remove(index);
                 let id = running.id;
+                if let Some(timeline) = running.finish_timeline() {
+                    self.finished.insert(id, timeline);
+                }
                 running.drop_exchange();
                 out.push(Event::Ended {
                     turn_id: id,
@@ -326,10 +399,14 @@ impl Scheduler {
     }
 
     fn take_all_after_panic(&mut self) -> Vec<Event> {
-        self.running
+        let mut running = std::mem::take(&mut self.running);
+        running
             .drain(..)
             .map(|mut running| {
                 let id = running.id;
+                if let Some(timeline) = running.finish_timeline() {
+                    self.finished.insert(id, timeline);
+                }
                 running.drop_exchange();
                 Event::Ended {
                     turn_id: id,
@@ -375,6 +452,24 @@ impl Supervisor {
         self.scheduler.start(exchange, timeouts, status_stop_grace)
     }
 
+    /// [`Supervisor::start`] that also stamps `timeline`; see
+    /// [`Scheduler::start_timed`].
+    pub fn start_timed(
+        &mut self,
+        exchange: Box<dyn Exchange>,
+        timeouts: Option<Timeouts>,
+        status_stop_grace: Duration,
+        timeline: Timeline,
+    ) -> TurnId {
+        self.scheduler
+            .start_timed(exchange, timeouts, status_stop_grace, timeline)
+    }
+
+    /// The timeline of a timed turn that has ended, once.
+    pub fn take_timeline(&mut self, id: TurnId) -> Option<Timeline> {
+        self.scheduler.take_timeline(id)
+    }
+
     pub fn contains(&self, id: TurnId) -> bool {
         self.scheduler.contains(id)
     }
@@ -400,7 +495,10 @@ impl Supervisor {
             Err(_) => {
                 let next_id = self.scheduler.next_id();
                 events.extend(self.scheduler.take_all_after_panic());
+                // Timelines the host has not taken yet outlive the scheduler.
+                let finished = std::mem::take(&mut self.scheduler.finished);
                 self.scheduler = Scheduler::with_next_id(next_id);
+                self.scheduler.finished = finished;
                 self.generation = self.generation.saturating_add(1);
                 events.shrink_to_fit();
                 events
@@ -423,6 +521,8 @@ impl Supervisor {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+
+    use seatline_core::telemetry::{Kind, Span};
 
     use super::*;
 
@@ -564,6 +664,247 @@ mod tests {
             Event::Ended { turn_id, reason: EndReason::SchedulerPanicked { .. } }
                 if *turn_id == still_running
         )));
+    }
+
+    fn timeline() -> Timeline {
+        let mut timeline = Timeline::new(Kind::Send, Instant::now());
+        timeline.admitted(Instant::now());
+        timeline
+    }
+
+    /// The marks of a timeline in the order they must have been taken.
+    fn in_order(timeline: &Timeline) -> Vec<(&'static str, u64)> {
+        let marks = timeline.marks();
+        [
+            ("admitted", marks.admitted),
+            ("launched", marks.launched),
+            ("started", marks.started),
+            ("first_text", marks.first_text),
+            ("terminal", marks.terminal),
+            ("released", marks.released),
+        ]
+        .into_iter()
+        .filter_map(|(name, at)| Some((name, at?)))
+        .collect()
+    }
+
+    fn assert_ordered(timeline: &Timeline) {
+        let marks = in_order(timeline);
+        assert!(
+            marks.windows(2).all(|pair| pair[0].1 <= pair[1].1),
+            "marks out of order: {marks:?}"
+        );
+    }
+
+    #[test]
+    fn a_timed_turn_reports_its_boundaries_in_order() {
+        let mut scheduler = Scheduler::new();
+        let id = scheduler.start_timed(
+            Box::new(Scripted::new([
+                Update::Launched,
+                Update::Started,
+                Update::Activity,
+                Update::Delta("answer".to_owned()),
+                Update::Completed,
+            ])),
+            Some(limits()),
+            Duration::ZERO,
+            timeline(),
+        );
+        let events = scheduler.poll(Duration::from_millis(1));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::Ended { turn_id, reason: EndReason::Completed } if *turn_id == id
+        )));
+        let timeline = scheduler.take_timeline(id).expect("a timeline");
+        let names: Vec<_> = in_order(&timeline)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "admitted",
+                "launched",
+                "started",
+                "first_text",
+                "terminal",
+                "released"
+            ]
+        );
+        assert_ordered(&timeline);
+        assert_eq!(timeline.phases().sum(), timeline.total_us());
+        assert!(
+            scheduler.take_timeline(id).is_none(),
+            "a timeline is taken once"
+        );
+    }
+
+    #[test]
+    fn a_turn_started_without_a_timeline_keeps_nothing() {
+        let mut scheduler = Scheduler::new();
+        let id = scheduler.start(
+            Box::new(Scripted::new([Update::Started, Update::Completed])),
+            Some(limits()),
+            Duration::ZERO,
+        );
+        let _ = scheduler.poll(Duration::from_millis(1));
+        assert!(scheduler.take_timeline(id).is_none());
+        assert!(scheduler.finished.is_empty());
+    }
+
+    #[test]
+    fn a_cancel_is_marked_and_late_text_is_not_a_boundary() {
+        let mut scheduler = Scheduler::new();
+        let id = scheduler.start_timed(
+            Box::new(TalksAfterCancel {
+                started: false,
+                cancelled: false,
+                talked: false,
+            }),
+            Some(limits()),
+            Duration::from_secs(1),
+            timeline(),
+        );
+        let _ = scheduler.poll(Duration::ZERO);
+        assert!(scheduler.cancel(id));
+        // The exchange never ends by itself, so the stop limit ends it.
+        let give_up = Instant::now() + Duration::from_secs(10);
+        let mut ended = false;
+        while !ended && Instant::now() < give_up {
+            ended = scheduler
+                .poll(Duration::from_millis(5))
+                .iter()
+                .any(|event| {
+                    matches!(
+                        event,
+                        Event::Ended {
+                            reason: EndReason::Cancelled,
+                            ..
+                        }
+                    )
+                });
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ended, "the cancelled turn never ended");
+        let timeline = scheduler.take_timeline(id).expect("a timeline");
+        let marks = timeline.marks();
+        assert!(marks.started.is_some());
+        assert!(marks.stop_requested.is_some());
+        assert_eq!(marks.first_text, None, "the late delta was suppressed");
+        assert!(marks.terminal >= marks.stop_requested);
+        assert_ordered(&timeline);
+    }
+
+    #[test]
+    fn a_timeout_is_marked_as_a_stop() {
+        let mut scheduler = Scheduler::new();
+        let id = scheduler.start_timed(
+            Box::new(Scripted::new([Update::Started])),
+            Some(Timeouts {
+                start: Duration::from_secs(1),
+                idle: Duration::ZERO,
+                max_turn: Duration::from_secs(2),
+                stop_grace: Duration::ZERO,
+            }),
+            Duration::ZERO,
+            timeline(),
+        );
+        let mut reason = None;
+        while reason.is_none() {
+            for event in scheduler.poll(Duration::from_millis(1)) {
+                if let Event::Ended { reason: ended, .. } = event {
+                    reason = Some(ended);
+                }
+            }
+        }
+        assert_eq!(reason, Some(EndReason::Timeout(TimeoutKind::Idle)));
+        let timeline = scheduler.take_timeline(id).expect("a timeline");
+        assert!(timeline.marks().stop_requested.is_some());
+        assert!(timeline.has_terminal());
+        assert_ordered(&timeline);
+    }
+
+    /// Reports the probe it says it ran.
+    struct Probed(VecDeque<Update>, Span);
+
+    impl Exchange for Probed {
+        fn next(&mut self, _deadline: Instant) -> Option<Update> {
+            self.0.pop_front()
+        }
+
+        fn cancel(&mut self, _grace: Duration) {}
+
+        fn probe_span(&self) -> Option<Span> {
+            Some(self.1)
+        }
+    }
+
+    #[test]
+    fn the_probe_an_exchange_measured_reaches_the_timeline() {
+        let mut scheduler = Scheduler::new();
+        let mut probe = Span::begin(Instant::now());
+        probe.finish(Instant::now());
+        let id = scheduler.start_timed(
+            Box::new(Probed(
+                VecDeque::from([Update::Launched, Update::Started, Update::Completed]),
+                probe,
+            )),
+            Some(limits()),
+            Duration::ZERO,
+            timeline(),
+        );
+        let _ = scheduler.poll(Duration::from_millis(1));
+        let timeline = scheduler.take_timeline(id).expect("a timeline");
+        let marks = timeline.marks();
+        assert!(marks.probe_started.is_some() && marks.probe_ended.is_some());
+        assert_eq!(timeline.probes(), 1);
+        assert_eq!(timeline.phases().sum(), timeline.total_us());
+    }
+
+    #[test]
+    fn an_adapter_panic_still_leaves_a_closed_timeline() {
+        let mut scheduler = Scheduler::new();
+        let id = scheduler.start_timed(
+            Box::new(Scripted::panics()),
+            Some(limits()),
+            Duration::ZERO,
+            timeline(),
+        );
+        let _ = scheduler.poll(Duration::from_millis(1));
+        let timeline = scheduler.take_timeline(id).expect("a timeline");
+        let marks = timeline.marks();
+        assert!(marks.terminal.is_some() && marks.released.is_some());
+        assert_ordered(&timeline);
+    }
+
+    #[test]
+    fn a_timeline_survives_a_scheduler_panic() {
+        let mut supervisor = Supervisor::new();
+        let running = supervisor.start_timed(
+            Box::new(Scripted::new([Update::Started])),
+            Some(limits()),
+            Duration::ZERO,
+            timeline(),
+        );
+        supervisor.inject_scheduler_panic_for_test();
+        let events = supervisor.poll(Duration::ZERO);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::Ended { turn_id, reason: EndReason::SchedulerPanicked { .. } }
+                if *turn_id == running
+        )));
+        let timeline = supervisor.take_timeline(running).expect("a timeline");
+        assert!(timeline.marks().released.is_some());
+        // The next generation can still time a turn.
+        let next = supervisor.start_timed(
+            Box::new(Scripted::new([Update::Completed])),
+            Some(limits()),
+            Duration::ZERO,
+            self::timeline(),
+        );
+        let _ = supervisor.poll(Duration::ZERO);
+        assert!(supervisor.take_timeline(next).is_some());
     }
 
     #[test]
