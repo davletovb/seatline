@@ -34,12 +34,12 @@ D-01 and parts of B can proceed independently of C. Persistent-provider producti
 
 | ID | Status | Work | Dependencies | Acceptance evidence |
 | --- | --- | --- | --- | --- |
-| A-01 | READY | Enforce Codex's post-answer finish deadline before reading additional output, including continuous stdout/stderr. Preserve a completed answer while terminating and reaping the lingering child. | None | Fake CLI completes, then floods output; exactly one completion arrives within the finish/cleanup bound and the child is reaped. Cover failed outcomes and ordinary exit. |
-| A-02 | READY | Track whether the hub has already emitted a terminal event. On session-cap/storage failure, suppress later deltas, session handles, and terminal events while retaining the occupied slot until supervisor cleanup ends. | None | Forced ledger write failure and full ledger each emit one failure; unrelated app still completes; active slots are eventually released. |
-| A-03 | READY | Replace blocking event delivery in the remote client's single-thread Tokio runtime with bounded asynchronous delivery. Keep cancellation serviceable when the consumer does not drain events. | None | Fill the event buffer without draining it, cancel, and observe the cancel frame at the broker within a bounded deadline; receiver drop also closes work without a stuck worker. |
-| A-04 | READY | Retry connecting immediately after broker spawn, then use short bounded backoff under the existing overall startup budget. | None | Deterministic readiness/retry tests show no unconditional 100 ms wait; real IPC startup and timeout/error behavior still work. |
+| A-01 | IMPLEMENTED — VERIFY | Enforce Codex's post-answer finish deadline before reading additional output, including continuous stdout/stderr. Preserve a completed answer while terminating and reaping the lingering child. | None | Fake CLI completes, then floods output; exactly one completion arrives within the finish/cleanup bound and the child is reaped. Cover failed outcomes and ordinary exit. |
+| A-02 | IMPLEMENTED — VERIFY | Track whether the hub has already emitted a terminal event. On session-cap/storage failure, suppress later deltas, session handles, and terminal events while retaining the occupied slot until supervisor cleanup ends. | None | Forced ledger write failure and full ledger each emit one failure; unrelated app still completes; active slots are eventually released. |
+| A-03 | IMPLEMENTED — VERIFY | Replace blocking event delivery in the remote client's single-thread Tokio runtime with bounded asynchronous delivery. Keep cancellation serviceable when the consumer does not drain events. | None | Fill the event buffer without draining it, cancel, and observe the cancel frame at the broker within a bounded deadline; receiver drop also closes work without a stuck worker. |
+| A-04 | IMPLEMENTED — VERIFY | Retry connecting immediately after broker spawn, then use short bounded backoff under the existing overall startup budget. | None | Deterministic readiness/retry tests show no unconditional 100 ms wait; real IPC startup and timeout/error behavior still work. |
 
-Starting slice: A-01 through A-04. Authentication caching and persistent-provider changes wait for their contracts and measurement coverage.
+Initial slice implemented: A-01 through A-04. Local regression and lint checks pass; full IPC/platform validation remains in CI. Authentication caching and persistent-provider changes wait for their contracts and measurement coverage.
 
 ## B — Measurement and baseline
 
@@ -108,7 +108,8 @@ These changes are owned by the applications and are not silently bundled into Se
 | Date | Slice | Evidence | Remaining validation |
 | --- | --- | --- | --- |
 | 2026-10-03 | Planning | Main matches the reviewed `dc108658` baseline; no existing open Seatline PR conflicts. Tracker created before implementation. | All implementation and benchmark acceptance criteria remain open. |
+| 2026-10-03 | A-01 through A-04 | Implementation [abb963e](https://github.com/davletovb/seatline/commit/abb963e4ccd81e8e8e819a94f3d076e3a1090132): eight new regression tests. The Codex flood regression fails against the original adapter and passes with the fix. Stable Rust 1.99 formatting, workspace/all-targets Clippy, client-only Clippy, runtime independence, and the client-only dependency boundary pass. Rust 1.85: 293 reported runtime test passes, 35 default companion unit tests, 22 client-only unit tests, and 2 authorization integration tests pass. Live-provider tests were not enabled. | Full workspace IPC tests cannot run here: the environment rejects AF_UNIX socket creation with EPERM. The existing busy/IPC/lifecycle and web-v2 integration tests, OS/MSRV/release matrix, and fuzz smoke require GitHub CI. Live latency and application adoption remain open. |
 
 ## Next work
 
-Start A-01 through A-04 together; update their status and evidence in the implementation PR. Next, implement B-01/B-02 and C-01 before selecting caching or persistent-provider defaults.
+Finish CI/review verification for A-01 through A-04. Next, implement B-01 and C-01, then B-02 before selecting caching or persistent-provider defaults. Keep D-03 blocked until A-03 is merged; application adoption remains in G.
