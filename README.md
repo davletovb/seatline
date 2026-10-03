@@ -28,6 +28,9 @@ Seatline is pre-1.0 and its Rust source API may change between pinned revisions.
 
 ## Development
 
+Startup, latency, and shared-companion work is tracked in the
+[performance implementation plan](docs/performance-implementation-tracker.md).
+
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings

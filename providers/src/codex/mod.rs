@@ -945,6 +945,17 @@ impl Exchange for Turn {
                     }
                 }
                 Stage::Running(stream) => {
+                    // A finished turn has a fixed exit budget, even when
+                    // stdout keeps arriving after its terminal provider event.
+                    if self
+                        .finish_by
+                        .is_some_and(|finish_by| Instant::now() >= finish_by)
+                    {
+                        self.finish_by = None;
+                        // Stop the child without marking the turn cancelled,
+                        // so exited() preserves the stored terminal outcome.
+                        stream.cancel(Duration::ZERO);
+                    }
                     let wait = self
                         .finish_by
                         .map_or(deadline, |finish_by| deadline.min(finish_by));

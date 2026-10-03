@@ -277,7 +277,7 @@ fn exec(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCode> {
             }
             return Ok(ExitCode::SUCCESS);
         }
-        "fails-401" | "fails-429" | "fails-500" => {
+        "fails-401" | "fails-429" | "fails-500" | "failed-stdout-flood" => {
             let message = match behavior {
                 "fails-401" => {
                     "unexpected status 401 Unauthorized: Incorrect API key provided: sk-abc***xyz"
@@ -290,6 +290,9 @@ fn exec(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCode> {
                 &mut out,
                 &json!({"type": "turn.failed", "error": {"message": message}}),
             )?;
+            if behavior == "failed-stdout-flood" {
+                flood(&mut out, &progress(0), usize::MAX)?;
+            }
             return Ok(ExitCode::from(1));
         }
         "oversized" => {
@@ -347,6 +350,16 @@ fn exec(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCode> {
         &mut out,
         &json!({"type": "turn.completed", "usage": {"input_tokens": 12, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 7, "reasoning_output_tokens": 0}}),
     )?;
+    // The answer is complete, but the process never settles. Finishing must
+    // be bounded independently of whether the output stream becomes quiet.
+    match behavior {
+        "completed-stdout-flood" => flood(&mut out, &progress(0), usize::MAX)?,
+        "completed-unknown-flood" => {
+            flood(&mut out, &json!({"type": "future.event"}), usize::MAX)?;
+        }
+        "completed-stderr-flood" => flood_stderr(usize::MAX, ENDLESS),
+        _ => {}
+    }
     drop(out);
     if let Some(flood) = stderr_flood {
         let _ = flood.join();

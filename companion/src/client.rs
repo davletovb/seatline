@@ -1,9 +1,13 @@
 //! Client adapters. Each exchange has one authenticated IPC connection;
 //! disconnecting it cancels only that exchange, never another app's work.
+use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::{
+    Arc,
+    mpsc::{self, Receiver},
+};
 use std::time::{Duration, Instant};
 
 use interprocess::local_socket::{
@@ -15,6 +19,8 @@ use seatline_core::protocol::{Capabilities, ErrorCode};
 use seatline_core::turn::Turn;
 use seatline_providers::{Cleanup, Provider};
 use serde_json::{Value, json};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{PROTOCOL_VERSION, config, wire};
 
@@ -47,13 +53,28 @@ pub async fn connect(root: &Path) -> io::Result<Stream> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if let Ok(stream) = Stream::connect(socket_name(root)?).await {
-            return Ok(stream);
+    retry_started(|| async { Stream::connect(socket_name(root)?).await }).await
+}
+
+/// Try immediately, then back off under the same five-second startup budget.
+async fn retry_started<T, F, Fut>(mut attempt: F) -> io::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = io::Result<T>>,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut delay = Duration::from_millis(10);
+    loop {
+        if let Ok(value) = attempt().await {
+            return Ok(value);
         }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(io::Error::other("Seatline companion did not start"));
+        }
+        tokio::time::sleep(delay.min(deadline - now)).await;
+        delay = (delay * 2).min(Duration::from_millis(100));
     }
-    Err(io::Error::other("Seatline companion did not start"))
 }
 
 pub struct RemoteProvider {
@@ -151,9 +172,66 @@ impl Provider for RemoteProvider {
 }
 
 struct RemoteExchange {
-    events: Receiver<Update>,
+    events: Receiver<BufferedUpdate>,
     cancel: tokio::sync::mpsc::Sender<()>,
     ended: bool,
+}
+
+// Each nonterminal event owns one buffer slot until the synchronous consumer
+// takes it. Waiting for a slot is asynchronous; std's unbounded send itself
+// never blocks the runtime. One terminal event can use a reserved extra slot.
+type BufferedUpdate = (Update, Option<OwnedSemaphorePermit>);
+const EVENT_CAPACITY: usize = 64;
+
+async fn forward_updates<S>(
+    stream: S,
+    send: &mpsc::Sender<BufferedUpdate>,
+    capacity: Arc<Semaphore>,
+    mut cancellations: tokio::sync::mpsc::Receiver<()>,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let cancellation = tokio::spawn(async move {
+        if cancellations.recv().await.is_some() {
+            let _ = wire::write_frame(
+                &mut writer,
+                &json!({"id":"cancel", "method":"cancel", "target":"request"}),
+            )
+            .await;
+        }
+    });
+    // The reader is never cancelled mid-frame by a select.
+    let result = async {
+        loop {
+            let event = wire::read_frame(&mut reader).await?;
+            if event["id"] != "request" {
+                continue;
+            }
+            let update = wire::decode_update(event["event"].clone())?;
+            let terminal = update.is_terminal();
+            let slot = if terminal {
+                None
+            } else {
+                Some(
+                    capacity
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .map_err(io::Error::other)?,
+                )
+            };
+            send.send((update, slot))
+                .map_err(|_| io::Error::other("client closed"))?;
+            if terminal {
+                return Ok::<_, io::Error>(());
+            }
+        }
+    }
+    .await;
+    cancellation.abort();
+    result
 }
 
 impl RemoteExchange {
@@ -170,8 +248,9 @@ impl RemoteExchange {
                 false,
             ))]));
         };
-        let (send, events) = mpsc::sync_channel(64);
-        let (cancel, mut cancellations) = tokio::sync::mpsc::channel(1);
+        let (send, events) = mpsc::channel();
+        let capacity = Arc::new(Semaphore::new(EVENT_CAPACITY));
+        let (cancel, cancellations) = tokio::sync::mpsc::channel(1);
         std::thread::spawn(move || {
             let result = (|| {
                 let runtime = tokio::runtime::Builder::new_current_thread()
@@ -187,54 +266,32 @@ impl RemoteExchange {
                     .await?;
                     let hello = wire::read_frame(&mut stream).await?;
                     if hello["type"] == "busy" {
-                        let _ = send.send(Update::Failed(wire::failure(
-                            ErrorCode::ProviderFailed,
-                            wire::reason::QUEUE_FULL,
-                            true,
-                        )));
+                        let _ = send.send((
+                            Update::Failed(wire::failure(
+                                ErrorCode::ProviderFailed,
+                                wire::reason::QUEUE_FULL,
+                                true,
+                            )),
+                            None,
+                        ));
                         return Ok(());
                     }
                     if hello["type"] != "ready" {
                         return Err(io::Error::other("authorization refused"));
                     }
                     wire::write_frame(&mut stream, &request).await?;
-                    let (mut reader, mut writer) = tokio::io::split(stream);
-                    let cancellation = tokio::spawn(async move {
-                        if cancellations.recv().await.is_some() {
-                            let _ = wire::write_frame(
-                                &mut writer,
-                                &json!({"id":"cancel", "method":"cancel", "target":"request"}),
-                            )
-                            .await;
-                        }
-                    });
-                    // The reader is never cancelled mid-frame by a select.
-                    let result = async {
-                        loop {
-                            let event = wire::read_frame(&mut reader).await?;
-                            if event["id"] != "request" {
-                                continue;
-                            }
-                            let update = wire::decode_update(event["event"].clone())?;
-                            let terminal = update.is_terminal();
-                            send.send(update)
-                                .map_err(|_| io::Error::other("client closed"))?;
-                            if terminal {
-                                return Ok::<_, io::Error>(());
-                            }
-                        }
-                    }
-                    .await;
-                    cancellation.abort();
-                    result
+                    forward_updates(stream, &send, capacity, cancellations).await
                 })
             })();
             if result.is_err() {
-                let _ = send.send(Update::Failed(wire::failure(
-                    ErrorCode::ProviderFailed,
-                    "COMPANION_DISCONNECTED",
-                    true,
-                )));
+                let _ = send.send((
+                    Update::Failed(wire::failure(
+                        ErrorCode::ProviderFailed,
+                        "COMPANION_DISCONNECTED",
+                        true,
+                    )),
+                    None,
+                ));
             }
         });
         Box::new(Self {
@@ -254,7 +311,7 @@ impl Exchange for RemoteExchange {
             .events
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         {
-            Ok(update) => {
+            Ok((update, _slot)) => {
                 self.ended = update.is_terminal();
                 Some(update)
             }
@@ -279,5 +336,156 @@ impl Drop for RemoteExchange {
         if !self.ended {
             let _ = self.cancel.try_send(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_ready_broker_connects_without_a_startup_sleep() {
+        let start = tokio::time::Instant::now();
+        retry_started(|| std::future::ready(Ok(()))).await.unwrap();
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_retries_back_off_from_ten_milliseconds() {
+        let start = tokio::time::Instant::now();
+        let mut attempts = Vec::new();
+        retry_started(|| {
+            attempts.push(start.elapsed());
+            std::future::ready(if attempts.len() == 5 {
+                Ok(())
+            } else {
+                Err(io::Error::from(io::ErrorKind::ConnectionRefused))
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(attempts, [0, 10, 30, 70, 150].map(Duration::from_millis));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_start_keeps_the_five_second_budget() {
+        let start = tokio::time::Instant::now();
+        let mut attempts = Vec::new();
+        let result: io::Result<()> = retry_started(|| {
+            attempts.push(start.elapsed());
+            std::future::ready(Err(io::Error::from(io::ErrorKind::ConnectionRefused)))
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(start.elapsed(), Duration::from_secs(5));
+        assert!(
+            attempts
+                .windows(2)
+                .all(|pair| { pair[1] - pair[0] <= Duration::from_millis(100) })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_full_event_buffer_still_allows_cancellation_and_receiver_drop() {
+        let (stream, mut broker) = tokio::io::duplex(16 * 1024);
+        let (send, events) = mpsc::channel();
+        let capacity = Arc::new(Semaphore::new(EVENT_CAPACITY));
+        let worker_capacity = capacity.clone();
+        let (cancel, cancellations) = tokio::sync::mpsc::channel(1);
+        let mut exchange = RemoteExchange {
+            events,
+            cancel,
+            ended: false,
+        };
+        let worker = tokio::spawn(async move {
+            forward_updates(stream, &send, worker_capacity, cancellations).await
+        });
+        for _ in 0..=EVENT_CAPACITY {
+            wire::write_frame(
+                &mut broker,
+                &json!({
+                    "id":"request", "event":{"type":"delta", "text":"x"}
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while capacity.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the event buffer never filled");
+        exchange.cancel(Duration::ZERO);
+        let frame = tokio::time::timeout(Duration::from_secs(2), wire::read_frame(&mut broker))
+            .await
+            .expect("backpressure blocked cancellation")
+            .unwrap();
+        assert_eq!(frame["method"], "cancel");
+        assert_eq!(frame["target"], "request");
+        assert_eq!(
+            capacity.available_permits(),
+            0,
+            "consumer has not drained output"
+        );
+        drop(exchange);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), worker)
+                .await
+                .expect("receiver drop stranded the IPC worker")
+                .unwrap()
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), wire::read_frame(&mut broker))
+                .await
+                .unwrap()
+                .is_err(),
+            "dropping the exchange must close its connection"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_terminal_event_preserves_order_with_a_full_buffer() {
+        let (stream, mut broker) = tokio::io::duplex(16 * 1024);
+        let (send, events) = mpsc::channel();
+        let capacity = Arc::new(Semaphore::new(EVENT_CAPACITY));
+        let (_cancel, cancellations) = tokio::sync::mpsc::channel(1);
+        let worker =
+            tokio::spawn(
+                async move { forward_updates(stream, &send, capacity, cancellations).await },
+            );
+        for index in 0..EVENT_CAPACITY {
+            wire::write_frame(
+                &mut broker,
+                &json!({
+                    "id":"request", "event":{"type":"delta", "text":index.to_string()}
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        wire::write_frame(
+            &mut broker,
+            &json!({
+                "id":"request", "event":{"type":"completed"}
+            }),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("terminal delivery required consumer capacity")
+            .unwrap()
+            .unwrap();
+        for index in 0..EVENT_CAPACITY {
+            assert_eq!(
+                events.try_recv().unwrap().0,
+                Update::Delta(index.to_string())
+            );
+        }
+        assert_eq!(events.try_recv().unwrap().0, Update::Completed);
+        assert!(events.try_recv().is_err());
     }
 }

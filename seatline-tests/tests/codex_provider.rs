@@ -635,6 +635,53 @@ fn a_codex_that_lingers_after_its_turn_is_stopped_and_the_answer_kept() {
 }
 
 #[test]
+fn output_after_a_turn_ends_cannot_extend_codexs_finish_deadline() {
+    for behavior in [
+        "completed-stdout-flood",
+        "completed-unknown-flood",
+        "completed-stderr-flood",
+        "failed-stdout-flood",
+    ] {
+        let codex = FakeCodex::install(FIXTURES, behavior, "signed-in");
+        let mut exchange = codex.adapter().send(ask("hi"));
+        let beginning = run_until_started(exchange.as_mut());
+        assert_eq!(
+            beginning.last(),
+            Some(&Update::Started),
+            "{behavior}: {beginning:?}"
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut updates = Vec::new();
+        loop {
+            let Some(update) = exchange.next(deadline) else {
+                assert!(
+                    Instant::now() < deadline,
+                    "finish deadline was bypassed: {behavior}: {updates:?}"
+                );
+                continue;
+            };
+            let terminal = update.is_terminal();
+            updates.push(update);
+            if terminal {
+                break;
+            }
+        }
+        if behavior == "failed-stdout-flood" {
+            assert_eq!(
+                failure(&updates),
+                (ErrorCode::ProviderFailed, "PROVIDER_UNAVAILABLE")
+            );
+        } else {
+            assert_eq!(updates.last(), Some(&Update::Completed), "{behavior}");
+            assert_eq!(answer_text(&updates), "You asked: hi", "{behavior}");
+        }
+        assert!(Instant::now() < deadline, "{behavior}");
+        assert_eq!(exchange.next(Instant::now()), None);
+        codex.assert_nothing_left_running();
+    }
+}
+
+#[test]
 fn cancelling_mid_turn_stops_codex_promptly() {
     let codex = FakeCodex::install(FIXTURES, "goes-quiet", "signed-in");
     let mut exchange = codex.adapter().send(ask("hi"));
