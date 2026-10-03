@@ -64,7 +64,8 @@ struct Active {
     persistent: bool,
     /// A local failure can end the client-visible request before the
     /// supervisor finishes stopping/reaping its exchange. Keep its slot until
-    /// Ended, but never forward more output after this boundary.
+    /// Ended, but release its request ID and never forward more output after
+    /// this boundary.
     terminal_sent: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -243,7 +244,12 @@ impl Hub {
                 if self
                     .queue
                     .iter()
-                    .chain(self.active.values().map(|active| &active.request))
+                    .chain(
+                        self.active
+                            .values()
+                            .filter(|active| !active.terminal_sent)
+                            .map(|active| &active.request),
+                    )
                     .chain(self.cleanup.iter().map(|p| &p.request))
                     .any(|other| other.connection == connection && other.id == request.id)
                 {
@@ -1074,7 +1080,7 @@ mod tests {
     }
 
     #[test]
-    fn an_early_terminal_failure_keeps_its_slot_until_cleanup_ends() {
+    fn an_early_terminal_failure_keeps_its_slot_but_releases_its_request_id() {
         use std::cell::Cell;
         use std::rc::Rc;
 
@@ -1098,45 +1104,107 @@ mod tests {
             }
         }
 
-        let (mut hub, mut output) = setup();
-        fill_ledger(&mut hub, "first", MAX_APP_SESSIONS);
-        let release = Rc::new(Cell::new(false));
-        let cancelled = Rc::new(Cell::new(false));
-        let turn_id = hub.supervisor.start(
-            Box::new(DelayedStop {
-                session_sent: false,
-                release: release.clone(),
-                cancelled: cancelled.clone(),
-            }),
-            None,
-            Duration::from_secs(2),
-        );
-        hub.active.insert(
-            turn_id,
-            Active {
-                request: Request {
-                    connection: 1,
-                    id: "failing".into(),
-                    app: "first".into(),
-                    provider: "codex".into(),
-                    method: "send".into(),
-                    params: turn(None),
+        for storage_failure in [false, true] {
+            let (mut hub, mut output) = setup();
+            let reason = if storage_failure {
+                std::fs::create_dir(hub.root.join("sessions.json")).unwrap();
+                wire::reason::SESSION_STORE_FAILED
+            } else {
+                fill_ledger(&mut hub, "first", MAX_APP_SESSIONS);
+                wire::reason::SESSION_LIMIT_REACHED
+            };
+            let release = Rc::new(Cell::new(false));
+            let cancelled = Rc::new(Cell::new(false));
+            let turn_id = hub.supervisor.start(
+                Box::new(DelayedStop {
+                    session_sent: false,
+                    release: release.clone(),
+                    cancelled: cancelled.clone(),
+                }),
+                None,
+                Duration::from_secs(2),
+            );
+            hub.active.insert(
+                turn_id,
+                Active {
+                    request: Request {
+                        connection: 1,
+                        id: "failing".into(),
+                        app: "first".into(),
+                        provider: "codex".into(),
+                        method: "send".into(),
+                        params: turn(None),
+                    },
+                    persistent: true,
+                    terminal_sent: false,
                 },
-                persistent: true,
-                terminal_sent: false,
-            },
-        );
-        hub.tick();
-        assert!(cancelled.get());
-        assert!(hub.active[&turn_id].terminal_sent);
-        assert!(!hub.supervisor.is_empty());
-        assert_eq!(drain(&mut output[0]).len(), 1);
-        release.set(true);
-        hub.tick();
-        assert!(hub.active.is_empty());
-        assert!(hub.supervisor.is_empty());
-        assert!(drain(&mut output[0]).is_empty());
-        std::fs::remove_dir_all(&hub.root).unwrap();
+            );
+            hub.tick();
+            assert!(cancelled.get());
+            assert!(hub.active[&turn_id].terminal_sent);
+            assert!(!hub.supervisor.is_empty());
+            let failed = drain(&mut output[0]);
+            assert_eq!(failed.len(), 1);
+            assert_eq!(failure_reason(&failed).as_deref(), Some(reason));
+
+            // The client can reuse the ID as soon as it receives the terminal
+            // event, even while the old provider still occupies a cleanup slot.
+            let mut retry = turn(None);
+            retry["session"] = json!("ephemeral");
+            request(&mut hub, 1, "failing", "send", retry);
+            assert!(hub.connections.contains_key(&1));
+            assert_eq!(hub.queue.len(), 1);
+            for _ in 0..8 {
+                hub.tick();
+            }
+            let retried = drain(&mut output[0]);
+            assert!(retried.iter().all(|event| event["id"] == "failing"));
+            assert!(retried.iter().any(|v| v["event"]["type"] == "delta"));
+            assert_eq!(retried.last().unwrap()["event"]["type"], "completed");
+            assert_eq!(
+                retried
+                    .iter()
+                    .filter(|v| matches!(
+                        v["event"]["type"].as_str(),
+                        Some("completed" | "failed" | "stopped")
+                    ))
+                    .count(),
+                1,
+            );
+            assert_eq!(hub.active.len(), 1);
+            assert!(hub.active[&turn_id].terminal_sent);
+
+            release.set(true);
+            hub.tick();
+            assert!(hub.active.is_empty());
+            assert!(hub.supervisor.is_empty());
+            assert!(drain(&mut output[0]).is_empty());
+            std::fs::remove_dir_all(&hub.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn duplicate_outstanding_request_ids_still_close_the_connection() {
+        for active in [false, true] {
+            let (mut hub, _output) = setup();
+            request(&mut hub, 1, "duplicate", "send", turn(None));
+            if active {
+                hub.tick();
+                assert_eq!(hub.active.len(), 1);
+                assert!(!hub.active.values().next().unwrap().terminal_sent);
+            } else {
+                assert_eq!(hub.queue.len(), 1);
+            }
+            request(&mut hub, 1, "duplicate", "send", turn(None));
+            assert!(!hub.connections.contains_key(&1));
+            assert!(hub.queue.is_empty());
+            for _ in 0..8 {
+                hub.tick();
+            }
+            assert!(hub.active.is_empty());
+            assert!(hub.supervisor.is_empty());
+            std::fs::remove_dir_all(&hub.root).unwrap();
+        }
     }
 
     #[test]
