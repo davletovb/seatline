@@ -3,10 +3,8 @@
 //! disconnecting it cancels only that exchange, never another app's work. One
 //! made with [`RemoteProvider::with_client`] shares its app's
 //! [`RemoteClient`]: one runtime and one connection for all of its requests.
-use std::future::Future;
 use std::io;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
 use std::sync::{
     Arc,
     mpsc::{self, Receiver},
@@ -26,6 +24,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::remote::RemoteClient;
+use crate::startup::{self, Startup};
 use crate::{PROTOCOL_VERSION, config, wire};
 
 pub fn socket_name(root: &Path) -> io::Result<interprocess::local_socket::Name<'static>> {
@@ -37,48 +36,22 @@ pub fn socket_name(root: &Path) -> io::Result<interprocess::local_socket::Name<'
     }
 }
 
-#[allow(clippy::disallowed_methods)] // Starts only the locally configured companion, never a request-supplied executable.
+/// Connects to the broker, starting the companion if none is running and no
+/// other client is already starting one; see [`crate::startup`].
 pub async fn connect(root: &Path) -> io::Result<Stream> {
-    let name = socket_name(root)?;
-    if let Ok(stream) = Stream::connect(name).await {
-        return Ok(stream);
-    }
-    let executable = std::env::var_os("SEATLINE_COMPANION_BIN")
-        .map(PathBuf::from)
-        .or(crate::install::executable(root)?)
-        .unwrap_or(std::env::current_exe()?.with_file_name(if cfg!(windows) {
-            "seatline-companion.exe"
-        } else {
-            "seatline-companion"
-        }));
-    Command::new(executable)
-        .arg("serve")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    retry_started(|| async { Stream::connect(socket_name(root)?).await }).await
+    connect_with(root, &Startup::default()).await
 }
 
-/// Try immediately, then back off under the same five-second startup budget.
-async fn retry_started<T, F, Fut>(mut attempt: F) -> io::Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = io::Result<T>>,
-{
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let mut delay = Duration::from_millis(10);
-    loop {
-        if let Ok(value) = attempt().await {
-            return Ok(value);
-        }
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return Err(io::Error::other("Seatline companion did not start"));
-        }
-        tokio::time::sleep(delay.min(deadline - now)).await;
-        delay = (delay * 2).min(Duration::from_millis(100));
-    }
+/// [`connect`] with the startup settings given.
+pub async fn connect_with(root: &Path, startup: &Startup) -> io::Result<Stream> {
+    startup::start_or_wait(
+        startup,
+        || async { Stream::connect(socket_name(root)?).await },
+        || startup::claim(root),
+        || startup::start_companion(root, startup),
+        startup::exited,
+    )
+    .await
 }
 
 pub struct RemoteProvider {
@@ -370,48 +343,6 @@ impl Drop for RemoteExchange {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test(start_paused = true)]
-    async fn a_ready_broker_connects_without_a_startup_sleep() {
-        let start = tokio::time::Instant::now();
-        retry_started(|| std::future::ready(Ok(()))).await.unwrap();
-        assert_eq!(start.elapsed(), Duration::ZERO);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn startup_retries_back_off_from_ten_milliseconds() {
-        let start = tokio::time::Instant::now();
-        let mut attempts = Vec::new();
-        retry_started(|| {
-            attempts.push(start.elapsed());
-            std::future::ready(if attempts.len() == 5 {
-                Ok(())
-            } else {
-                Err(io::Error::from(io::ErrorKind::ConnectionRefused))
-            })
-        })
-        .await
-        .unwrap();
-        assert_eq!(attempts, [0, 10, 30, 70, 150].map(Duration::from_millis));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_failed_start_keeps_the_five_second_budget() {
-        let start = tokio::time::Instant::now();
-        let mut attempts = Vec::new();
-        let result: io::Result<()> = retry_started(|| {
-            attempts.push(start.elapsed());
-            std::future::ready(Err(io::Error::from(io::ErrorKind::ConnectionRefused)))
-        })
-        .await;
-        assert!(result.is_err());
-        assert_eq!(start.elapsed(), Duration::from_secs(5));
-        assert!(
-            attempts
-                .windows(2)
-                .all(|pair| { pair[1] - pair[0] <= Duration::from_millis(100) })
-        );
-    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_full_event_buffer_still_allows_cancellation_and_receiver_drop() {

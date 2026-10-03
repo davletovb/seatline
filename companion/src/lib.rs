@@ -4,6 +4,7 @@ pub mod client;
 pub mod config;
 pub mod hub;
 pub mod remote;
+pub mod startup;
 pub mod telemetry;
 pub mod wire;
 
