@@ -8,7 +8,7 @@ It is **off unless asked for**. A broker that is not asked keeps no timelines, t
 
 | Where | How |
 | --- | --- |
-| The broker (`seatline-companion serve`) | Start it with `SEATLINE_TELEMETRY_FILE=<path>`. It appends one JSON line per record to that file, creating it readable only by its owner on Unix. The variable is read once, at start: a broker that is already running must be restarted (it exits by itself when idle, see `SEATLINE_BROKER_IDLE_SECS`). If the file cannot be opened the broker says so on standard error and runs with telemetry off; it never refuses to serve over it. |
+| The broker (`seatline-companion serve`) | Start it with `SEATLINE_TELEMETRY_FILE=<path>`. It appends one JSON line per record to that file. On Unix the file is created readable only by its owner, and one that already exists is tightened to that (or, if it is not the user's to change, or is not a regular file, telemetry stays off with a message on standard error). The variable is read once, at start: a broker that is already running must be restarted (it exits by itself when idle, see `SEATLINE_BROKER_IDLE_SECS`). If the file cannot be opened the broker says so on standard error and runs with telemetry off; it never refuses to serve over it. |
 | A host that runs the hub itself | `seatline_companion::hub::start_with(root, Some(sink))` with any `seatline_core::telemetry::Sink`. `seatline_core::telemetry::Memory` keeps records in memory. |
 | A host that runs the scheduler itself | Start a turn with `Supervisor::start_timed(.., Timeline::new(kind, received))` and take the finished timeline with `Supervisor::take_timeline(id)` once the turn has ended. The scheduler keeps at most 4,096 untaken timelines and drops the oldest past that. |
 
@@ -73,7 +73,7 @@ The span up to the terminal update belongs to the phase the request was in; late
 | `timed_out` | `start`, `idle` or `absolute` | A limit ended it. `stop_requested` is when the limit was found to be exceeded. |
 | `aborted` | `adapter_panicked`, `scheduler_panicked` or `stopped_unexpectedly` | A bug, or a process that stopped on its own. |
 
-The outcome is what the **scheduler** ended with. When the hub itself ends a request early and then stops its exchange (a session-ledger failure today emits `failed` to the client and later reports the scheduler's `cancelled`), the record says `cancelled` while the client saw `failed`. Slice A-02 changes that flow; re-check this row after it lands.
+The outcome is how the **scheduler** ended the turn, with one exception: when the hub ends a request itself by sending its client a terminal update, and then stops the exchange (a session-ledger failure sends `failed` with `SESSION_LIMIT_REACHED` or `SESSION_STORE_FAILED`), the record carries what the client was told. The scheduler's own verdict there can be `cancelled`, or even `completed` if the exchange had finished before the hub acted, and neither is what the client saw.
 
 ## Unsupported and missing phases
 
@@ -150,8 +150,8 @@ Re-run it with `seatline-bench overhead` (release build). It measures the schedu
 ## Verification
 
 - `seatline-core`: marks are set once; phases tile every shape of request, checked on injected instants with no clock; the record has exactly the documented fields.
-- `seatline-scheduler`: boundaries arrive in order for completion, cancel, timeout, adapter panic and scheduler panic; a turn started without a timeline keeps nothing.
+- `seatline-scheduler`: boundaries arrive in order for completion, cancel, timeout, adapter panic and scheduler panic; a turn started without a timeline keeps nothing; an adapter whose `probe_span` panics still ends its turn normally, and untaken timelines are bounded.
 - `seatline-tests/tests/probe_span.rs`: Codex and Claude report their probe, ordered before `launched`; a signed-out probe ends the span and the request before any launch; cancelling mid-probe ends the span; Gemini and Grok report none. Counts are checked against the fake CLI's own invocation log.
-- `seatline-companion`: one record per request across send, status, cleanup, refusal, queue cancel and connection close; telemetry off keeps nothing; the real broker writes its configuration, a handshake and a request record, and writes nothing unless asked.
+- `seatline-companion`: one record per request across send, status, cleanup, refusal, queue cancel, connection close and a hub-ended ledger failure (recorded as the client saw it); telemetry off keeps nothing; an existing world-readable telemetry file is made private; the real broker writes its configuration, a handshake and a request record, and writes nothing unless asked.
 
 No test asserts a wall-clock threshold: orderings are compared, durations are compared only with each other, and exact values come from injected instants.
