@@ -1,5 +1,8 @@
-//! Client adapters. Each exchange has one authenticated IPC connection;
-//! disconnecting it cancels only that exchange, never another app's work.
+//! Client adapters. Each exchange of a [`RemoteProvider`] made with
+//! [`RemoteProvider::new`] has one authenticated IPC connection of its own;
+//! disconnecting it cancels only that exchange, never another app's work. One
+//! made with [`RemoteProvider::with_client`] shares its app's
+//! [`RemoteClient`]: one runtime and one connection for all of its requests.
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -22,6 +25,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::remote::RemoteClient;
 use crate::{PROTOCOL_VERSION, config, wire};
 
 pub fn socket_name(root: &Path) -> io::Result<interprocess::local_socket::Name<'static>> {
@@ -83,9 +87,15 @@ pub struct RemoteProvider {
     capabilities: Capabilities,
     timeouts: Timeouts,
     persistent: bool,
+    /// The app's shared connection, when it has one; without it each exchange
+    /// opens a connection of its own.
+    client: Option<RemoteClient>,
 }
 
 impl RemoteProvider {
+    /// A provider whose every exchange connects and authenticates for itself.
+    /// This is the compatibility path; an app that makes many requests wants
+    /// [`RemoteProvider::with_client`].
     pub fn new(app: &str, metadata: &dyn Provider) -> Self {
         Self {
             app: app.to_owned(),
@@ -93,14 +103,29 @@ impl RemoteProvider {
             capabilities: metadata.capabilities(),
             timeouts: metadata.timeouts(),
             persistent: metadata.supports_persistent_session(),
+            client: None,
         }
     }
+
+    /// A provider whose exchanges are requests on `client`, the app's shared
+    /// connection, which belongs to the same app the grant names.
+    pub fn with_client(app: &str, client: RemoteClient, metadata: &dyn Provider) -> Self {
+        Self {
+            client: Some(client),
+            ..Self::new(app, metadata)
+        }
+    }
+
+    fn requester(&self) -> Requester {
+        Requester {
+            app: self.app.clone(),
+            provider: self.id.clone(),
+            client: self.client.clone(),
+        }
+    }
+
     fn request(&self, method: &str, params: Value) -> Box<dyn Exchange> {
-        RemoteExchange::start(
-            &self.app,
-            json!({"id":"request", "method":method,
-            "provider":self.id,"params":params}),
-        )
+        self.requester().request(method, params)
     }
 }
 
@@ -124,50 +149,53 @@ impl Provider for RemoteProvider {
         self.request("send", json!(turn))
     }
     fn cleanup_sessions(&self, sessions: &[String]) -> Cleanup {
-        let (app, provider, sessions) = (self.app.clone(), self.id.clone(), sessions.to_vec());
+        let (requester, sessions) = (self.requester(), sessions.to_vec());
         Cleanup::new(
-            move || {
-                let mut exchange = RemoteExchange::start(
-                    &app,
-                    json!({"id":"request",
-                "method":"forget","provider":provider,"params":{"sessions":sessions}}),
-                );
-                let deadline = Instant::now() + Duration::from_secs(30);
-                loop {
-                    match exchange.next(deadline) {
-                        Some(Update::Completed) => return Ok(()),
-                        Some(Update::Failed(_)) | Some(Update::Stopped) | None => {
-                            return Err(io::Error::other("Seatline cleanup failed"));
-                        }
-                        _ => {}
-                    }
-                }
-            },
+            move || run_cleanup(&requester, "forget", json!({"sessions":sessions})),
             || {},
         )
     }
     fn cleanup_group(&self, group: &str) -> Cleanup {
-        let (app, provider, group) = (self.app.clone(), self.id.clone(), group.to_owned());
+        let (requester, group) = (self.requester(), group.to_owned());
         Cleanup::new(
-            move || {
-                let mut exchange = RemoteExchange::start(
-                    &app,
-                    json!({"id":"request",
-                "method":"cleanup","provider":provider,"params":{"group":group}}),
-                );
-                let deadline = Instant::now() + Duration::from_secs(30);
-                loop {
-                    match exchange.next(deadline) {
-                        Some(Update::Completed) => return Ok(()),
-                        Some(Update::Failed(_)) | Some(Update::Stopped) | None => {
-                            return Err(io::Error::other("Seatline cleanup failed"));
-                        }
-                        _ => {}
-                    }
-                }
-            },
+            move || run_cleanup(&requester, "cleanup", json!({"group":group})),
             || {},
         )
+    }
+}
+
+/// What makes one provider's requests, for work that must own what it needs.
+struct Requester {
+    app: String,
+    provider: String,
+    client: Option<RemoteClient>,
+}
+
+impl Requester {
+    fn request(&self, method: &str, params: Value) -> Box<dyn Exchange> {
+        match &self.client {
+            Some(client) => client.request(method, &self.provider, params),
+            None => RemoteExchange::start(
+                &self.app,
+                json!({"id":"request", "method":method,
+            "provider":self.provider,"params":params}),
+            ),
+        }
+    }
+}
+
+/// Runs a cleanup request to its end: done once it completed, failed otherwise.
+fn run_cleanup(requester: &Requester, method: &str, params: Value) -> io::Result<()> {
+    let mut exchange = requester.request(method, params);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match exchange.next(deadline) {
+            Some(Update::Completed) => return Ok(()),
+            Some(Update::Failed(_)) | Some(Update::Stopped) | None => {
+                return Err(io::Error::other("Seatline cleanup failed"));
+            }
+            _ => {}
+        }
     }
 }
 

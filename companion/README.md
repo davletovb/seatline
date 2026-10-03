@@ -160,7 +160,45 @@ for the exact boundaries, what is missing per provider, and the format.
 
 An app that only talks to the local broker (a native host, for example) can
 depend on `seatline-companion` with `default-features = false` and use
-`client::RemoteProvider`. That build has no pairing command and links none of
+`remote::RemoteClient` (below) or `client::RemoteProvider`. That build has no pairing command and links none of
 the hosted transport's TLS, WebSocket or crypto dependencies; CI checks the
 dependency tree. The `seatline-companion` executable itself needs the default
 `web` feature.
+
+### One client for the whole app
+
+`client::RemoteProvider::new` gives every exchange a thread, a runtime and a
+connection of its own, authenticated for one request: it is the compatibility
+path and is unchanged. An app that makes many requests wants one
+`remote::RemoteClient`, which keeps **one runtime and one authenticated
+connection** for all of them (`RemoteProvider::with_client` routes a provider's
+status, turns and cleanups through it):
+
+```rust
+let client = RemoteClient::new("my_app");          // connects on the first request
+let mut exchange = client.send("codex", &turn);    // a `Box<dyn Exchange>`, as ever
+```
+
+- Requests get IDs no other request on the client has used, are sent in the
+  order they are made, and their events are routed to their own exchange.
+  `exchange.cancel()` stops that request and no other.
+- The client keeps at most 64 requests in flight (`Limits::max_in_flight`); one
+  more fails at once with a retryable `QUEUE_FULL`. A request too big for a
+  frame fails alone with `INVALID_REQUEST`.
+- Each request queues at most 4 MiB of unread events
+  (`Limits::max_unread_bytes`). The connection is shared, so the client never
+  waits for one request's consumer; a consumer that falls further behind has
+  **its own request** cancelled, receives everything queued so far whole and in
+  order, and then one `CONSUMER_TOO_SLOW` failure. Other requests are
+  unaffected. (The in-process service applies the same policy to a turn's
+  handle.)
+- If the connection is lost, every request in flight on it ends as a retryable
+  `COMPANION_DISCONNECTED`. **Nothing is replayed**: the broker may already
+  have started the generation, so repeating it is the app's decision. The next
+  request connects again and reads the grant afresh. A grant that was rotated
+  or revoked makes the broker close the connection at its next request, which
+  ends what was in flight on it; after a revocation new requests fail with
+  `APP_NOT_AUTHORIZED`. Only that app's connection is affected.
+- `client.close()` ends everything in flight as stopped. Dropping every handle,
+  and every exchange, closes the connection. While a client is open its
+  connection keeps the broker running.
