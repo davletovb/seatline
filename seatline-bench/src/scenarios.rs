@@ -98,7 +98,7 @@ fn describe(name: &str) -> Option<Description> {
         },
         "short-contended" => Description {
             state: "warm_broker_fresh_provider",
-            text: "As `short-isolated-paced`, while two other applications keep the provider's slots busy with long requests (about 300 ms each).",
+            text: "As `short-isolated-paced`, while two other applications keep the provider's slots busy with long requests (about 300 ms each) for as long as the short one is measured.",
         },
         _ => return None,
     })
@@ -158,6 +158,13 @@ struct Plan {
     app: &'static str,
     role: &'static str,
     requests: Vec<Req>,
+}
+
+impl Plan {
+    /// A background load runs until the measured applications are done.
+    fn is_background(&self) -> bool {
+        self.role == "long"
+    }
 }
 
 pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
@@ -236,14 +243,28 @@ pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
             })
             .collect(),
         "short-contended" => {
-            let window_ms = (params.warmup + params.samples) as u64 * (params.gap_ms + 15);
+            // Enough long requests to outlast the short application even if
+            // each of its requests waits out a whole one; the load is stopped
+            // when the short application is done, not when it runs out.
+            let window_ms =
+                (params.warmup + params.samples) as u64 * (params.gap_ms + LONG_MS + 15);
             let longs = (window_ms / LONG_MS + 3) as usize;
-            let long = |app: &'static str| Plan {
+            // Two applications that began together would finish together and
+            // leave the short request the same wait every time: the second
+            // starts half a request later, as independent programs drift.
+            let long = |app: &'static str, offset_ms: u64| Plan {
                 app,
                 role: "long",
                 requests: ids(name, app, longs)
                     .into_iter()
-                    .map(|id| request(id, "slow hello"))
+                    .enumerate()
+                    .map(|(index, id)| {
+                        let mut req = request(id, "slow hello");
+                        if index == 0 {
+                            req.gap_ms = offset_ms;
+                        }
+                        req
+                    })
                     .collect(),
             };
             vec![
@@ -254,8 +275,8 @@ pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
                         req.gap_ms = params.gap_ms
                     }),
                 },
-                long("bench-b"),
-                long("bench-c"),
+                long("bench-b", 0),
+                long("bench-c", LONG_MS / 2),
             ]
         }
         other => return Err(io::Error::other(format!("no scenario `{other}`"))),
@@ -264,6 +285,7 @@ pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
     let apps: Vec<&str> = plans.iter().map(|plan| plan.app).collect();
     let instance = lab.instance(&apps)?;
     let broker = lab.start_broker(&instance, &apps)?;
+    let stop_file = lab.scratch.join("stop-background");
     let mut children = Vec::new();
     for plan in &plans {
         let spec = Spec {
@@ -271,6 +293,7 @@ pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
             app: plan.app.to_owned(),
             provider: lab.settings.provider().to_owned(),
             requests: plan.requests.clone(),
+            stop_file: plan.is_background().then(|| stop_file.clone()),
         };
         children.push(lab.spawn_app(&instance, &apps, 0, &spec)?);
     }
@@ -278,11 +301,23 @@ pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
     for child in &mut children {
         child.go()?;
     }
-    let mut results = Vec::new();
-    for child in children {
-        results.push(child.finish()?);
+    // The applications being measured finish first; then the background load,
+    // which has been keeping them company all along, is told to stop.
+    let mut results: Vec<Option<Vec<Sample>>> = plans.iter().map(|_| None).collect();
+    let mut children: Vec<Option<_>> = children.into_iter().map(Some).collect();
+    for background in [false, true] {
+        if background {
+            std::fs::write(&stop_file, b"")?;
+        }
+        for (index, plan) in plans.iter().enumerate() {
+            if plan.is_background() == background {
+                let child = children[index].take().expect("each child finishes once");
+                results[index] = Some(child.finish()?);
+            }
+        }
     }
-    let expected: usize = plans.iter().map(|plan| plan.requests.len()).sum();
+    let results: Vec<Vec<Sample>> = results.into_iter().flatten().collect();
+    let expected: usize = results.iter().map(Vec::len).sum();
     let records = wait_for_records(&instance.telemetry, expected);
     drop(broker);
     lab.remember_broker(&records);
@@ -290,7 +325,7 @@ pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
     let mut requests_total = 0;
     for (plan, mut samples) in plans.iter().zip(results) {
         join_for(&mut samples, &records);
-        requests_total += plan.requests.len() as u64;
+        requests_total += samples.len() as u64;
         let result = app_result(plan.app, plan.role, &samples);
         ensure_some_completed(name, &result)?;
         scenario.apps.push(result);
@@ -312,6 +347,7 @@ fn cold(lab: &mut Lab, mut scenario: Scenario, params: Params) -> io::Result<Sce
             app: "bench-a".to_owned(),
             provider: lab.settings.provider().to_owned(),
             requests: vec![req.clone()],
+            stop_file: None,
         };
         // A broker that starts for this request leaves by itself a second after
         // it is idle, so that the next sample finds none.

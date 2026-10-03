@@ -38,6 +38,9 @@ pub fn run(spec: Spec) -> io::Result<()> {
         .build()?;
     let mut handle: Option<String> = None;
     for req in &spec.requests {
+        if spec.stop_file.as_ref().is_some_and(|stop| stop.exists()) {
+            break;
+        }
         if req.gap_ms > 0 {
             std::thread::sleep(Duration::from_millis(req.gap_ms));
         }

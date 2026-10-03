@@ -14,6 +14,10 @@ pub struct Spec {
     pub app: String,
     pub provider: String,
     pub requests: Vec<Req>,
+    /// When this file exists the application makes no further request and
+    /// finishes: how a background load is told the measurement is over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
