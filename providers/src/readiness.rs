@@ -10,7 +10,7 @@ use seatline_core::protocol::{
 use seatline_core::readiness::{Freshness, MAX_AGE, Readiness, Source};
 use seatline_core::telemetry::Span;
 use seatline_core::turn::Turn;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -96,6 +96,9 @@ struct Verified {
 #[derive(Default)]
 struct State {
     epoch: u64,
+    // Only explicit invalidation/authentication failures revoke evidence.
+    // Starting another fresh check merely changes publication ownership.
+    invalidations: Rc<Cell<u64>>,
     cached: Option<Verified>,
     flight: Option<Weak<RefCell<Flight>>>,
 }
@@ -171,6 +174,8 @@ impl Ready {
         state.epoch = state.epoch.wrapping_add(1);
         state.cached = None;
         let epoch = state.epoch;
+        let invalidations = Rc::clone(&state.invalidations);
+        let generation = invalidations.get();
         drop(state);
         let exchange = self.provider.status();
         let flight = Rc::new(RefCell::new(Flight {
@@ -179,6 +184,8 @@ impl Ready {
             state: Rc::downgrade(&self.state),
             key,
             epoch,
+            invalidations,
+            generation,
             updates: Vec::new(),
             candidate: None,
             observed: None,
@@ -271,6 +278,7 @@ impl Provider for Ready {
 fn invalidate(state: &Rc<RefCell<State>>) {
     let mut state = state.borrow_mut();
     state.epoch = state.epoch.wrapping_add(1);
+    state.invalidations.set(state.invalidations.get().wrapping_add(1));
     state.cached = None;
     state.flight = None;
 }
@@ -281,6 +289,10 @@ struct Flight {
     state: Weak<RefCell<State>>,
     key: Option<Key>,
     epoch: u64,
+    // Remains observable after the owning Ready wrapper is dropped, without
+    // retaining the cache itself or introducing a reference cycle.
+    invalidations: Rc<Cell<u64>>,
+    generation: u64,
     updates: Vec<Update>,
     candidate: Option<ProviderState>,
     // Freshness begins when Status was observed, not when a slow subscriber
@@ -430,10 +442,7 @@ impl Exchange for Subscriber {
                 .is_some_and(|at| at.elapsed() >= self.max_age)
             {
                 Some("READINESS_EXPIRED")
-            } else if flight
-                .state
-                .upgrade()
-                .is_some_and(|state| state.borrow().epoch != flight.epoch)
+            } else if flight.invalidations.get() != flight.generation
                 || (!polled
                     && flight.key.is_some()
                     && flight.provider.readiness_key() != flight.key)
@@ -494,7 +503,11 @@ impl Exchange for CachedHit {
                     // Discard only this stale cache. A newer epoch may have
                     // already published different, valid evidence.
                     if self.ready.state.borrow().epoch == self.epoch {
-                        invalidate(&self.ready.state);
+                        // Cache expiry/refresh is not a revocation of another
+                        // caller's still-valid fresh check.
+                        let mut state = self.ready.state.borrow_mut();
+                        state.cached = None;
+                        state.flight = None;
                     }
                     self.inner = Some(self.ready.check(self.freshness));
                     return self.inner.as_mut().unwrap().next(deadline);
@@ -553,7 +566,10 @@ struct Tracked {
 impl Exchange for Tracked {
     fn next(&mut self, deadline: Instant) -> Option<Update> {
         let update = self.exchange.next(deadline);
-        if matches!(&update, Some(Update::Failed(error)) if matches!(error.code, ErrorCode::ProviderNotAuthenticated | ErrorCode::ProviderNotFound) || matches!(error.reason, "AUTH_REJECTED" | "LOGIN_REQUIRED" | "PROVIDER_UNAVAILABLE" | "READINESS_CHANGED" | "READINESS_EXPIRED"))
+        // Changed/expired readiness belongs to this exchange's evidence.
+        // Its consumption checks already reject it; treating that consequence
+        // as a new revocation could cancel a peer's current fresh check.
+        if matches!(&update, Some(Update::Failed(error)) if matches!(error.code, ErrorCode::ProviderNotAuthenticated | ErrorCode::ProviderNotFound) || matches!(error.reason, "AUTH_REJECTED" | "LOGIN_REQUIRED" | "PROVIDER_UNAVAILABLE"))
         {
             if let Some(state) = self.state.upgrade() {
                 invalidate(&state);
@@ -1023,6 +1039,98 @@ mod tests {
             matches!(send.next(Instant::now()), Some(Update::Failed(error)) if error.reason == "READINESS_EXPIRED")
         );
         assert_eq!(control.sends.get(), 0);
+    }
+
+    #[test]
+    fn concurrent_fresh_sends_do_not_invalidate_each_others_verified_checks() {
+        let (ready, control) = setup();
+        let first = ready.send_with_readiness(turn(true), CACHED);
+        let second = ready.send_with_readiness(turn(true), CACHED);
+        for send in [first, second] {
+            let updates = drain(send);
+            assert_eq!(source(&updates), Source::Fresh);
+            assert_eq!(updates.last(), Some(&Update::Completed), "{updates:?}");
+        }
+        assert_eq!((control.probes.get(), control.sends.get()), (2, 2));
+        assert_eq!(source(&drain(ready.prepare(CACHED))), Source::Cached);
+    }
+
+    #[test]
+    fn explicit_invalidation_blocks_fresh_and_shared_launch_even_after_wrapper_drop() {
+        for shared in [false, true] {
+            for drop_wrapper in [false, true] {
+                let (ready, control) = setup();
+                let mut first = ready.prepare(CACHED);
+                let mut send = ready.send_with_readiness(turn(!shared), CACHED);
+                if shared {
+                    assert!(matches!(
+                        first.next(Instant::now()),
+                        Some(Update::Status { .. })
+                    ));
+                }
+                assert!(matches!(
+                    send.next(Instant::now()),
+                    Some(Update::Status { .. })
+                ));
+                if shared {
+                    assert_eq!(first.next(Instant::now()), Some(Update::Completed));
+                }
+                ready.invalidate_readiness();
+                if drop_wrapper {
+                    drop(ready);
+                }
+                assert!(
+                    matches!(send.next(Instant::now()), Some(Update::Failed(error)) if error.reason == "READINESS_CHANGED")
+                );
+                assert_eq!(control.sends.get(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn one_exchanges_readiness_failure_does_not_revoke_a_peers_valid_evidence() {
+        let (ready, control) = setup();
+        let mut short = ready.send_with_readiness(
+            turn(false),
+            Freshness::Cached { max_age_ms: 1_000 },
+        );
+        let mut peer = ready.send_with_readiness(turn(false), CACHED);
+        assert!(matches!(
+            short.next(Instant::now()),
+            Some(Update::Status { .. })
+        ));
+        assert!(matches!(
+            peer.next(Instant::now()),
+            Some(Update::Status { .. })
+        ));
+        let flight = ready
+            .state
+            .borrow()
+            .flight
+            .as_ref()
+            .unwrap()
+            .upgrade()
+            .unwrap();
+        flight.borrow_mut().observed = Some(Instant::now() - Duration::from_secs(2));
+        assert!(
+            matches!(short.next(Instant::now()), Some(Update::Failed(error)) if error.reason == "READINESS_EXPIRED")
+        );
+        assert_eq!(drain(peer).last(), Some(&Update::Completed));
+        assert_eq!(control.sends.get(), 1);
+
+        let (ready, control) = setup();
+        let mut old = ready.send_with_readiness(turn(true), CACHED);
+        assert!(matches!(
+            old.next(Instant::now()),
+            Some(Update::Status { .. })
+        ));
+        ready.invalidate_readiness();
+        let current = ready.send_with_readiness(turn(true), CACHED);
+        assert!(
+            matches!(old.next(Instant::now()), Some(Update::Failed(error)) if error.reason == "READINESS_CHANGED")
+        );
+        assert_eq!(drain(current).last(), Some(&Update::Completed));
+        assert_eq!(control.sends.get(), 1);
     }
 
     #[test]
