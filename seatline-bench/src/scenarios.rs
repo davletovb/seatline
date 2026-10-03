@@ -24,8 +24,9 @@ pub struct Params {
 }
 
 /// Every scenario, in the order they are run.
-pub const ALL: [&str; 11] = [
+pub const ALL: [&str; 12] = [
     "cold-broker",
+    "cold-three-app",
     "warm-send",
     "warm-send-adapter",
     "warm-send-shared",
@@ -65,6 +66,10 @@ fn describe(name: &str) -> Option<Description> {
         "cold-broker" => Description {
             state: "cold_broker_fresh_provider",
             text: "No broker is running. The application's client starts one, connects, and sends one request; the provider is a fresh process. Each sample uses a new broker and data directory. Preparation includes starting the broker.",
+        },
+        "cold-three-app" => Description {
+            state: "cold_broker_fresh_provider",
+            text: "No broker is running, and three applications start at the same moment, each with one request. Their clients all find no broker and each start one: how many companion processes that takes, and how long each application waits for the broker, is what is measured. Each sample uses a new broker and data directory, and the applications start the companion through the harness, which counts the starts and adds one process hop to each.",
         },
         "warm-send" => Description {
             state: "warm_broker_fresh_provider",
@@ -229,6 +234,7 @@ pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
     }
     let plans = match name {
         "cold-broker" => return cold(lab, scenario, params),
+        "cold-three-app" => return cold_together(lab, scenario, params),
         "warm-send" => vec![Plan {
             app: "bench-a",
             role: "single",
@@ -414,6 +420,58 @@ fn cold(lab: &mut Lab, mut scenario: Scenario, params: Params) -> io::Result<Sce
     Ok(scenario)
 }
 
+/// A new broker for every sample, as in `cold`, but three applications start
+/// at once and each asks for its first request, so all three find no broker.
+fn cold_together(lab: &mut Lab, mut scenario: Scenario, params: Params) -> io::Result<Scenario> {
+    let live = lab.settings.live.is_some();
+    let apps = ["bench-a", "bench-b", "bench-c"];
+    lab.count_companion_starts();
+    let mut samples: Vec<Vec<Sample>> = apps.iter().map(|_| Vec::new()).collect();
+    for round in 0..params.warmup + params.samples {
+        let instance = lab.instance(&apps)?;
+        let mut children = Vec::new();
+        for app in apps {
+            let mut req = request(format!("cold-three-app-{app}-{round}"), short_prompt(live));
+            req.measured = round >= params.warmup;
+            let spec = Spec {
+                root: instance.root.clone(),
+                app: app.to_owned(),
+                provider: lab.settings.provider().to_owned(),
+                requests: vec![req],
+                stop_file: None,
+            };
+            // A broker that starts leaves by itself a second after it is idle.
+            children.push(lab.spawn_app(&instance, &apps, 1, &spec)?);
+        }
+        // Every application is ready: they find no broker together.
+        for child in &mut children {
+            child.go()?;
+        }
+        let mut round_samples = Vec::new();
+        for child in children {
+            round_samples.push(child.finish()?);
+        }
+        let records = wait_for_records(&instance.telemetry, apps.len());
+        lab.remember_broker(&records);
+        for (kept, mut theirs) in samples.iter_mut().zip(round_samples) {
+            join_for(&mut theirs, &records);
+            kept.append(&mut theirs);
+        }
+        wait_until_stopped(&instance.root)?;
+    }
+    for (app, samples) in apps.iter().zip(&samples) {
+        let result = app_result(app, "cold", samples);
+        ensure_some_completed("cold-three-app", &result)?;
+        scenario.apps.push(result);
+    }
+    scenario.counts = counts(
+        lab,
+        &scenario.apps,
+        (apps.len() * (params.warmup + params.samples)) as u64,
+    );
+    Ok(scenario)
+}
+
 fn counts(lab: &Lab, apps: &[AppResult], requests_total: u64) -> Counts {
     let measured = apps.iter().flat_map(|app| app.samples.iter());
     let (mut probes, mut launches) = (0, 0);
@@ -435,6 +493,7 @@ fn counts(lab: &Lab, apps: &[AppResult], requests_total: u64) -> Counts {
         fake_turns,
         broker_probes: probes,
         broker_launches: launches,
+        companion_starts: lab.companion_starts(),
     }
 }
 

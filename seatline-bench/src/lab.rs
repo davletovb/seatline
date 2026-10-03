@@ -40,6 +40,11 @@ pub struct Settings {
     pub keep: bool,
 }
 
+/// The variables that make the harness stand in for the companion when a
+/// client starts it: the real companion to run, and the log to count in.
+pub const SHIM_COMPANION: &str = "SEATLINE_BENCH_REAL_COMPANION";
+pub const SHIM_LOG: &str = "SEATLINE_BENCH_SPAWN_LOG";
+
 /// How long a broker the harness starts for a warm scenario may sit idle before
 /// it leaves. It is never idle that long while a scenario runs, and a broker
 /// whose harness was killed does not outlive it for long.
@@ -86,6 +91,9 @@ pub struct Lab {
     instances: usize,
     /// What a broker said it ran with, from the first telemetry that had it.
     pub broker_record: Option<Value>,
+    /// Where the starts of the companion are logged, when the applications
+    /// start it through the harness's own shim to be counted.
+    spawn_log: Option<PathBuf>,
 }
 
 impl Drop for Lab {
@@ -126,6 +134,7 @@ impl Lab {
             home,
             instances: 0,
             broker_record: None,
+            spawn_log: None,
         };
         if settings.live.is_none() {
             lab.install_fake_codex()?;
@@ -154,6 +163,23 @@ impl Lab {
             std::fs::read_to_string(self.providers.join("codex-invocations")).unwrap_or_default();
         let count = |prefix: &str| text.lines().filter(|l| l.starts_with(prefix)).count() as u64;
         (count("login status"), count("exec "))
+    }
+
+    /// From here on, applications that start the companion do it through the
+    /// harness's own shim, which logs each start before running the real one.
+    /// Every start costs one more process hop, so only a scenario that counts
+    /// starts asks for it.
+    pub fn count_companion_starts(&mut self) {
+        self.spawn_log = Some(self.scratch.join("companion-starts.log"));
+    }
+
+    /// How many times the companion was started through the shim: each is one
+    /// `serve` the applications' clients asked for, whether it went on to
+    /// serve or found another broker already did.
+    pub fn companion_starts(&self) -> Option<u64> {
+        let log = self.spawn_log.as_ref()?;
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        Some(text.lines().count() as u64)
     }
 
     /// Keeps the broker's own record of its configuration, once.
@@ -196,7 +222,10 @@ impl Lab {
             ("SEATLINE_DATA_DIR".into(), instance.root.clone().into()),
             (
                 "SEATLINE_COMPANION_BIN".into(),
-                self.settings.companion.clone().into(),
+                match &self.spawn_log {
+                    Some(_) => self.settings.harness.clone().into(),
+                    None => self.settings.companion.clone().into(),
+                },
             ),
             (
                 telemetry::FILE_VARIABLE.into(),
@@ -207,6 +236,13 @@ impl Lab {
                 idle_secs.to_string().into(),
             ),
         ];
+        if let Some(log) = &self.spawn_log {
+            env.push((
+                SHIM_COMPANION.into(),
+                self.settings.companion.clone().into(),
+            ));
+            env.push((SHIM_LOG.into(), log.clone().into()));
+        }
         if self.settings.live.is_none() {
             // The fake provider is the only one the apps can find, and
             // everything they write goes under the scratch directory.
@@ -404,4 +440,38 @@ pub fn read_telemetry(path: &Path) -> Vec<Value> {
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
+}
+
+/// The harness run as `serve`, which is how a client starts the companion:
+/// log that it was asked to, then become the real companion, so the broker
+/// that results is the one the client would have had.
+#[allow(clippy::disallowed_methods)] // Runs the companion this harness was pointed at, never a request-supplied program.
+pub fn shim_serve() -> io::Result<()> {
+    let real = std::env::var_os(SHIM_COMPANION)
+        .ok_or_else(|| io::Error::other("not started as the companion's stand-in"))?;
+    if let Some(log) = std::env::var_os(SHIM_LOG) {
+        // One short line per start, in a single write, so that starts that
+        // happen together do not mix their lines.
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)?;
+        file.write_all(b"serve\n")?;
+    }
+    let mut command = Command::new(real);
+    command.arg("serve");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(command.exec())
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other("the companion failed"))
+        }
+    }
 }

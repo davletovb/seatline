@@ -201,6 +201,41 @@ fn warm_scenarios_count_processes_the_way_the_fake_provider_did() {
 }
 
 #[test]
+fn applications_that_start_together_with_no_broker_are_counted_and_all_served() {
+    let (report, _) = report(&[
+        "run",
+        "--scenario",
+        "cold-three-app",
+        "--samples",
+        "2",
+        "--warmup",
+        "1",
+    ]);
+    let cold = scenario(&report, "cold-three-app");
+    assert_eq!(cold["state"], "cold_broker_fresh_provider");
+    assert_eq!(cold["status"], "measured");
+    let apps = cold["apps"].as_array().unwrap();
+    assert_eq!(apps.len(), 3);
+    for app in apps {
+        assert_eq!(
+            (app["completed"].as_u64(), app["failed"].as_u64()),
+            (Some(2), Some(0)),
+            "{app}"
+        );
+        assert_eq!(metric(app, "client_prepare_us")["n"], 2);
+    }
+    // Three rounds (one is warm-up) of three requests, each served by a fresh
+    // provider process, and at least one start of the companion for each round.
+    assert_eq!(cold["counts"]["requests_total"], 9);
+    assert_eq!(cold["counts"]["fake_turns"], 9);
+    let starts = cold["counts"]["companion_starts"].as_u64().unwrap();
+    assert!(
+        (3..=9).contains(&starts),
+        "{starts} starts for 3 cold starts"
+    );
+}
+
+#[test]
 fn resumed_context_is_a_state_of_its_own_and_reused_process_is_not_faked() {
     let (report, _) = report(&[
         "run",

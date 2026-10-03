@@ -68,6 +68,8 @@ fn run() -> io::Result<()> {
                 serde_json::from_slice(&std::fs::read(&args[1])?).map_err(io::Error::other)?;
             app::run(spec)
         }
+        // How a client starts the companion: see `Lab::count_companion_starts`.
+        Some("serve") if args.len() == 1 => lab::shim_serve(),
         Some("overhead") => overhead::command(&args[1..]),
         Some("report") if args.len() == 2 => {
             print!("{}", report::markdown(&read_report(&args[1])?));
