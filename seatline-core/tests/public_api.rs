@@ -96,6 +96,7 @@ fn exchange_and_platform_types_do_not_depend_on_host() {
         },
         models: Cow::Borrowed(&[]),
         sign_in: None,
+        readiness: None,
     };
     let mut exchange: Box<dyn Exchange> = Box::new(Scripted::new([
         Update::Status {

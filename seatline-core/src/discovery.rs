@@ -7,6 +7,9 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+mod cache;
+pub use cache::{CachedSearchPath, DISCOVERY_MAX_AGE, FileStamp};
+
 /// The directories searched for provider executables, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchPath(Vec<PathBuf>);
@@ -159,7 +162,7 @@ fn nvm_bins(versions: &Path) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
-    fn temp_dir(name: &str) -> PathBuf {
+    pub(super) fn temp_dir(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("discovery-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -176,7 +179,7 @@ mod tests {
         }
     }
 
-    fn install(dir: &Path, file: &str) -> PathBuf {
+    pub(super) fn install(dir: &Path, file: &str) -> PathBuf {
         let path = dir.join(file);
         std::fs::write(&path, b"#!/bin/sh\n").unwrap();
         #[cfg(unix)]

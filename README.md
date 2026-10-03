@@ -82,3 +82,5 @@ at your option.
 ## Consuming Seatline
 
 Until the 0.x API settles, applications should pin the Seatline Git repository to an exact commit revision and update that pin deliberately after their own integration tests pass.
+
+Readiness caching and prompt-free preparation are available through the explicit provider and companion APIs; see the [readiness and preparation contract](docs/readiness-and-preparation.md).

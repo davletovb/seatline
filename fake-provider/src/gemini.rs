@@ -22,6 +22,19 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
 
 fn run(args: Vec<OsString>) -> Result<(), ()> {
     if args.first().is_some_and(|arg| arg == OsStr::new("models")) {
+        crate::record("agy", "probes", "models\n");
+        match crate::readiness_scenario("agy").as_str() {
+            "signed-out" => {
+                eprintln!("authentication required");
+                return Err(());
+            }
+            "broken" => {
+                eprintln!("configuration unavailable");
+                return Err(());
+            }
+            "hangs" => std::thread::sleep(std::time::Duration::from_secs(60)),
+            _ => {}
+        }
         // A real status probe must close stdin; otherwise an interactive
         // prompt can wait forever instead of observing EOF.
         let mut stdin = String::new();

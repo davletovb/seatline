@@ -120,14 +120,18 @@ fn codex_reports_the_probe_it_ran_before_its_turn() {
             .iter()
             .filter(|l| l.starts_with("login "))
             .count(),
-        1
+        1,
+        "fake invocations: {invocations:?}; telemetry marks: {:?}",
+        in_order(&timeline)
     );
     assert_eq!(
         invocations
             .iter()
             .filter(|l| l.starts_with("exec "))
             .count(),
-        1
+        1,
+        "fake invocations: {invocations:?}; telemetry marks: {:?}",
+        in_order(&timeline)
     );
 }
 
