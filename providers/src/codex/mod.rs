@@ -952,6 +952,8 @@ impl Exchange for Turn {
                         .is_some_and(|finish_by| Instant::now() >= finish_by)
                     {
                         self.finish_by = None;
+                        // Stop the child without marking the turn cancelled,
+                        // so exited() preserves the stored terminal outcome.
                         stream.cancel(Duration::ZERO);
                     }
                     let wait = self
