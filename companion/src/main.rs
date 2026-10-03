@@ -14,8 +14,9 @@ use interprocess::local_socket::{
 use seatline_companion::{
     PROTOCOL_VERSION, client,
     config::{self, Grant, NativeAdapter},
-    hub, wire,
+    hub, telemetry, wire,
 };
+use seatline_core::telemetry::Sink;
 use serde_json::{Value, json};
 
 fn main() {
@@ -47,11 +48,12 @@ fn run() -> io::Result<()> {
             if root.join("broker.sock").exists() {
                 std::fs::remove_file(root.join("broker.sock"))?;
             }
-            let hub = hub::start(root.clone())?;
+            let telemetry = telemetry::from_env();
+            let hub = hub::start_with(root.clone(), telemetry.clone())?;
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?
-                .block_on(serve(root, hub))
+                .block_on(serve(root, hub, telemetry))
         }
         Some("pair") if args.len() == 4 || (args.len() == 5 && args[4] == "--open") => {
             tokio::runtime::Builder::new_current_thread()
@@ -198,7 +200,20 @@ fn idle_limit() -> Option<Duration> {
     (seconds > 0).then(|| Duration::from_secs(seconds))
 }
 
-async fn serve(root: PathBuf, hub: std::sync::mpsc::SyncSender<hub::Command>) -> io::Result<()> {
+async fn serve(
+    root: PathBuf,
+    hub: std::sync::mpsc::SyncSender<hub::Command>,
+    telemetry: Option<Arc<dyn Sink>>,
+) -> io::Result<()> {
+    if let Some(sink) = &telemetry {
+        let mut limits = hub::limits();
+        limits.insert("listener_max_connections", MAX_CONNECTIONS as u64);
+        limits.insert(
+            "idle_exit_ms",
+            idle_limit().map_or(0, |idle| idle.as_millis() as u64),
+        );
+        sink.record(telemetry::broker_record(limits));
+    }
     let listener = ListenerOptions::new()
         .name(client::socket_name(&root)?)
         .create_tokio()?;
@@ -248,15 +263,16 @@ async fn serve(root: PathBuf, hub: std::sync::mpsc::SyncSender<hub::Command>) ->
             });
             continue;
         };
-        let (root, hub, connection, last_activity) = (
+        let (root, hub, connection, last_activity, telemetry) = (
             root.clone(),
             hub.clone(),
             ids.fetch_add(1, Ordering::Relaxed),
             last_activity.clone(),
+            telemetry.clone(),
         );
         tokio::spawn(async move {
             let _permit = permit;
-            let _ = connection_loop(stream, root, hub.clone(), connection).await;
+            let _ = connection_loop(stream, root, hub.clone(), connection, telemetry).await;
             // Close must eventually be delivered even when the bounded inbox is full.
             while let Err(std::sync::mpsc::TrySendError::Full(_)) =
                 hub.try_send(hub::Command::Close(connection))
@@ -273,9 +289,12 @@ async fn connection_loop(
     root: PathBuf,
     hub: std::sync::mpsc::SyncSender<hub::Command>,
     connection: u64,
+    telemetry: Option<Arc<dyn Sink>>,
 ) -> io::Result<()> {
     let auth =
         tokio::time::timeout(Duration::from_secs(5), wire::read_frame(&mut stream)).await??;
+    // The handshake runs from the authentication frame to `ready` on the wire.
+    let handshake_began = telemetry.is_some().then(Instant::now);
     if auth["version"] != PROTOCOL_VERSION {
         return Err(io::Error::other("unsupported protocol"));
     }
@@ -288,6 +307,7 @@ async fn connection_loop(
     if !config::same_token(&grant.token, auth["token"].as_str().unwrap_or("")) {
         return Err(io::Error::other("authorization refused"));
     }
+    let handshake_app = handshake_began.map(|_| grant.app.clone());
     let (output, mut events) = tokio::sync::mpsc::channel(64);
     hub.try_send(hub::Command::Open {
         connection,
@@ -306,12 +326,21 @@ async fn connection_loop(
         Ok::<(), io::Error>(())
     };
     let write = async {
+        // The first thing the hub says to a connection is `ready`.
+        let mut handshake = telemetry.zip(handshake_began).zip(handshake_app);
         while let Some(event) = events.recv().await {
             tokio::time::timeout(
                 Duration::from_secs(5),
                 wire::write_frame(&mut writer, &event),
             )
             .await??;
+            if let Some(((sink, began), app)) = handshake.take() {
+                sink.record(telemetry::handshake_record(
+                    connection,
+                    app,
+                    began.elapsed(),
+                ));
+            }
         }
         Ok::<(), io::Error>(())
     };

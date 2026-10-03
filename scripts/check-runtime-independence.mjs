@@ -9,6 +9,7 @@ const expected = new Set([
   "seatline-scheduler",
   "seatline-service",
   "seatline-companion",
+  "seatline-bench",
   "seatline-fake-provider",
   "seatline-tests",
   "seatline-fuzz",

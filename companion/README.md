@@ -117,6 +117,19 @@ it running), so after running `install` again the next start uses the new
 version. `install` keeps the new copy and the one registered before it and
 removes older ones.
 
+## Phase telemetry
+
+The broker records nothing about requests unless `SEATLINE_TELEMETRY_FILE`
+names a file when it starts (a broker that is already running must restart; it
+exits when idle). It then appends one JSON line per request with durations
+for each phase (queue wait, sign-in probe, provider initialization, first text,
+completion, cleanup) and per connection for the handshake, and no prompt,
+answer, token, account name, path or session handle. The file is created
+readable only by its owner (one that already exists is tightened to that),
+written off the request path through a bounded queue, and stops growing at
+16 MiB. See [phase telemetry](../docs/telemetry.md)
+for the exact boundaries, what is missing per provider, and the format.
+
 ## What Seatline does and does not guarantee
 
 * **Apps are isolated from each other, not from local malware.** A process that

@@ -1,5 +1,5 @@
 [workspace]
-members = ["seatline-core", "platform", "providers", "fake-provider", "seatline-tests", "scheduler", "service", "companion"]
+members = ["seatline-core", "platform", "providers", "fake-provider", "seatline-tests", "scheduler", "service", "companion", "seatline-bench"]
 exclude = ["seatline-fuzz"]
 resolver = "3"
 
