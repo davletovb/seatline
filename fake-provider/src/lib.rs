@@ -88,6 +88,16 @@ impl Mode {
 /// The fake provider's `main`.
 /// Appends `text` to `<cli>-<what>` beside the executable, for a test to read
 /// back what the adapter sent.
+fn readiness_scenario(cli: &str) -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(format!("{cli}-readiness"))))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
+}
+
 fn record(cli: &str, what: &str, text: &str) {
     use std::io::Write as _;
 

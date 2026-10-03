@@ -22,7 +22,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::{Exchange, Provider, Scripted, Timeouts, Update};
-use seatline_core::discovery::SearchPath;
+use seatline_core::discovery::{CachedSearchPath, SearchPath};
 use seatline_core::process::{Event, Exit, Process, ProcessSpec};
 use seatline_core::prompt;
 use seatline_core::protocol::Failure as ErrorBody;
@@ -251,10 +251,11 @@ impl Launch {
 }
 
 pub struct Grok {
-    search: SearchPath,
+    search: CachedSearchPath,
     launch: Rc<Launch>,
     namespace: Namespace,
     timeouts: Timeouts,
+    probe_timeout: Duration,
 }
 
 impl Grok {
@@ -278,10 +279,11 @@ impl Grok {
             sweep_stale_workspaces(&base, &owner_file(namespace));
         }
         Self {
-            search,
+            search: CachedSearchPath::new(search),
             launch: Rc::new(Launch::new(work_dir, std::env::vars_os().collect())),
             namespace: namespace.clone(),
             timeouts: TIMEOUTS,
+            probe_timeout: STATUS_PROBE,
         }
     }
 
@@ -303,18 +305,41 @@ impl Grok {
         self
     }
 
+    /// Bounds readiness/model-catalog checks without changing turn limits.
+    #[must_use]
+    pub fn with_probe_timeout(mut self, timeout: Duration) -> Self {
+        self.probe_timeout = timeout;
+        self
+    }
+
     fn executable(&self) -> Option<PathBuf> {
         self.search.find(EXECUTABLE)
     }
 }
 
 impl Provider for Grok {
+    fn readiness_key(&self) -> Option<crate::readiness::Key> {
+        self.launch.base_workspace().ok()?;
+        crate::readiness::Key::watch(
+            &self.executable()?,
+            self.launch.auth_path.clone(),
+            self.capabilities(),
+        )
+    }
     fn id(&self) -> &str {
         ID
     }
 
     fn timeouts(&self) -> Timeouts {
         self.timeouts
+    }
+
+    fn supports_preparation(&self) -> bool {
+        true
+    }
+
+    fn invalidate_readiness(&self) {
+        self.search.invalidate();
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -367,7 +392,7 @@ impl Provider for Grok {
                 StatusCheck::Probing {
                     process: Box::new(process),
                     workspace: Some(workspace),
-                    give_up: private_fs::after(STATUS_PROBE),
+                    give_up: private_fs::after(self.probe_timeout),
                     stdout: Vec::new(),
                     stderr: Vec::new(),
                 }
@@ -464,6 +489,7 @@ fn status_update(
             capabilities: CAPABILITIES,
             models: Cow::Owned(models),
             sign_in,
+            readiness: None,
         },
     }
 }

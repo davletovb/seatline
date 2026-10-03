@@ -111,6 +111,14 @@ fn login_status(behavior: &str) -> ExitCode {
             ExitCode::from(3)
         }
         "hangs" => hang(),
+        "subscription" => {
+            let _ = writeln!(stderr, "Logged in using ChatGPT");
+            ExitCode::SUCCESS
+        }
+        "unknown-account-text" => {
+            let _ = writeln!(stderr, "account api key chatgpt subscription: {SECRET}");
+            ExitCode::SUCCESS
+        }
         // Output without end, on both streams: the check must still give up.
         "floods" => {
             thread::spawn(|| flood_stderr(usize::MAX, ENDLESS));

@@ -61,6 +61,10 @@ impl Fixture {
 
     /// One connection that asks for a status and reads it to its end.
     async fn status(&self, id: &str) -> Vec<Value> {
+        self.call(id, "status", Value::Null).await
+    }
+
+    async fn call(&self, id: &str, method: &str, params: Value) -> Vec<Value> {
         let give_up = Instant::now() + Duration::from_secs(10);
         let mut stream = loop {
             match Stream::connect(client::socket_name(&self.root).unwrap()).await {
@@ -84,7 +88,7 @@ impl Fixture {
         );
         wire::write_frame(
             &mut stream,
-            &json!({"id":id,"provider":"codex","method":"status","params":null}),
+            &json!({"id":id,"provider":"codex","method":method,"params":params}),
         )
         .await
         .unwrap();
@@ -102,6 +106,30 @@ impl Fixture {
             }
         }
     }
+}
+
+#[test]
+fn preparation_and_readiness_use_the_real_wire_and_preserve_missing_provider_status() {
+    let fixture = Fixture::start(None);
+    runtime().block_on(async {
+        for method in ["prepare", "readiness"] {
+            let events = fixture
+                .call(method, method, json!({"mode":"cached","max_age_ms":30000}))
+                .await;
+            assert_eq!(events[0]["event"]["status"]["availability"], "not_found");
+            assert_eq!(events[0]["event"]["status"]["authentication"], "unknown");
+            assert_eq!(events[0]["event"]["status"]["readiness"]["source"], "fresh");
+            assert_eq!(events.last().unwrap()["event"]["type"], "completed");
+        }
+        let malformed = fixture
+            .call(
+                "bad-freshness",
+                "prepare",
+                json!({"mode":"cached","max_age_ms":-1}),
+            )
+            .await;
+        assert_eq!(malformed[0]["event"]["reason"], "INVALID_REQUEST");
+    });
 }
 
 impl Drop for Fixture {

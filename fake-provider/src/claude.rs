@@ -82,6 +82,20 @@ fn auth_status(behavior: &str) -> ExitCode {
         }
         "broken" => ExitCode::from(3),
         "hangs" => hang(),
+        "subscription" => {
+            let _ = writeln!(
+                io::stdout(),
+                r#"{{"loggedIn":true,"authMethod":"claude.ai","email":"{SECRET}"}}"#
+            );
+            ExitCode::SUCCESS
+        }
+        "api-key" => {
+            let _ = writeln!(
+                io::stdout(),
+                r#"{{"loggedIn":true,"authMethod":"api_key","email":"{SECRET}"}}"#
+            );
+            ExitCode::SUCCESS
+        }
         _ => {
             let _ = writeln!(io::stdout(), r#"{{"loggedIn":true,"email":"{SECRET}"}}"#);
             ExitCode::SUCCESS

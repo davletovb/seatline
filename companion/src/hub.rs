@@ -15,12 +15,12 @@ use seatline_core::turn::{Namespace, SessionPolicy, ToolPolicy, Turn, is_cleanup
 use seatline_platform::layout::Layout;
 use seatline_providers::{Cleanup, Provider, claude, codex, gemini, grok};
 use seatline_scheduler::{EndReason, Event, Supervisor, TurnId};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
     PROTOCOL_VERSION,
     config::{self, Grant},
+    sessions::{Session, Sessions},
     telemetry::Telemetry,
     wire,
 };
@@ -77,6 +77,15 @@ struct Request {
     method: String,
     params: Value,
 }
+impl Request {
+    fn continuation(&self) -> &Value {
+        if self.method == "send_ready" {
+            &self.params["turn"]["continuation"]
+        } else {
+            &self.params["continuation"]
+        }
+    }
+}
 struct Active {
     request: Request,
     persistent: bool,
@@ -85,13 +94,6 @@ struct Active {
     /// Ended, but release its request ID and never forward more output after
     /// this boundary.
     terminal_sent: bool,
-}
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Session {
-    app: String,
-    provider: String,
-    native: String,
 }
 struct PendingCleanup {
     request: Request,
@@ -112,7 +114,7 @@ pub fn start_with(
     let ledger = root.join("sessions.json");
     let sessions = match std::fs::read(&ledger) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Sessions::default(),
         Err(error) => return Err(error),
     };
     let (send, receive) = mpsc::sync_channel(128);
@@ -143,7 +145,7 @@ struct Hub {
     providers: BTreeMap<(String, String), Box<dyn Provider>>,
     supervisor: Supervisor,
     active: BTreeMap<TurnId, Active>,
-    sessions: BTreeMap<String, Session>,
+    sessions: Sessions,
     cleanup: Vec<PendingCleanup>,
     next_check: Instant,
     next_prune: Instant,
@@ -188,6 +190,7 @@ impl Hub {
                 config::same_token(&current.token, &entry.grant.token)
                     && current.providers == entry.grant.providers
                     && current.allow_provider_default == entry.grant.allow_provider_default
+                    && current.cache_title == entry.grant.cache_title
             })
         })
     }
@@ -221,6 +224,7 @@ impl Hub {
             Command::Close(connection) => self.close(connection),
             Command::Request { connection, value } => {
                 if !self.authorized(connection) {
+                    self.invalidate_connection(connection);
                     self.close(connection);
                     return;
                 }
@@ -314,6 +318,18 @@ impl Hub {
         }
     }
 
+    fn invalidate_connection(&mut self, connection: u64) {
+        if let Some(entry) = self.connections.get(&connection) {
+            let app = &entry.grant.app;
+            for ((owner, _), provider) in &self.providers {
+                if owner == app {
+                    provider.invalidate_readiness();
+                }
+            }
+            self.providers.retain(|(owner, _), _| owner != app);
+        }
+    }
+
     fn close(&mut self, connection: u64) {
         self.connections.remove(&connection);
         for request in &self.queue {
@@ -376,12 +392,10 @@ impl Hub {
         provider: &str,
         native: String,
     ) -> Result<String, LedgerError> {
-        if let Some((token, _)) = self.sessions.iter().find(|(_, session)| {
-            session.app == app && session.provider == provider && session.native == native
-        }) {
+        if let Some(token) = self.sessions.token(app, provider, &native) {
             return Ok(token.clone());
         }
-        let app_sessions = self.sessions.values().filter(|s| s.app == app).count();
+        let app_sessions = self.sessions.app_len(app);
         if self.sessions.len() >= MAX_SESSIONS || app_sessions >= MAX_APP_SESSIONS {
             return Err(LedgerError::Full);
         }
@@ -455,6 +469,7 @@ impl Hub {
                 .filter(|id| !self.authorized(*id))
                 .collect();
             for id in revoked {
+                self.invalidate_connection(id);
                 self.close(id);
             }
             self.next_check = Instant::now() + Duration::from_secs(1);
@@ -622,11 +637,11 @@ impl Hub {
                 || provider_count >= MAX_PROVIDER_RUNNING
                 || cleaning
                 || (matches!(request.method.as_str(), "forget" | "cleanup") && busy)
-                || (request.method == "send"
-                    && request.params["continuation"].is_string()
+                || (matches!(request.method.as_str(), "send" | "send_ready")
+                    && request.continuation().is_string()
                     && self.active.values().any(|a| {
                         a.request.app == request.app
-                            && a.request.params["continuation"] == request.params["continuation"]
+                            && a.request.continuation() == request.continuation()
                     }))
             {
                 self.queue.push_back(request);
@@ -638,6 +653,14 @@ impl Hub {
 
     #[allow(clippy::map_entry)] // Admission errors also need mutable access to the connection table.
     fn admit(&mut self, request: Request) {
+        // Recheck queued work at admission, including cache hits, so a grant
+        // change cannot reuse evidence from the previous app/workspace scope.
+        if !self.authorized(request.connection) {
+            self.telemetry.abandoned(request.connection, &request.id);
+            self.invalidate_connection(request.connection);
+            self.close(request.connection);
+            return;
+        }
         self.telemetry.admitted(request.connection, &request.id);
         let key = (request.app.clone(), request.provider.clone());
         if !self.providers.contains_key(&key) {
@@ -682,7 +705,10 @@ impl Hub {
                     return;
                 }
             };
-            self.providers.insert(key.clone(), provider);
+            self.providers.insert(
+                key.clone(),
+                Box::new(seatline_providers::readiness::Ready::boxed(provider)),
+            );
         }
         let result = catch_unwind(AssertUnwindSafe(|| self.build(&request, &key)));
         match result {
@@ -749,8 +775,16 @@ impl Hub {
             ..provider.timeouts()
         };
         match request.method.as_str() {
-            "status" => Ok(Built::Exchange(
-                provider.status(),
+            "status" | "readiness" | "prepare" => Ok(Built::Exchange(
+                match request.method.as_str() {
+                    "status" => provider.status(),
+                    "prepare" => provider.prepare(
+                        serde_json::from_value(request.params.clone()).map_err(|_| invalid())?,
+                    ),
+                    _ => provider.readiness(
+                        serde_json::from_value(request.params.clone()).map_err(|_| invalid())?,
+                    ),
+                },
                 Timeouts {
                     start: Duration::from_secs(30),
                     idle: Duration::from_secs(30),
@@ -759,9 +793,24 @@ impl Hub {
                 },
                 false,
             )),
-            "send" => {
+            "send" | "send_ready" => {
+                let freshness = if request.method == "send_ready" {
+                    Some(
+                        serde_json::from_value::<seatline_core::readiness::Freshness>(
+                            request.params["freshness"].clone(),
+                        )
+                        .map_err(|_| invalid())?,
+                    )
+                } else {
+                    None
+                };
+                let params = if freshness.is_some() {
+                    &request.params["turn"]
+                } else {
+                    &request.params
+                };
                 let mut turn: Turn =
-                    serde_json::from_value(request.params.clone()).map_err(|_| invalid())?;
+                    serde_json::from_value(params.clone()).map_err(|_| invalid())?;
                 turn.validate().map_err(|_| invalid())?;
                 if turn.tools == ToolPolicy::ProviderDefault
                     && !self.connections[&request.connection]
@@ -801,7 +850,14 @@ impl Hub {
                     turn.continuation = Some(session.native.clone());
                 }
                 let persistent = turn.session == SessionPolicy::Persistent;
-                Ok(Built::Exchange(provider.send(turn), limits, persistent))
+                Ok(Built::Exchange(
+                    match freshness {
+                        Some(freshness) => provider.send_with_readiness(turn, freshness),
+                        None => provider.send(turn),
+                    },
+                    limits,
+                    persistent,
+                ))
             }
             "forget" => {
                 let tokens: Vec<String> =
@@ -875,6 +931,213 @@ mod tests {
             ]))
         }
     }
+    struct ReadyFixture(std::rc::Rc<std::cell::Cell<usize>>);
+    impl Provider for ReadyFixture {
+        fn id(&self) -> &str {
+            "codex"
+        }
+        fn capabilities(&self) -> Capabilities {
+            codex::CAPABILITIES
+        }
+        fn timeouts(&self) -> Timeouts {
+            codex::LIMITS.timeouts
+        }
+        fn supports_preparation(&self) -> bool {
+            true
+        }
+        fn readiness_key(&self) -> Option<seatline_providers::readiness::Key> {
+            seatline_providers::readiness::Key::watch(
+                &std::env::current_exe().unwrap(),
+                [],
+                self.capabilities(),
+            )
+        }
+        fn status(&self) -> Box<dyn Exchange> {
+            self.0.set(self.0.get() + 1);
+            Box::new(Scripted::new([
+                Update::Status {
+                    provider_id: "codex".into(),
+                    status: seatline_core::protocol::ProviderState {
+                        availability: seatline_core::protocol::Availability::Available,
+                        authentication: seatline_core::protocol::Authentication::Authenticated,
+                        capabilities: self.capabilities(),
+                        models: std::borrow::Cow::Borrowed(&[]),
+                        sign_in: None,
+                        readiness: None,
+                    },
+                },
+                Update::Completed,
+            ]))
+        }
+        fn send(&self, _: Turn) -> Box<dyn Exchange> {
+            Box::new(Scripted::new([
+                Update::Launched,
+                Update::Started,
+                Update::Delta("answer".into()),
+                Update::Completed,
+            ]))
+        }
+    }
+
+    #[test]
+    fn prepare_is_single_flight_scoped_and_send_ready_preserves_fresh_requests() {
+        let (mut hub, mut output) = setup();
+        let counts: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|app| {
+                let counter = std::rc::Rc::new(std::cell::Cell::new(0));
+                hub.providers.insert(
+                    (app.into(), "codex".into()),
+                    Box::new(seatline_providers::readiness::Ready::new(ReadyFixture(
+                        counter.clone(),
+                    ))),
+                );
+                counter
+            })
+            .collect();
+        let cached = json!({"mode":"cached","max_age_ms":30000});
+        request(&mut hub, 1, "a", "prepare", cached.clone());
+        request(&mut hub, 1, "b", "prepare", cached.clone());
+        request(&mut hub, 2, "c", "prepare", cached.clone());
+        ticks(&mut hub, 8);
+        assert_eq!((counts[0].get(), counts[1].get()), (1, 1));
+        let events = drain(&mut output[0]);
+        for id in ["a", "b"] {
+            assert!(
+                events
+                    .iter()
+                    .any(|v| v["id"] == id && v["event"]["type"] == "completed")
+            );
+        }
+        assert!(!events.iter().any(|v| v["event"]["type"] == "launched"));
+        let mut ask = turn_with_tools("none");
+        ask["session"] = json!("ephemeral");
+        request(
+            &mut hub,
+            1,
+            "cached",
+            "send_ready",
+            json!({"turn":ask,"freshness":cached}),
+        );
+        ticks(&mut hub, 8);
+        let events = drain(&mut output[0]);
+        assert_eq!(
+            events[0]["event"]["status"]["readiness"]["source"],
+            "cached"
+        );
+        assert!(events.iter().any(|v| v["event"]["type"] == "completed"));
+        assert_eq!(counts[0].get(), 1);
+        ask["check_sign_in"] = json!(true);
+        request(
+            &mut hub,
+            1,
+            "fresh",
+            "send_ready",
+            json!({"turn":ask,"freshness":cached}),
+        );
+        ticks(&mut hub, 8);
+        let events = drain(&mut output[0]);
+        assert_eq!(events[0]["event"]["status"]["readiness"]["source"], "fresh");
+        assert_eq!(counts[0].get(), 2);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn grant_and_workspace_changes_drop_only_that_apps_readiness() {
+        let (mut hub, mut output) = setup();
+        for app in ["first", "second"] {
+            hub.providers.insert(
+                (app.into(), "codex".into()),
+                Box::new(seatline_providers::readiness::Ready::new(ReadyFixture(
+                    std::rc::Rc::new(std::cell::Cell::new(0)),
+                ))),
+            );
+        }
+        let mut grant = config::load_grant(&hub.root, "first").unwrap();
+        grant.cache_title = Some("Different workspace".into());
+        config::write_private(
+            &config::app_path(&hub.root, "first").unwrap(),
+            &serde_json::to_vec(&grant).unwrap(),
+        )
+        .unwrap();
+        request(
+            &mut hub,
+            1,
+            "revoked",
+            "prepare",
+            json!({"mode":"cached","max_age_ms":30000}),
+        );
+        assert!(!hub.connections.contains_key(&1));
+        assert!(
+            !hub.providers
+                .contains_key(&("first".into(), "codex".into()))
+        );
+        assert!(
+            hub.providers
+                .contains_key(&("second".into(), "codex".into()))
+        );
+        request(
+            &mut hub,
+            2,
+            "healthy",
+            "prepare",
+            json!({"mode":"cached","max_age_ms":30000}),
+        );
+        ticks(&mut hub, 8);
+        assert!(
+            drain(&mut output[1])
+                .iter()
+                .any(|v| v["event"]["type"] == "completed")
+        );
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn cancelling_one_preparation_keeps_its_shared_peer_and_cached_result() {
+        let (mut hub, mut output) = setup();
+        let counter = std::rc::Rc::new(std::cell::Cell::new(0));
+        hub.providers.insert(
+            ("first".into(), "codex".into()),
+            Box::new(seatline_providers::readiness::Ready::new(ReadyFixture(
+                counter.clone(),
+            ))),
+        );
+        let cached = json!({"mode":"cached","max_age_ms":30000});
+        request(&mut hub, 1, "a", "prepare", cached.clone());
+        request(&mut hub, 1, "b", "prepare", cached.clone());
+        hub.tick(); // Both requests admitted, the shared check not yet driven.
+        hub.command(Command::Request {
+            connection: 1,
+            value: json!({"id":"cancel","method":"cancel","target":"a"}),
+        });
+        ticks(&mut hub, 8);
+        let events = drain(&mut output[0]);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|v| v["id"] == "a" && v["event"]["type"] == "stopped")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|v| v["id"] == "b" && v["event"]["type"] == "completed")
+                .count(),
+            1
+        );
+        assert!(hub.active.is_empty());
+        request(&mut hub, 1, "after", "prepare", cached);
+        ticks(&mut hub, 8);
+        let events = drain(&mut output[0]);
+        assert_eq!(
+            events[0]["event"]["status"]["readiness"]["source"],
+            "cached"
+        );
+        assert_eq!(counter.get(), 1);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
     fn setup() -> (Hub, Vec<tokio::sync::mpsc::Receiver<Value>>) {
         let root =
             std::env::temp_dir().join(format!("seatline-hub-{}", config::random_token().unwrap()));
@@ -885,7 +1148,7 @@ mod tests {
             providers: BTreeMap::new(),
             supervisor: Supervisor::new(),
             active: BTreeMap::new(),
-            sessions: BTreeMap::new(),
+            sessions: Sessions::default(),
             cleanup: Vec::new(),
             next_check: Instant::now() + Duration::from_secs(60),
             next_prune: Instant::now() + Duration::from_secs(3600),
@@ -1077,6 +1340,13 @@ mod tests {
             output: send,
         });
         assert_eq!(reopened.try_recv().unwrap()["type"], "ready");
+        // Revocation also drops the old adapter and its readiness evidence.
+        assert!(
+            !hub.providers
+                .contains_key(&("first".into(), "codex".into()))
+        );
+        hub.providers
+            .insert(("first".into(), "codex".into()), Box::new(Fixture));
         request(
             &mut hub,
             3,

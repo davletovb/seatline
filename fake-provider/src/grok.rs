@@ -22,6 +22,19 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
 
 fn run(args: Vec<OsString>) -> Result<(), ()> {
     if args.first().is_some_and(|arg| arg == OsStr::new("models")) {
+        crate::record("grok", "probes", "models\n");
+        match crate::readiness_scenario("grok").as_str() {
+            "signed-out" => {
+                println!("You are not authenticated.");
+                return Ok(());
+            }
+            "broken" => {
+                eprintln!("configuration unavailable");
+                return Err(());
+            }
+            "hangs" => std::thread::sleep(Duration::from_secs(60)),
+            _ => {}
+        }
         let auth = std::env::var_os("GROK_AUTH_PATH")
             .map(PathBuf::from)
             .is_some_and(|path| path.exists());
