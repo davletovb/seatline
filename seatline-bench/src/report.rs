@@ -111,13 +111,13 @@ pub fn markdown(report: &Report) -> String {
     let env = &report.environment;
     let _ = writeln!(
         out,
-        "{} — mode `{}`, {} {}, {} CPUs, harness {} build, revision {}{}\n",
+        "{} — mode `{}`, {} {}, {} CPUs, {} builds, revision {}{}\n",
         report.label,
         report.mode,
         env.os,
         env.arch,
         env.cpus,
-        env.harness_profile,
+        builds(env),
         env.revision
             .as_deref()
             .map_or("unknown", |r| &r[..r.len().min(12)]),
@@ -209,26 +209,30 @@ pub fn compare(before: &Report, after: &Report) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "before: {} (`{}`, {} build)  \nafter: {} (`{}`, {} build)\n",
+        "before: {} (`{}`, {})  \nafter: {} (`{}`, {})\n",
         before.label,
         before
             .environment
             .revision
             .as_deref()
             .map_or("unknown", |r| &r[..r.len().min(12)]),
-        before.environment.harness_profile,
+        builds(&before.environment),
         after.label,
         after
             .environment
             .revision
             .as_deref()
             .map_or("unknown", |r| &r[..r.len().min(12)]),
-        after.environment.harness_profile,
+        builds(&after.environment),
     );
     if before.environment.os != after.environment.os
         || before.environment.arch != after.environment.arch
         || before.environment.cpus != after.environment.cpus
         || before.environment.harness_profile != after.environment.harness_profile
+        // The broker is what is timed, so its build matters at least as much as
+        // the harness's. A profile known on one side and not the other is a
+        // difference; unknown on both is nothing to compare.
+        || before.environment.companion_profile != after.environment.companion_profile
         || before.mode != after.mode
     {
         let _ = writeln!(
@@ -275,6 +279,18 @@ pub fn compare(before: &Report, after: &Report) -> String {
         }
     }
     out
+}
+
+/// How the harness and the broker were built, as a report names them.
+fn builds(environment: &Environment) -> String {
+    format!(
+        "harness {}, companion {}",
+        environment.harness_profile,
+        environment
+            .companion_profile
+            .as_deref()
+            .unwrap_or("unknown")
+    )
 }
 
 fn ms_signed(us: i64) -> String {
@@ -340,6 +356,33 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("different platforms"));
+    }
+
+    #[test]
+    fn a_comparison_across_companion_builds_warns_even_when_the_harness_matches() {
+        // The broker is what is being timed: a debug broker against a release
+        // one would read as a speedup that is only optimization.
+        let mut debug_broker = report(&[1_000]);
+        debug_broker.environment.companion_profile = Some("debug".into());
+        let mut release_broker = report(&[1_000]);
+        release_broker.environment.companion_profile = Some("release".into());
+        assert_eq!(
+            debug_broker.environment.harness_profile,
+            release_broker.environment.harness_profile
+        );
+        let text = compare(&debug_broker, &release_broker);
+        assert!(text.contains("not a like-for-like"), "{text}");
+        assert!(
+            text.contains("companion debug") && text.contains("companion release"),
+            "{text}"
+        );
+        // A profile known on one side and not the other is a difference too; not
+        // known on either side leaves nothing to compare.
+        let unknown = report(&[1_000]);
+        assert!(compare(&release_broker, &unknown).contains("not a like-for-like"));
+        assert!(!compare(&unknown, &unknown).contains("not a like-for-like"));
+        // The same profile on both sides is a like-for-like comparison.
+        assert!(!compare(&release_broker, &release_broker).contains("not a like-for-like"));
     }
 
     #[test]

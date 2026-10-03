@@ -282,6 +282,51 @@ fn three_applications_compete_for_the_providers_slots() {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // Runs the harness binary this package builds.
+fn a_scenario_that_cannot_run_keeps_what_the_others_measured() {
+    // The fake provider stands in for a companion that is there but cannot
+    // authorize an app, so the second scenario cannot run.
+    let file = unique_file("partial");
+    let output = Command::new(HARNESS)
+        .args([
+            "run",
+            "--scenario",
+            "reused-process",
+            "--scenario",
+            "warm-send",
+        ])
+        .args(["--samples", "1", "--warmup", "0"])
+        .args([
+            "--fake-provider",
+            FAKE,
+            "--companion",
+            FAKE,
+            "--scratch",
+            SCRATCH,
+        ])
+        .arg("--output")
+        .arg(&file)
+        .env_remove("SEATLINE_BENCH_LIVE")
+        .output()
+        .unwrap();
+    // A run with a failure still fails...
+    assert!(!output.status.success());
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(message.contains("1 of 2 scenarios failed"), "{message}");
+    // ...but the report was written, with the first scenario and why the
+    // second has nothing.
+    let text = std::fs::read_to_string(&file).expect("the report was written");
+    let _ = std::fs::remove_file(&file);
+    let report: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(scenario(&report, "reused-process")["status"], "unsupported");
+    let failed = scenario(&report, "warm-send");
+    assert_eq!(failed["status"], "failed");
+    assert!(failed["reason"].as_str().unwrap().contains("authorize"));
+    assert!(failed["apps"].as_array().unwrap().is_empty());
+    assert!(!text.contains(SCRATCH), "no path in the evidence");
+}
+
+#[test]
 fn a_live_run_needs_a_second_confirmation_and_starts_nothing_without_it() {
     let output = harness(&["run", "--live", "codex"]);
     assert!(!output.status.success());

@@ -217,11 +217,25 @@ fn run_scenarios(args: &[String]) -> io::Result<()> {
 
     let mut results = Vec::new();
     let mut broker = None;
+    let mut failures = 0;
     for name in &chosen {
         eprintln!("running {name} ...");
-        let mut lab = Lab::new(&settings)?;
-        results.push(scenarios::run(&mut lab, name, params)?);
-        broker = broker.or(lab.broker_record.clone());
+        // A scenario that cannot run is kept in the report with its reason and
+        // the run goes on: what the others measured, on a live provider at the
+        // cost of its quota, is not thrown away with it.
+        let outcome = Lab::new(&settings).and_then(|mut lab| {
+            let scenario = scenarios::run(&mut lab, name, params);
+            broker = broker.take().or_else(|| lab.broker_record.clone());
+            scenario
+        });
+        match outcome {
+            Ok(scenario) => results.push(scenario),
+            Err(error) => {
+                eprintln!("{name} failed: {error}");
+                failures += 1;
+                results.push(scenarios::failed(name, &error));
+            }
+        }
     }
 
     // How long a broker idles before exiting is the harness's own setting, and
@@ -265,6 +279,13 @@ fn run_scenarios(args: &[String]) -> io::Result<()> {
     }
     if output.is_none() && markdown.is_none() {
         print!("{text}");
+    }
+    if failures > 0 {
+        // The report is written either way; the exit status says it is not whole.
+        return Err(io::Error::other(format!(
+            "{failures} of {} scenarios failed; the report keeps the others and says why",
+            chosen.len()
+        )));
     }
     Ok(())
 }

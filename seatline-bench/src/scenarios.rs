@@ -185,6 +185,24 @@ pub fn unsupported(provider: Option<&str>, name: &str) -> Option<String> {
     }
 }
 
+/// A scenario that could not be run to a measurement, kept in the report with
+/// why, so that the scenarios that were measured are not lost with it.
+pub fn failed(name: &str, error: &io::Error) -> Scenario {
+    let described = describe(name);
+    Scenario {
+        name: name.to_owned(),
+        state: described
+            .as_ref()
+            .map_or("unknown", |described| described.state)
+            .to_owned(),
+        status: "failed".to_owned(),
+        description: described.map_or("", |described| described.text).to_owned(),
+        reason: Some(error.to_string()),
+        apps: Vec::new(),
+        counts: Counts::default(),
+    }
+}
+
 pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
     let described =
         describe(name).ok_or_else(|| io::Error::other(format!("no scenario `{name}`")))?;
