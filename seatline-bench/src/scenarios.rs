@@ -167,6 +167,24 @@ impl Plan {
     }
 }
 
+/// Why `name` cannot be measured against `provider` (`None` is the fake, which
+/// stands in for Codex), or `None` if it can.
+///
+/// A scenario a provider cannot run is reported as unsupported with its reason:
+/// never dropped, never aborting the run, and never measured as something else
+/// under its name.
+pub fn unsupported(provider: Option<&str>, name: &str) -> Option<String> {
+    // Gemini's and Grok's one-shot modes keep no native session and run no
+    // sign-in probe on the send path; Codex and Claude do both.
+    let one_shot = provider.filter(|provider| matches!(*provider, "gemini" | "grok"));
+    match (name, one_shot) {
+        ("reused-process", _) => Some("No provider process is reused across requests: every `send` starts a fresh one, and a persistent-provider adapter does not exist yet (tracker item E-02). There is nothing to measure, so nothing is reported; resumed context (`resumed-context`) is a different state.".to_owned()),
+        ("resumed-context", Some(provider)) => Some(format!("The {provider} adapter keeps no native session to resume, so the broker refuses a persistent turn for it (`PERSISTENT_SESSION_UNSUPPORTED`). There is nothing to measure.")),
+        ("warm-send-probe", Some(provider)) => Some(format!("The {provider} adapter runs no sign-in probe on the send path and ignores `check_sign_in`, so this would measure an ordinary send under the wrong name; see `warm-send`. Its readiness check is `warm-status`.")),
+        _ => None,
+    }
+}
+
 pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
     let described =
         describe(name).ok_or_else(|| io::Error::other(format!("no scenario `{name}`")))?;
@@ -180,13 +198,13 @@ pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
         apps: Vec::new(),
         counts: Counts::default(),
     };
+    if let Some(reason) = unsupported(lab.settings.live.as_deref(), name) {
+        scenario.status = "unsupported".to_owned();
+        scenario.reason = Some(reason);
+        return Ok(scenario);
+    }
     let plans = match name {
         "cold-broker" => return cold(lab, scenario, params),
-        "reused-process" => {
-            scenario.status = "unsupported".to_owned();
-            scenario.reason = Some("No provider process is reused across requests: every `send` starts a fresh one, and a persistent-provider adapter does not exist yet (tracker item E-02). There is nothing to measure, so nothing is reported; resumed context (`resumed-context`) is a different state.".to_owned());
-            return Ok(scenario);
-        }
         "warm-send" => vec![Plan {
             app: "bench-a",
             role: "single",
@@ -636,6 +654,67 @@ mod tests {
             total_us: prepare + 9,
             broker: None,
         }
+    }
+
+    #[test]
+    fn a_scenario_a_provider_cannot_run_is_unsupported_with_a_reason() {
+        for provider in ["gemini", "grok"] {
+            let provider = Some(provider);
+            let sessions = unsupported(provider, "resumed-context").unwrap();
+            assert!(
+                sessions.contains("PERSISTENT_SESSION_UNSUPPORTED"),
+                "{sessions}"
+            );
+            let probe = unsupported(provider, "warm-send-probe").unwrap();
+            assert!(probe.contains("check_sign_in"), "{probe}");
+            // What they can do is still measured.
+            for name in [
+                "cold-broker",
+                "warm-send",
+                "warm-send-adapter",
+                "warm-status",
+            ] {
+                assert_eq!(unsupported(provider, name), None, "{name}");
+            }
+        }
+        // Codex, Claude and the fake that stands in for Codex do both.
+        for provider in [None, Some("codex"), Some("claude")] {
+            assert_eq!(unsupported(provider, "resumed-context"), None);
+            assert_eq!(unsupported(provider, "warm-send-probe"), None);
+        }
+        for provider in [None, Some("codex"), Some("gemini")] {
+            assert!(unsupported(provider, "reused-process").is_some());
+        }
+    }
+
+    #[test]
+    fn an_unsupported_scenario_ends_the_run_with_a_report_not_an_abort() {
+        let scratch = std::env::temp_dir().join(format!("sb-{}", std::process::id()));
+        let settings = crate::lab::Settings {
+            companion: std::path::PathBuf::from("/nonexistent/companion"),
+            fake_provider: std::path::PathBuf::from("/nonexistent/fake"),
+            harness: std::path::PathBuf::from("/nonexistent/harness"),
+            live: Some("grok".to_owned()),
+            scratch: scratch.clone(),
+            keep: false,
+        };
+        let mut lab = Lab::new(&settings).unwrap();
+        let params = Params {
+            samples: 1,
+            warmup: 0,
+            gap_ms: 0,
+        };
+        // Nothing is started for them: the companion above does not exist.
+        for name in ["resumed-context", "warm-send-probe", "reused-process"] {
+            let scenario = run(&mut lab, name, params).unwrap();
+            assert_eq!(scenario.status, "unsupported", "{name}");
+            assert!(
+                scenario.reason.is_some() && scenario.apps.is_empty(),
+                "{name}"
+            );
+        }
+        drop(lab);
+        let _ = std::fs::remove_dir_all(scratch);
     }
 
     #[test]
