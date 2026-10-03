@@ -347,7 +347,9 @@ impl Marks {
 
         match kind {
             Kind::Cleanup => {
-                phases.cleanup = between(Some(admitted), terminal);
+                // The work, and the drop of its exchange when the scheduler ran
+                // it, which is in the total.
+                phases.cleanup = between(Some(admitted), self.released.or(terminal));
             }
             Kind::Status => {
                 phases.sign_in_probe = between(Some(admitted), self.status.or(terminal));
@@ -728,12 +730,9 @@ mod tests {
         assert_eq!(phases.provider_init, None);
     }
 
-    #[test]
-    fn a_status_request_is_one_readiness_check() {
-        let clock = Clock::new();
-        let mut timeline = Timeline::new(Kind::Status, clock.at(0));
-        timeline.admitted(clock.at(40));
-        let status = Update::Status {
+    /// A status update, whose contents do not matter to the timeline.
+    fn status_update() -> Update {
+        Update::Status {
             provider_id: "codex".into(),
             status: crate::protocol::ProviderState {
                 availability: crate::protocol::Availability::Available,
@@ -749,7 +748,15 @@ mod tests {
                 models: std::borrow::Cow::Borrowed(&[]),
                 sign_in: None,
             },
-        };
+        }
+    }
+
+    #[test]
+    fn a_status_request_is_one_readiness_check() {
+        let clock = Clock::new();
+        let mut timeline = Timeline::new(Kind::Status, clock.at(0));
+        timeline.admitted(clock.at(40));
+        let status = status_update();
         timeline.observe(&status, clock.at(1_040));
         timeline.observe(&Update::Completed, clock.at(1_050));
         timeline.released(clock.at(1_060));
@@ -761,6 +768,27 @@ mod tests {
         assert_eq!(phases.cleanup, Some(10));
         assert_eq!(phases.sum(), timeline.total_us());
         assert_eq!((timeline.probes(), timeline.launches()), (1, 0));
+    }
+
+    #[test]
+    fn a_cleanup_turn_the_scheduler_runs_counts_the_drop_of_its_exchange_too() {
+        // A host can run a cleanup under the scheduler, which drops the exchange
+        // after its terminal update: that time is in the total, so it is in the
+        // cleanup phase, and the phases still add up.
+        let clock = Clock::new();
+        let mut timeline = Timeline::new(Kind::Cleanup, clock.at(0));
+        timeline.admitted(clock.at(300));
+        timeline.observe(&Update::Completed, clock.at(310));
+        timeline.released(clock.at(2_395));
+        let phases = timeline.phases();
+        assert_eq!(phases.queue_wait, Some(300));
+        assert_eq!(
+            phases.cleanup,
+            Some(2_095),
+            "work and release, from admission"
+        );
+        assert_eq!(phases.sum(), timeline.total_us());
+        assert_eq!(timeline.total_us(), 2_395);
     }
 
     #[test]
@@ -865,6 +893,38 @@ mod tests {
                 timeline.total_us(),
                 "{timeline:?} does not tile"
             );
+        }
+    }
+
+    #[test]
+    fn phases_tile_every_kind_of_request_however_far_it_got() {
+        let clock = Clock::new();
+        for kind in [Kind::Send, Kind::Status, Kind::Cleanup] {
+            // Which boundaries a request reached, in the order it can reach them.
+            for admitted in [false, true] {
+                for reached in 0..=3 {
+                    for released in [false, true] {
+                        let mut timeline = Timeline::new(kind, clock.at(0));
+                        if admitted {
+                            timeline.admitted(clock.at(10));
+                        }
+                        let boundaries = [Update::Started, status_update(), delta("text")];
+                        for (index, update) in boundaries.iter().take(reached).enumerate() {
+                            timeline.observe(update, clock.at(20 + 10 * index as u64));
+                        }
+                        timeline.observe(&Update::Completed, clock.at(70));
+                        if released {
+                            timeline.released(clock.at(95));
+                        }
+                        assert_eq!(
+                            timeline.phases().sum(),
+                            timeline.total_us(),
+                            "{kind:?} admitted={admitted} reached={reached} released={released}: {:?}",
+                            timeline.marks()
+                        );
+                    }
+                }
+            }
         }
     }
 
