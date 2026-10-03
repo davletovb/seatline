@@ -111,7 +111,13 @@ installation and execution; it does not change warming or provider sign-in.
 
 ## Lifecycle and upgrades
 
-Clients start the broker on demand from the installed binary. It exits after ten
+Clients start the broker on demand from the installed binary. When several
+clients need one at once, exactly one of them, the holder of the start claim (a
+lock on `start.lock` in the data directory, released by the operating system
+when its holder exits), starts the companion; the others keep trying to
+connect, and one takes over a claim whose holder goes away or never starts a
+broker. Clients look for a starting broker every millisecond at first, backing
+off to a hundred, within a five-second budget. It exits after ten
 minutes with no connections (`SEATLINE_BROKER_IDLE_SECS` changes this; `0` keeps
 it running), so after running `install` again the next start uses the new
 version. `install` keeps the new copy and the one registered before it and

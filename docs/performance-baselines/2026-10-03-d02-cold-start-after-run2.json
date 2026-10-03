@@ -1,0 +1,4241 @@
+{
+  "schema": 1,
+  "tool_version": "0.1.0-dev",
+  "mode": "fake",
+  "label": "after D-02 (start claim, 1 ms polling), run 2",
+  "environment": {
+    "os": "linux",
+    "arch": "x86_64",
+    "cpus": 4,
+    "harness_profile": "release",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "revision": "a8dd5af86c4a86b5b7f387ed661d8159bfe5e29c",
+    "dirty": false,
+    "companion_version": "Seatline companion 0.1.0-dev (protocol 1)",
+    "companion_profile": "release"
+  },
+  "broker": {
+    "arch": "x86_64",
+    "kind": "broker",
+    "limits": {
+      "listener_max_connections": 32,
+      "max_app_queue": 8,
+      "max_app_running": 2,
+      "max_app_sessions": 2000,
+      "max_connections": 32,
+      "max_provider_running": 2,
+      "max_queue": 64,
+      "max_running": 8,
+      "max_sessions": 10000,
+      "prune_interval_ms": 60000
+    },
+    "os": "linux",
+    "protocol": 1,
+    "schema": 1,
+    "version": "0.1.0-dev"
+  },
+  "providers": {
+    "behavior": "exec chosen by the first word of the question (`slow` takes about 300 ms, anything else answers at once); sign-in probe succeeds",
+    "kind": "fake",
+    "note": "deterministic: adds no network or model latency",
+    "persona": "codex"
+  },
+  "parameters": {
+    "samples": 30,
+    "warmup": 3,
+    "gap_ms": 40
+  },
+  "scenarios": [
+    {
+      "name": "cold-broker",
+      "state": "cold_broker_fresh_provider",
+      "status": "measured",
+      "description": "No broker is running. The application's client starts one, connects, and sends one request; the provider is a fresh process. Each sample uses a new broker and data directory. Preparation includes starting the broker.",
+      "apps": [
+        {
+          "app": "bench-a",
+          "role": "single",
+          "completed": 30,
+          "failed": 0,
+          "metrics_us": {
+            "broker_cleanup_us": {
+              "n": 30,
+              "min": 1,
+              "p50": 2,
+              "p95": 3,
+              "max": 14,
+              "mean": 2
+            },
+            "broker_completion_us": {
+              "n": 30,
+              "min": 12,
+              "p50": 5178,
+              "p95": 5236,
+              "max": 5325,
+              "mean": 5016
+            },
+            "broker_first_text_us": {
+              "n": 30,
+              "min": 5,
+              "p50": 7,
+              "p95": 10,
+              "max": 11,
+              "mean": 7
+            },
+            "broker_handshake_us": {
+              "n": 30,
+              "min": 105,
+              "p50": 197,
+              "p95": 336,
+              "max": 514,
+              "mean": 217
+            },
+            "broker_provider_init_us": {
+              "n": 30,
+              "min": 5543,
+              "p50": 5676,
+              "p95": 6079,
+              "max": 10937,
+              "mean": 5872
+            },
+            "broker_queue_wait_us": {
+              "n": 30,
+              "min": 5,
+              "p50": 7,
+              "p95": 9,
+              "max": 12,
+              "mean": 7
+            },
+            "broker_total_us": {
+              "n": 30,
+              "min": 10762,
+              "p50": 10895,
+              "p95": 11067,
+              "max": 11268,
+              "mean": 10906
+            },
+            "client_connect_us": {
+              "n": 30,
+              "min": 2561,
+              "p50": 2713,
+              "p95": 2850,
+              "max": 2854,
+              "mean": 2705
+            },
+            "client_handshake_us": {
+              "n": 30,
+              "min": 222,
+              "p50": 375,
+              "p95": 589,
+              "max": 979,
+              "mean": 393
+            },
+            "client_prepare_us": {
+              "n": 30,
+              "min": 2784,
+              "p50": 3089,
+              "p95": 3292,
+              "max": 3705,
+              "mean": 3099
+            },
+            "client_start_to_first_text_us": {
+              "n": 30,
+              "min": 8719,
+              "p50": 9193,
+              "p95": 10360,
+              "max": 14477,
+              "mean": 9374
+            },
+            "client_submit_to_complete_us": {
+              "n": 30,
+              "min": 10974,
+              "p50": 11243,
+              "p95": 11422,
+              "max": 11759,
+              "mean": 11246
+            },
+            "client_submit_to_first_text_us": {
+              "n": 30,
+              "min": 5879,
+              "p50": 6083,
+              "p95": 6655,
+              "max": 11284,
+              "mean": 6275
+            },
+            "client_submit_to_launched_us": {
+              "n": 30,
+              "min": 5832,
+              "p50": 6070,
+              "p95": 6227,
+              "max": 6633,
+              "mean": 6079
+            },
+            "client_submit_to_started_us": {
+              "n": 30,
+              "min": 5859,
+              "p50": 6076,
+              "p95": 6639,
+              "max": 11260,
+              "mean": 6257
+            },
+            "client_total_us": {
+              "n": 30,
+              "min": 13871,
+              "p50": 14378,
+              "p95": 14717,
+              "max": 15492,
+              "mean": 14381
+            }
+          },
+          "samples": [
+            {
+              "id": "cold-broker-bench-a-3",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2585,
+              "handshake_us": 503,
+              "prepare_us": 3089,
+              "submit_to_launched_us": 6184,
+              "submit_to_started_us": 6191,
+              "submit_to_first_text_us": 6199,
+              "submit_to_complete_us": 11422,
+              "total_us": 14539,
+              "broker": {
+                "handshake_us": 336,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11062,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5227,
+                  "first_text": 5,
+                  "provider_init": 5822,
+                  "queue_wait": 7
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-4",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2721,
+              "handshake_us": 416,
+              "prepare_us": 3138,
+              "submit_to_launched_us": 6227,
+              "submit_to_started_us": 6247,
+              "submit_to_first_text_us": 6280,
+              "submit_to_complete_us": 11349,
+              "total_us": 14516,
+              "broker": {
+                "handshake_us": 291,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11067,
+                "phases_us": {
+                  "cleanup": 14,
+                  "completion": 5177,
+                  "first_text": 8,
+                  "provider_init": 5859,
+                  "queue_wait": 9
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-5",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2642,
+              "handshake_us": 490,
+              "prepare_us": 3133,
+              "submit_to_launched_us": 6217,
+              "submit_to_started_us": 6223,
+              "submit_to_first_text_us": 6240,
+              "submit_to_complete_us": 11295,
+              "total_us": 14452,
+              "broker": {
+                "handshake_us": 225,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10961,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5156,
+                  "first_text": 7,
+                  "provider_init": 5788,
+                  "queue_wait": 9
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-6",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2638,
+              "handshake_us": 403,
+              "prepare_us": 3041,
+              "submit_to_launched_us": 6069,
+              "submit_to_started_us": 6074,
+              "submit_to_first_text_us": 6080,
+              "submit_to_complete_us": 11255,
+              "total_us": 14340,
+              "broker": {
+                "handshake_us": 187,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10836,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5181,
+                  "first_text": 8,
+                  "provider_init": 5639,
+                  "queue_wait": 6
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-7",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2854,
+              "handshake_us": 423,
+              "prepare_us": 3278,
+              "submit_to_launched_us": 6186,
+              "submit_to_started_us": 6191,
+              "submit_to_first_text_us": 6199,
+              "submit_to_complete_us": 11284,
+              "total_us": 14592,
+              "broker": {
+                "handshake_us": 255,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10993,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5171,
+                  "first_text": 10,
+                  "provider_init": 5804,
+                  "queue_wait": 6
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-8",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2747,
+              "handshake_us": 251,
+              "prepare_us": 2998,
+              "submit_to_launched_us": 5978,
+              "submit_to_started_us": 5987,
+              "submit_to_first_text_us": 6000,
+              "submit_to_complete_us": 11108,
+              "total_us": 14135,
+              "broker": {
+                "handshake_us": 150,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10817,
+                "phases_us": {
+                  "cleanup": 3,
+                  "completion": 5162,
+                  "first_text": 8,
+                  "provider_init": 5638,
+                  "queue_wait": 6
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-9",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2713,
+              "handshake_us": 343,
+              "prepare_us": 3057,
+              "submit_to_launched_us": 6106,
+              "submit_to_started_us": 6122,
+              "submit_to_first_text_us": 6142,
+              "submit_to_complete_us": 11219,
+              "total_us": 14320,
+              "broker": {
+                "handshake_us": 170,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10851,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5184,
+                  "first_text": 6,
+                  "provider_init": 5652,
+                  "queue_wait": 7
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-10",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2720,
+              "handshake_us": 442,
+              "prepare_us": 3163,
+              "submit_to_launched_us": 6110,
+              "submit_to_started_us": 6117,
+              "submit_to_first_text_us": 6125,
+              "submit_to_complete_us": 11210,
+              "total_us": 14397,
+              "broker": {
+                "handshake_us": 213,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10939,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5182,
+                  "first_text": 7,
+                  "provider_init": 5742,
+                  "queue_wait": 6
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-11",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2747,
+              "handshake_us": 308,
+              "prepare_us": 3055,
+              "submit_to_launched_us": 5832,
+              "submit_to_started_us": 5859,
+              "submit_to_first_text_us": 5879,
+              "submit_to_complete_us": 11037,
+              "total_us": 14120,
+              "broker": {
+                "handshake_us": 155,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10762,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5206,
+                  "first_text": 6,
+                  "provider_init": 5543,
+                  "queue_wait": 5
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-12",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2731,
+              "handshake_us": 263,
+              "prepare_us": 2994,
+              "submit_to_launched_us": 5964,
+              "submit_to_started_us": 5980,
+              "submit_to_first_text_us": 6009,
+              "submit_to_complete_us": 11144,
+              "total_us": 14165,
+              "broker": {
+                "handshake_us": 158,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10853,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5163,
+                  "first_text": 7,
+                  "provider_init": 5674,
+                  "queue_wait": 7
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-13",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2702,
+              "handshake_us": 589,
+              "prepare_us": 3292,
+              "submit_to_launched_us": 6070,
+              "submit_to_started_us": 6076,
+              "submit_to_first_text_us": 6083,
+              "submit_to_complete_us": 11397,
+              "total_us": 14717,
+              "broker": {
+                "handshake_us": 296,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11027,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5325,
+                  "first_text": 6,
+                  "provider_init": 5689,
+                  "queue_wait": 6
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-14",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2749,
+              "handshake_us": 490,
+              "prepare_us": 3239,
+              "submit_to_launched_us": 6154,
+              "submit_to_started_us": 6161,
+              "submit_to_first_text_us": 6169,
+              "submit_to_complete_us": 11326,
+              "total_us": 14600,
+              "broker": {
+                "handshake_us": 281,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10923,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5175,
+                  "first_text": 9,
+                  "provider_init": 5730,
+                  "queue_wait": 7
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-15",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2706,
+              "handshake_us": 442,
+              "prepare_us": 3148,
+              "submit_to_launched_us": 6132,
+              "submit_to_started_us": 6149,
+              "submit_to_first_text_us": 6190,
+              "submit_to_complete_us": 11356,
+              "total_us": 14546,
+              "broker": {
+                "handshake_us": 267,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10977,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5183,
+                  "first_text": 8,
+                  "provider_init": 5775,
+                  "queue_wait": 9
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-16",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2561,
+              "handshake_us": 223,
+              "prepare_us": 2784,
+              "submit_to_launched_us": 5919,
+              "submit_to_started_us": 5925,
+              "submit_to_first_text_us": 5943,
+              "submit_to_complete_us": 11062,
+              "total_us": 13871,
+              "broker": {
+                "handshake_us": 105,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10830,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5211,
+                  "first_text": 8,
+                  "provider_init": 5603,
+                  "queue_wait": 6
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-17",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2763,
+              "handshake_us": 375,
+              "prepare_us": 3138,
+              "submit_to_launched_us": 6207,
+              "submit_to_started_us": 6217,
+              "submit_to_first_text_us": 6248,
+              "submit_to_complete_us": 11299,
+              "total_us": 14508,
+              "broker": {
+                "handshake_us": 238,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10975,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5159,
+                  "first_text": 7,
+                  "provider_init": 5799,
+                  "queue_wait": 8
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-18",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2691,
+              "handshake_us": 397,
+              "prepare_us": 3089,
+              "submit_to_launched_us": 6075,
+              "submit_to_started_us": 6083,
+              "submit_to_first_text_us": 6116,
+              "submit_to_complete_us": 11226,
+              "total_us": 14395,
+              "broker": {
+                "handshake_us": 231,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10797,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5143,
+                  "first_text": 6,
+                  "provider_init": 5639,
+                  "queue_wait": 7
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-19",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2625,
+              "handshake_us": 380,
+              "prepare_us": 3006,
+              "submit_to_launched_us": 5878,
+              "submit_to_started_us": 5884,
+              "submit_to_first_text_us": 5902,
+              "submit_to_complete_us": 10974,
+              "total_us": 14002,
+              "broker": {
+                "handshake_us": 221,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10768,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5152,
+                  "first_text": 8,
+                  "provider_init": 5601,
+                  "queue_wait": 6
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-20",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2819,
+              "handshake_us": 462,
+              "prepare_us": 3282,
+              "submit_to_launched_us": 6183,
+              "submit_to_started_us": 6192,
+              "submit_to_first_text_us": 6210,
+              "submit_to_complete_us": 11328,
+              "total_us": 14640,
+              "broker": {
+                "handshake_us": 276,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10941,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5222,
+                  "first_text": 7,
+                  "provider_init": 5703,
+                  "queue_wait": 7
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-21",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2722,
+              "handshake_us": 387,
+              "prepare_us": 3109,
+              "submit_to_launched_us": 6020,
+              "submit_to_started_us": 6025,
+              "submit_to_first_text_us": 6033,
+              "submit_to_complete_us": 11243,
+              "total_us": 14378,
+              "broker": {
+                "handshake_us": 196,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10843,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5190,
+                  "first_text": 7,
+                  "provider_init": 5637,
+                  "queue_wait": 7
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-22",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2612,
+              "handshake_us": 298,
+              "prepare_us": 2911,
+              "submit_to_launched_us": 5913,
+              "submit_to_started_us": 5918,
+              "submit_to_first_text_us": 5933,
+              "submit_to_complete_us": 11058,
+              "total_us": 13995,
+              "broker": {
+                "handshake_us": 182,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10777,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5188,
+                  "first_text": 9,
+                  "provider_init": 5571,
+                  "queue_wait": 7
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-23",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2708,
+              "handshake_us": 487,
+              "prepare_us": 3196,
+              "submit_to_launched_us": 5958,
+              "submit_to_started_us": 5965,
+              "submit_to_first_text_us": 5972,
+              "submit_to_complete_us": 11172,
+              "total_us": 14406,
+              "broker": {
+                "handshake_us": 223,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10793,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5176,
+                  "first_text": 6,
+                  "provider_init": 5604,
+                  "queue_wait": 6
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-24",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2727,
+              "handshake_us": 343,
+              "prepare_us": 3071,
+              "submit_to_launched_us": 6055,
+              "submit_to_started_us": 6060,
+              "submit_to_first_text_us": 6068,
+              "submit_to_complete_us": 11257,
+              "total_us": 14370,
+              "broker": {
+                "handshake_us": 168,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10895,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5178,
+                  "first_text": 7,
+                  "provider_init": 5699,
+                  "queue_wait": 9
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-25",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2770,
+              "handshake_us": 327,
+              "prepare_us": 3097,
+              "submit_to_launched_us": 6000,
+              "submit_to_started_us": 6005,
+              "submit_to_first_text_us": 6011,
+              "submit_to_complete_us": 11240,
+              "total_us": 14368,
+              "broker": {
+                "handshake_us": 189,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10911,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5219,
+                  "first_text": 8,
+                  "provider_init": 5676,
+                  "queue_wait": 6
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-26",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2593,
+              "handshake_us": 222,
+              "prepare_us": 2815,
+              "submit_to_launched_us": 5865,
+              "submit_to_started_us": 5880,
+              "submit_to_first_text_us": 5904,
+              "submit_to_complete_us": 11157,
+              "total_us": 14009,
+              "broker": {
+                "handshake_us": 110,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10854,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5217,
+                  "first_text": 6,
+                  "provider_init": 5617,
+                  "queue_wait": 12
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-27",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2850,
+              "handshake_us": 343,
+              "prepare_us": 3193,
+              "submit_to_launched_us": 6179,
+              "submit_to_started_us": 11260,
+              "submit_to_first_text_us": 11284,
+              "submit_to_complete_us": 11299,
+              "total_us": 14526,
+              "broker": {
+                "handshake_us": 209,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10962,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 12,
+                  "first_text": 6,
+                  "provider_init": 10937,
+                  "queue_wait": 6
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-28",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2816,
+              "handshake_us": 332,
+              "prepare_us": 3148,
+              "submit_to_launched_us": 6103,
+              "submit_to_started_us": 6111,
+              "submit_to_first_text_us": 6117,
+              "submit_to_complete_us": 11292,
+              "total_us": 14477,
+              "broker": {
+                "handshake_us": 160,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10908,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5193,
+                  "first_text": 11,
+                  "provider_init": 5696,
+                  "queue_wait": 6
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-29",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2670,
+              "handshake_us": 330,
+              "prepare_us": 3001,
+              "submit_to_launched_us": 6177,
+              "submit_to_started_us": 6184,
+              "submit_to_first_text_us": 6192,
+              "submit_to_complete_us": 11339,
+              "total_us": 14377,
+              "broker": {
+                "handshake_us": 197,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10976,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5236,
+                  "first_text": 9,
+                  "provider_init": 5720,
+                  "queue_wait": 9
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-30",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2611,
+              "handshake_us": 288,
+              "prepare_us": 2899,
+              "submit_to_launched_us": 6030,
+              "submit_to_started_us": 6038,
+              "submit_to_first_text_us": 6070,
+              "submit_to_complete_us": 11211,
+              "total_us": 14133,
+              "broker": {
+                "handshake_us": 173,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10815,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5177,
+                  "first_text": 8,
+                  "provider_init": 5622,
+                  "queue_wait": 6
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-31",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2725,
+              "handshake_us": 979,
+              "prepare_us": 3705,
+              "submit_to_launched_us": 6633,
+              "submit_to_started_us": 6639,
+              "submit_to_first_text_us": 6655,
+              "submit_to_complete_us": 11759,
+              "total_us": 15492,
+              "broker": {
+                "handshake_us": 514,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11268,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5172,
+                  "first_text": 6,
+                  "provider_init": 6079,
+                  "queue_wait": 9
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-32",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2646,
+              "handshake_us": 281,
+              "prepare_us": 2927,
+              "submit_to_launched_us": 5954,
+              "submit_to_started_us": 5960,
+              "submit_to_first_text_us": 5999,
+              "submit_to_complete_us": 11067,
+              "total_us": 14058,
+              "broker": {
+                "handshake_us": 145,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10799,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5165,
+                  "first_text": 8,
+                  "provider_init": 5618,
+                  "queue_wait": 6
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "counts": {
+        "requests_total": 33,
+        "fake_probes": 0,
+        "fake_turns": 33,
+        "broker_probes": 0,
+        "broker_launches": 30
+      }
+    },
+    {
+      "name": "cold-three-app",
+      "state": "cold_broker_fresh_provider",
+      "status": "measured",
+      "description": "No broker is running, and three applications start at the same moment, each with one request. Their clients all find no broker and each start one: how many companion processes that takes, and how long each application waits for the broker, is what is measured. Each sample uses a new broker and data directory, and the applications start the companion through the harness, which counts the starts and adds one process hop to each.",
+      "apps": [
+        {
+          "app": "bench-a",
+          "role": "cold",
+          "completed": 30,
+          "failed": 0,
+          "metrics_us": {
+            "broker_cleanup_us": {
+              "n": 30,
+              "min": 0,
+              "p50": 1,
+              "p95": 3,
+              "max": 3,
+              "mean": 1
+            },
+            "broker_completion_us": {
+              "n": 30,
+              "min": 13,
+              "p50": 5187,
+              "p95": 5262,
+              "max": 5265,
+              "mean": 4676
+            },
+            "broker_first_text_us": {
+              "n": 30,
+              "min": 3,
+              "p50": 5,
+              "p95": 26,
+              "max": 58,
+              "mean": 9
+            },
+            "broker_handshake_us": {
+              "n": 30,
+              "min": 56,
+              "p50": 132,
+              "p95": 660,
+              "max": 851,
+              "mean": 203
+            },
+            "broker_provider_init_us": {
+              "n": 30,
+              "min": 1612,
+              "p50": 5770,
+              "p95": 10474,
+              "max": 10578,
+              "mean": 5904
+            },
+            "broker_queue_wait_us": {
+              "n": 30,
+              "min": 11,
+              "p50": 559,
+              "p95": 11521,
+              "max": 11616,
+              "mean": 4469
+            },
+            "broker_total_us": {
+              "n": 30,
+              "min": 10531,
+              "p50": 11554,
+              "p95": 22442,
+              "max": 22866,
+              "mean": 15060
+            },
+            "client_connect_us": {
+              "n": 30,
+              "min": 5365,
+              "p50": 5685,
+              "p95": 5943,
+              "max": 5953,
+              "mean": 5664
+            },
+            "client_handshake_us": {
+              "n": 30,
+              "min": 133,
+              "p50": 355,
+              "p95": 799,
+              "max": 995,
+              "mean": 393
+            },
+            "client_prepare_us": {
+              "n": 30,
+              "min": 5747,
+              "p50": 6019,
+              "p95": 6578,
+              "max": 6721,
+              "mean": 6058
+            },
+            "client_start_to_first_text_us": {
+              "n": 30,
+              "min": 12260,
+              "p50": 12971,
+              "p95": 24120,
+              "max": 27982,
+              "mean": 17094
+            },
+            "client_submit_to_complete_us": {
+              "n": 30,
+              "min": 11388,
+              "p50": 11889,
+              "p95": 23213,
+              "max": 23240,
+              "mean": 15634
+            },
+            "client_submit_to_first_text_us": {
+              "n": 30,
+              "min": 6396,
+              "p50": 6846,
+              "p95": 18109,
+              "max": 22124,
+              "mean": 11036
+            },
+            "client_submit_to_launched_us": {
+              "n": 30,
+              "min": 835,
+              "p50": 6723,
+              "p95": 13424,
+              "max": 13535,
+              "mean": 7891
+            },
+            "client_submit_to_started_us": {
+              "n": 30,
+              "min": 6362,
+              "p50": 6841,
+              "p95": 18074,
+              "max": 22109,
+              "mean": 11011
+            },
+            "client_total_us": {
+              "n": 30,
+              "min": 17446,
+              "p50": 18050,
+              "p95": 29145,
+              "max": 29264,
+              "mean": 21724
+            }
+          },
+          "samples": [
+            {
+              "id": "cold-three-app-bench-a-3",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5895,
+              "handshake_us": 246,
+              "prepare_us": 6141,
+              "submit_to_launched_us": 12657,
+              "submit_to_started_us": 17723,
+              "submit_to_first_text_us": 17742,
+              "submit_to_complete_us": 22881,
+              "total_us": 29042,
+              "broker": {
+                "handshake_us": 58,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 21563,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5189,
+                  "first_text": 6,
+                  "provider_init": 5770,
+                  "queue_wait": 10597
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-4",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5915,
+              "handshake_us": 187,
+              "prepare_us": 6103,
+              "submit_to_launched_us": 11652,
+              "submit_to_started_us": 16980,
+              "submit_to_first_text_us": 16988,
+              "submit_to_complete_us": 22074,
+              "total_us": 28203,
+              "broker": {
+                "handshake_us": 105,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 21096,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5193,
+                  "first_text": 5,
+                  "provider_init": 5523,
+                  "queue_wait": 10373
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-5",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5726,
+              "handshake_us": 995,
+              "prepare_us": 6721,
+              "submit_to_launched_us": 11263,
+              "submit_to_started_us": 16447,
+              "submit_to_first_text_us": 16453,
+              "submit_to_complete_us": 21638,
+              "total_us": 28386,
+              "broker": {
+                "handshake_us": 851,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 21296,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5262,
+                  "first_text": 4,
+                  "provider_init": 5641,
+                  "queue_wait": 10388
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-6",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5433,
+              "handshake_us": 425,
+              "prepare_us": 5858,
+              "submit_to_launched_us": 11888,
+              "submit_to_started_us": 22109,
+              "submit_to_first_text_us": 22124,
+              "submit_to_complete_us": 22142,
+              "total_us": 28045,
+              "broker": {
+                "handshake_us": 213,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 21797,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 28,
+                  "first_text": 5,
+                  "provider_init": 10578,
+                  "queue_wait": 11185
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-7",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5365,
+              "handshake_us": 381,
+              "prepare_us": 5747,
+              "submit_to_launched_us": 6484,
+              "submit_to_started_us": 6490,
+              "submit_to_first_text_us": 6513,
+              "submit_to_complete_us": 11722,
+              "total_us": 17506,
+              "broker": {
+                "handshake_us": 194,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11352,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5182,
+                  "first_text": 25,
+                  "provider_init": 5613,
+                  "queue_wait": 532
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-8",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5890,
+              "handshake_us": 208,
+              "prepare_us": 6099,
+              "submit_to_launched_us": 6479,
+              "submit_to_started_us": 6500,
+              "submit_to_first_text_us": 6517,
+              "submit_to_complete_us": 11564,
+              "total_us": 17685,
+              "broker": {
+                "handshake_us": 78,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10844,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5194,
+                  "first_text": 4,
+                  "provider_init": 5607,
+                  "queue_wait": 39
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-9",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5735,
+              "handshake_us": 736,
+              "prepare_us": 6472,
+              "submit_to_launched_us": 5509,
+              "submit_to_started_us": 11346,
+              "submit_to_first_text_us": 11376,
+              "submit_to_complete_us": 11388,
+              "total_us": 17896,
+              "broker": {
+                "handshake_us": 287,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10531,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 13,
+                  "first_text": 8,
+                  "provider_init": 10474,
+                  "queue_wait": 34
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-10",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5563,
+              "handshake_us": 660,
+              "prepare_us": 6223,
+              "submit_to_launched_us": 1963,
+              "submit_to_started_us": 6675,
+              "submit_to_first_text_us": 6748,
+              "submit_to_complete_us": 11803,
+              "total_us": 18050,
+              "broker": {
+                "handshake_us": 310,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11515,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5199,
+                  "first_text": 4,
+                  "provider_init": 5766,
+                  "queue_wait": 546
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-11",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5772,
+              "handshake_us": 158,
+              "prepare_us": 5931,
+              "submit_to_launched_us": 6415,
+              "submit_to_started_us": 6421,
+              "submit_to_first_text_us": 6430,
+              "submit_to_complete_us": 11483,
+              "total_us": 17446,
+              "broker": {
+                "handshake_us": 57,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11218,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5153,
+                  "first_text": 24,
+                  "provider_init": 6016,
+                  "queue_wait": 23
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-12",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5760,
+              "handshake_us": 288,
+              "prepare_us": 6048,
+              "submit_to_launched_us": 6642,
+              "submit_to_started_us": 6660,
+              "submit_to_first_text_us": 6682,
+              "submit_to_complete_us": 11813,
+              "total_us": 17896,
+              "broker": {
+                "handshake_us": 83,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10886,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5207,
+                  "first_text": 4,
+                  "provider_init": 5641,
+                  "queue_wait": 34
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-13",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5735,
+              "handshake_us": 291,
+              "prepare_us": 6026,
+              "submit_to_launched_us": 12851,
+              "submit_to_started_us": 18074,
+              "submit_to_first_text_us": 18094,
+              "submit_to_complete_us": 23213,
+              "total_us": 29264,
+              "broker": {
+                "handshake_us": 71,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 22021,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5137,
+                  "first_text": 5,
+                  "provider_init": 6420,
+                  "queue_wait": 10458
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-14",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5411,
+              "handshake_us": 717,
+              "prepare_us": 6128,
+              "submit_to_launched_us": 6514,
+              "submit_to_started_us": 6521,
+              "submit_to_first_text_us": 6544,
+              "submit_to_complete_us": 11632,
+              "total_us": 17796,
+              "broker": {
+                "handshake_us": 509,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11308,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5165,
+                  "first_text": 5,
+                  "provider_init": 5579,
+                  "queue_wait": 559
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-15",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5685,
+              "handshake_us": 799,
+              "prepare_us": 6485,
+              "submit_to_launched_us": 11277,
+              "submit_to_started_us": 16511,
+              "submit_to_first_text_us": 16529,
+              "submit_to_complete_us": 21681,
+              "total_us": 28192,
+              "broker": {
+                "handshake_us": 660,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 21413,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5187,
+                  "first_text": 6,
+                  "provider_init": 5835,
+                  "queue_wait": 10383
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-16",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5741,
+              "handshake_us": 133,
+              "prepare_us": 5874,
+              "submit_to_launched_us": 6615,
+              "submit_to_started_us": 6632,
+              "submit_to_first_text_us": 6650,
+              "submit_to_complete_us": 11574,
+              "total_us": 17473,
+              "broker": {
+                "handshake_us": 56,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11334,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5158,
+                  "first_text": 4,
+                  "provider_init": 5553,
+                  "queue_wait": 618
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-17",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5461,
+              "handshake_us": 369,
+              "prepare_us": 5831,
+              "submit_to_launched_us": 1140,
+              "submit_to_started_us": 6436,
+              "submit_to_first_text_us": 6456,
+              "submit_to_complete_us": 11601,
+              "total_us": 17462,
+              "broker": {
+                "handshake_us": 162,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11231,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5191,
+                  "first_text": 5,
+                  "provider_init": 6019,
+                  "queue_wait": 14
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-18",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5953,
+              "handshake_us": 148,
+              "prepare_us": 6101,
+              "submit_to_launched_us": 6837,
+              "submit_to_started_us": 6841,
+              "submit_to_first_text_us": 6846,
+              "submit_to_complete_us": 12016,
+              "total_us": 18159,
+              "broker": {
+                "handshake_us": 96,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11618,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5239,
+                  "first_text": 3,
+                  "provider_init": 5667,
+                  "queue_wait": 708
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-19",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5754,
+              "handshake_us": 196,
+              "prepare_us": 5951,
+              "submit_to_launched_us": 6541,
+              "submit_to_started_us": 6563,
+              "submit_to_first_text_us": 6587,
+              "submit_to_complete_us": 11666,
+              "total_us": 17651,
+              "broker": {
+                "handshake_us": 116,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10877,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5162,
+                  "first_text": 4,
+                  "provider_init": 5677,
+                  "queue_wait": 34
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-20",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5494,
+              "handshake_us": 317,
+              "prepare_us": 5811,
+              "submit_to_launched_us": 835,
+              "submit_to_started_us": 6579,
+              "submit_to_first_text_us": 6627,
+              "submit_to_complete_us": 11787,
+              "total_us": 17644,
+              "broker": {
+                "handshake_us": 180,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11431,
+                "phases_us": {
+                  "cleanup": 3,
+                  "completion": 5243,
+                  "first_text": 5,
+                  "provider_init": 6169,
+                  "queue_wait": 11
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-21",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5475,
+              "handshake_us": 400,
+              "prepare_us": 5875,
+              "submit_to_launched_us": 842,
+              "submit_to_started_us": 6531,
+              "submit_to_first_text_us": 6611,
+              "submit_to_complete_us": 11638,
+              "total_us": 17551,
+              "broker": {
+                "handshake_us": 229,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11326,
+                "phases_us": {
+                  "cleanup": 3,
+                  "completion": 5222,
+                  "first_text": 6,
+                  "provider_init": 6072,
+                  "queue_wait": 23
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-22",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5895,
+              "handshake_us": 167,
+              "prepare_us": 6062,
+              "submit_to_launched_us": 13152,
+              "submit_to_started_us": 13157,
+              "submit_to_first_text_us": 13165,
+              "submit_to_complete_us": 18345,
+              "total_us": 24441,
+              "broker": {
+                "handshake_us": 57,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 17658,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5165,
+                  "first_text": 21,
+                  "provider_init": 1612,
+                  "queue_wait": 10859
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-23",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5790,
+              "handshake_us": 310,
+              "prepare_us": 6100,
+              "submit_to_launched_us": 13424,
+              "submit_to_started_us": 17507,
+              "submit_to_first_text_us": 17514,
+              "submit_to_complete_us": 22615,
+              "total_us": 28735,
+              "broker": {
+                "handshake_us": 95,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 22442,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5191,
+                  "first_text": 8,
+                  "provider_init": 5775,
+                  "queue_wait": 11466
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-24",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5506,
+              "handshake_us": 356,
+              "prepare_us": 5862,
+              "submit_to_launched_us": 12658,
+              "submit_to_started_us": 18021,
+              "submit_to_first_text_us": 18109,
+              "submit_to_complete_us": 23240,
+              "total_us": 29145,
+              "broker": {
+                "handshake_us": 166,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 22866,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5231,
+                  "first_text": 7,
+                  "provider_init": 6010,
+                  "queue_wait": 11616
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-25",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5536,
+              "handshake_us": 379,
+              "prepare_us": 5916,
+              "submit_to_launched_us": 2114,
+              "submit_to_started_us": 6362,
+              "submit_to_first_text_us": 6396,
+              "submit_to_complete_us": 11589,
+              "total_us": 17530,
+              "broker": {
+                "handshake_us": 132,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11216,
+                "phases_us": {
+                  "cleanup": 3,
+                  "completion": 5174,
+                  "first_text": 7,
+                  "provider_init": 6019,
+                  "queue_wait": 13
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-26",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5634,
+              "handshake_us": 355,
+              "prepare_us": 5990,
+              "submit_to_launched_us": 13535,
+              "submit_to_started_us": 13551,
+              "submit_to_first_text_us": 13566,
+              "submit_to_complete_us": 13580,
+              "total_us": 19586,
+              "broker": {
+                "handshake_us": 112,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 13361,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 43,
+                  "first_text": 26,
+                  "provider_init": 1770,
+                  "queue_wait": 11521
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-27",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5666,
+              "handshake_us": 492,
+              "prepare_us": 6158,
+              "submit_to_launched_us": 7703,
+              "submit_to_started_us": 7712,
+              "submit_to_first_text_us": 7737,
+              "submit_to_complete_us": 12742,
+              "total_us": 18928,
+              "broker": {
+                "handshake_us": 254,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 12447,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5182,
+                  "first_text": 5,
+                  "provider_init": 6629,
+                  "queue_wait": 630
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-28",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5534,
+              "handshake_us": 292,
+              "prepare_us": 5827,
+              "submit_to_launched_us": 1155,
+              "submit_to_started_us": 6688,
+              "submit_to_first_text_us": 6720,
+              "submit_to_complete_us": 11880,
+              "total_us": 17733,
+              "broker": {
+                "handshake_us": 83,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11603,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5265,
+                  "first_text": 6,
+                  "provider_init": 6314,
+                  "queue_wait": 16
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-29",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5719,
+              "handshake_us": 299,
+              "prepare_us": 6019,
+              "submit_to_launched_us": 12218,
+              "submit_to_started_us": 17600,
+              "submit_to_first_text_us": 17610,
+              "submit_to_complete_us": 22632,
+              "total_us": 28674,
+              "broker": {
+                "handshake_us": 88,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 21549,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5196,
+                  "first_text": 5,
+                  "provider_init": 5874,
+                  "queue_wait": 10473
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-30",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5512,
+              "handshake_us": 468,
+              "prepare_us": 5980,
+              "submit_to_launched_us": 8084,
+              "submit_to_started_us": 8092,
+              "submit_to_first_text_us": 8118,
+              "submit_to_complete_us": 13235,
+              "total_us": 19263,
+              "broker": {
+                "handshake_us": 137,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10929,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5153,
+                  "first_text": 5,
+                  "provider_init": 5728,
+                  "queue_wait": 43
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-31",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5425,
+              "handshake_us": 407,
+              "prepare_us": 5832,
+              "submit_to_launched_us": 6723,
+              "submit_to_started_us": 6746,
+              "submit_to_first_text_us": 6775,
+              "submit_to_complete_us": 11889,
+              "total_us": 17755,
+              "broker": {
+                "handshake_us": 208,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11554,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5206,
+                  "first_text": 58,
+                  "provider_init": 6259,
+                  "queue_wait": 29
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-a-32",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5943,
+              "handshake_us": 635,
+              "prepare_us": 6578,
+              "submit_to_launched_us": 11588,
+              "submit_to_started_us": 16864,
+              "submit_to_first_text_us": 16873,
+              "submit_to_complete_us": 21981,
+              "total_us": 28584,
+              "broker": {
+                "handshake_us": 462,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 21520,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5157,
+                  "first_text": 5,
+                  "provider_init": 5511,
+                  "queue_wait": 10845
+                }
+              }
+            }
+          ]
+        },
+        {
+          "app": "bench-b",
+          "role": "cold",
+          "completed": 30,
+          "failed": 0,
+          "metrics_us": {
+            "broker_cleanup_us": {
+              "n": 30,
+              "min": 0,
+              "p50": 1,
+              "p95": 2,
+              "max": 2,
+              "mean": 1
+            },
+            "broker_completion_us": {
+              "n": 30,
+              "min": 6,
+              "p50": 5192,
+              "p95": 5244,
+              "max": 5268,
+              "mean": 4703
+            },
+            "broker_first_text_us": {
+              "n": 30,
+              "min": 3,
+              "p50": 6,
+              "p95": 29,
+              "max": 31,
+              "mean": 7
+            },
+            "broker_handshake_us": {
+              "n": 30,
+              "min": 65,
+              "p50": 173,
+              "p95": 343,
+              "max": 512,
+              "mean": 187
+            },
+            "broker_provider_init_us": {
+              "n": 30,
+              "min": 1393,
+              "p50": 5946,
+              "p95": 10711,
+              "max": 11392,
+              "mean": 6282
+            },
+            "broker_queue_wait_us": {
+              "n": 30,
+              "min": 8,
+              "p50": 55,
+              "p95": 11393,
+              "max": 11595,
+              "mean": 2786
+            },
+            "broker_total_us": {
+              "n": 30,
+              "min": 10761,
+              "p50": 11456,
+              "p95": 22120,
+              "max": 22553,
+              "mean": 13781
+            },
+            "client_connect_us": {
+              "n": 30,
+              "min": 5299,
+              "p50": 5482,
+              "p95": 5827,
+              "max": 5858,
+              "mean": 5519
+            },
+            "client_handshake_us": {
+              "n": 30,
+              "min": 169,
+              "p50": 381,
+              "p95": 690,
+              "max": 700,
+              "mean": 390
+            },
+            "client_prepare_us": {
+              "n": 30,
+              "min": 5588,
+              "p50": 5895,
+              "p95": 6110,
+              "max": 6518,
+              "mean": 5910
+            },
+            "client_start_to_first_text_us": {
+              "n": 30,
+              "min": 11917,
+              "p50": 12660,
+              "p95": 23616,
+              "max": 23663,
+              "mean": 15484
+            },
+            "client_submit_to_complete_us": {
+              "n": 30,
+              "min": 11439,
+              "p50": 11820,
+              "p95": 22726,
+              "max": 22995,
+              "mean": 14196
+            },
+            "client_submit_to_first_text_us": {
+              "n": 30,
+              "min": 6287,
+              "p50": 6745,
+              "p95": 17589,
+              "max": 17696,
+              "mean": 9573
+            },
+            "client_submit_to_launched_us": {
+              "n": 30,
+              "min": 776,
+              "p50": 6355,
+              "p95": 12391,
+              "max": 13275,
+              "mean": 5670
+            },
+            "client_submit_to_started_us": {
+              "n": 30,
+              "min": 6274,
+              "p50": 6740,
+              "p95": 17582,
+              "max": 17676,
+              "mean": 9548
+            },
+            "client_total_us": {
+              "n": 30,
+              "min": 17103,
+              "p50": 17793,
+              "p95": 28791,
+              "max": 28988,
+              "mean": 20147
+            }
+          },
+          "samples": [
+            {
+              "id": "cold-three-app-bench-b-3",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5541,
+              "handshake_us": 336,
+              "prepare_us": 5877,
+              "submit_to_launched_us": 1591,
+              "submit_to_started_us": 6885,
+              "submit_to_first_text_us": 6899,
+              "submit_to_complete_us": 12091,
+              "total_us": 17994,
+              "broker": {
+                "handshake_us": 198,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11790,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5243,
+                  "first_text": 6,
+                  "provider_init": 5838,
+                  "queue_wait": 702
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-4",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5497,
+              "handshake_us": 257,
+              "prepare_us": 5754,
+              "submit_to_launched_us": 1346,
+              "submit_to_started_us": 6515,
+              "submit_to_first_text_us": 6552,
+              "submit_to_complete_us": 11666,
+              "total_us": 17459,
+              "broker": {
+                "handshake_us": 137,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11295,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5180,
+                  "first_text": 5,
+                  "provider_init": 6058,
+                  "queue_wait": 50
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-5",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5299,
+              "handshake_us": 289,
+              "prepare_us": 5588,
+              "submit_to_launched_us": 1138,
+              "submit_to_started_us": 6677,
+              "submit_to_first_text_us": 6716,
+              "submit_to_complete_us": 11820,
+              "total_us": 17438,
+              "broker": {
+                "handshake_us": 163,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11527,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5211,
+                  "first_text": 7,
+                  "provider_init": 6300,
+                  "queue_wait": 8
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-6",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5561,
+              "handshake_us": 282,
+              "prepare_us": 5843,
+              "submit_to_launched_us": 6355,
+              "submit_to_started_us": 6364,
+              "submit_to_first_text_us": 6420,
+              "submit_to_complete_us": 11458,
+              "total_us": 17327,
+              "broker": {
+                "handshake_us": 134,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11161,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5146,
+                  "first_text": 3,
+                  "provider_init": 5508,
+                  "queue_wait": 503
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-7",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5309,
+              "handshake_us": 383,
+              "prepare_us": 5692,
+              "submit_to_launched_us": 11975,
+              "submit_to_started_us": 17277,
+              "submit_to_first_text_us": 17309,
+              "submit_to_complete_us": 22368,
+              "total_us": 28093,
+              "broker": {
+                "handshake_us": 153,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 22120,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5172,
+                  "first_text": 6,
+                  "provider_init": 5548,
+                  "queue_wait": 11393
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-8",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5543,
+              "handshake_us": 365,
+              "prepare_us": 5908,
+              "submit_to_launched_us": 827,
+              "submit_to_started_us": 6558,
+              "submit_to_first_text_us": 6584,
+              "submit_to_complete_us": 11703,
+              "total_us": 17641,
+              "broker": {
+                "handshake_us": 209,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11440,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5233,
+                  "first_text": 5,
+                  "provider_init": 6189,
+                  "queue_wait": 11
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-9",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5818,
+              "handshake_us": 700,
+              "prepare_us": 6518,
+              "submit_to_launched_us": 5503,
+              "submit_to_started_us": 11353,
+              "submit_to_first_text_us": 11375,
+              "submit_to_complete_us": 11672,
+              "total_us": 18220,
+              "broker": {
+                "handshake_us": 290,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11170,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 632,
+                  "first_text": 7,
+                  "provider_init": 9619,
+                  "queue_wait": 911
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-10",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5613,
+              "handshake_us": 497,
+              "prepare_us": 6110,
+              "submit_to_launched_us": 1448,
+              "submit_to_started_us": 6742,
+              "submit_to_first_text_us": 6767,
+              "submit_to_complete_us": 12041,
+              "total_us": 18443,
+              "broker": {
+                "handshake_us": 343,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11559,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5244,
+                  "first_text": 5,
+                  "provider_init": 6254,
+                  "queue_wait": 55
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-11",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5430,
+              "handshake_us": 370,
+              "prepare_us": 5800,
+              "submit_to_launched_us": 11874,
+              "submit_to_started_us": 12874,
+              "submit_to_first_text_us": 12904,
+              "submit_to_complete_us": 18048,
+              "total_us": 23881,
+              "broker": {
+                "handshake_us": 180,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 17794,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5163,
+                  "first_text": 3,
+                  "provider_init": 1393,
+                  "queue_wait": 11234
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-12",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5395,
+              "handshake_us": 602,
+              "prepare_us": 5998,
+              "submit_to_launched_us": 12276,
+              "submit_to_started_us": 17537,
+              "submit_to_first_text_us": 17578,
+              "submit_to_complete_us": 22580,
+              "total_us": 28602,
+              "broker": {
+                "handshake_us": 158,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 21733,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5211,
+                  "first_text": 6,
+                  "provider_init": 5602,
+                  "queue_wait": 10912
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-13",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5585,
+              "handshake_us": 267,
+              "prepare_us": 5853,
+              "submit_to_launched_us": 1240,
+              "submit_to_started_us": 6514,
+              "submit_to_first_text_us": 6534,
+              "submit_to_complete_us": 11655,
+              "total_us": 17540,
+              "broker": {
+                "handshake_us": 127,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11397,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5191,
+                  "first_text": 4,
+                  "provider_init": 6188,
+                  "queue_wait": 13
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-14",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5315,
+              "handshake_us": 690,
+              "prepare_us": 6006,
+              "submit_to_launched_us": 6514,
+              "submit_to_started_us": 6518,
+              "submit_to_first_text_us": 6546,
+              "submit_to_complete_us": 11701,
+              "total_us": 17741,
+              "broker": {
+                "handshake_us": 512,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11313,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5199,
+                  "first_text": 31,
+                  "provider_init": 6060,
+                  "queue_wait": 21
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-15",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5324,
+              "handshake_us": 306,
+              "prepare_us": 5630,
+              "submit_to_launched_us": 840,
+              "submit_to_started_us": 6274,
+              "submit_to_first_text_us": 6287,
+              "submit_to_complete_us": 11439,
+              "total_us": 17103,
+              "broker": {
+                "handshake_us": 168,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11196,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5205,
+                  "first_text": 5,
+                  "provider_init": 5947,
+                  "queue_wait": 38
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-16",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5414,
+              "handshake_us": 407,
+              "prepare_us": 5822,
+              "submit_to_launched_us": 13275,
+              "submit_to_started_us": 17300,
+              "submit_to_first_text_us": 17315,
+              "submit_to_complete_us": 22423,
+              "total_us": 28278,
+              "broker": {
+                "handshake_us": 173,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 22094,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5191,
+                  "first_text": 6,
+                  "provider_init": 5533,
+                  "queue_wait": 11362
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-17",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5649,
+              "handshake_us": 186,
+              "prepare_us": 5836,
+              "submit_to_launched_us": 2395,
+              "submit_to_started_us": 6442,
+              "submit_to_first_text_us": 6449,
+              "submit_to_complete_us": 11516,
+              "total_us": 17392,
+              "broker": {
+                "handshake_us": 151,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11235,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5179,
+                  "first_text": 3,
+                  "provider_init": 5572,
+                  "queue_wait": 481
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-18",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5638,
+              "handshake_us": 423,
+              "prepare_us": 6062,
+              "submit_to_launched_us": 6856,
+              "submit_to_started_us": 6863,
+              "submit_to_first_text_us": 6892,
+              "submit_to_complete_us": 12055,
+              "total_us": 18152,
+              "broker": {
+                "handshake_us": 212,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11623,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5268,
+                  "first_text": 29,
+                  "provider_init": 6294,
+                  "queue_wait": 30
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-19",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5858,
+              "handshake_us": 169,
+              "prepare_us": 6027,
+              "submit_to_launched_us": 12391,
+              "submit_to_started_us": 17582,
+              "submit_to_first_text_us": 17589,
+              "submit_to_complete_us": 22726,
+              "total_us": 28791,
+              "broker": {
+                "handshake_us": 67,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 22036,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5179,
+                  "first_text": 4,
+                  "provider_init": 5946,
+                  "queue_wait": 10905
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-20",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5827,
+              "handshake_us": 177,
+              "prepare_us": 6005,
+              "submit_to_launched_us": 11962,
+              "submit_to_started_us": 17226,
+              "submit_to_first_text_us": 17234,
+              "submit_to_complete_us": 22361,
+              "total_us": 28386,
+              "broker": {
+                "handshake_us": 65,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 21658,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5185,
+                  "first_text": 6,
+                  "provider_init": 5575,
+                  "queue_wait": 10891
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-21",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5474,
+              "handshake_us": 420,
+              "prepare_us": 5895,
+              "submit_to_launched_us": 6511,
+              "submit_to_started_us": 6565,
+              "submit_to_first_text_us": 6598,
+              "submit_to_complete_us": 11631,
+              "total_us": 17551,
+              "broker": {
+                "handshake_us": 192,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10761,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5173,
+                  "first_text": 4,
+                  "provider_init": 5548,
+                  "queue_wait": 35
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-22",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5455,
+              "handshake_us": 397,
+              "prepare_us": 5852,
+              "submit_to_launched_us": 776,
+              "submit_to_started_us": 6618,
+              "submit_to_first_text_us": 6645,
+              "submit_to_complete_us": 11757,
+              "total_us": 17660,
+              "broker": {
+                "handshake_us": 193,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11396,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5203,
+                  "first_text": 6,
+                  "provider_init": 6161,
+                  "queue_wait": 25
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-23",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5558,
+              "handshake_us": 449,
+              "prepare_us": 6008,
+              "submit_to_launched_us": 6481,
+              "submit_to_started_us": 6498,
+              "submit_to_first_text_us": 6550,
+              "submit_to_complete_us": 11661,
+              "total_us": 17706,
+              "broker": {
+                "handshake_us": 129,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11411,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5215,
+                  "first_text": 21,
+                  "provider_init": 5615,
+                  "queue_wait": 560
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-24",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5561,
+              "handshake_us": 353,
+              "prepare_us": 5915,
+              "submit_to_launched_us": 6736,
+              "submit_to_started_us": 6740,
+              "submit_to_first_text_us": 6745,
+              "submit_to_complete_us": 11850,
+              "total_us": 17793,
+              "broker": {
+                "handshake_us": 146,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11573,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5219,
+                  "first_text": 5,
+                  "provider_init": 5676,
+                  "queue_wait": 673
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-25",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5437,
+              "handshake_us": 425,
+              "prepare_us": 5863,
+              "submit_to_launched_us": 2101,
+              "submit_to_started_us": 11590,
+              "submit_to_first_text_us": 11605,
+              "submit_to_complete_us": 11610,
+              "total_us": 17504,
+              "broker": {
+                "handshake_us": 185,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11249,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 6,
+                  "first_text": 6,
+                  "provider_init": 10711,
+                  "queue_wait": 526
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-26",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5484,
+              "handshake_us": 427,
+              "prepare_us": 5912,
+              "submit_to_launched_us": 6567,
+              "submit_to_started_us": 11916,
+              "submit_to_first_text_us": 11941,
+              "submit_to_complete_us": 11947,
+              "total_us": 17889,
+              "broker": {
+                "handshake_us": 221,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11456,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 25,
+                  "first_text": 5,
+                  "provider_init": 11392,
+                  "queue_wait": 33
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-27",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5451,
+              "handshake_us": 511,
+              "prepare_us": 5963,
+              "submit_to_launched_us": 7704,
+              "submit_to_started_us": 7730,
+              "submit_to_first_text_us": 7768,
+              "submit_to_complete_us": 12799,
+              "total_us": 18793,
+              "broker": {
+                "handshake_us": 290,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 12457,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5213,
+                  "first_text": 19,
+                  "provider_init": 7193,
+                  "queue_wait": 31
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-28",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5478,
+              "handshake_us": 340,
+              "prepare_us": 5818,
+              "submit_to_launched_us": 1206,
+              "submit_to_started_us": 6696,
+              "submit_to_first_text_us": 6714,
+              "submit_to_complete_us": 11834,
+              "total_us": 17696,
+              "broker": {
+                "handshake_us": 125,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11604,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5192,
+                  "first_text": 6,
+                  "provider_init": 5857,
+                  "queue_wait": 549
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-29",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5482,
+              "handshake_us": 381,
+              "prepare_us": 5863,
+              "submit_to_launched_us": 1188,
+              "submit_to_started_us": 6399,
+              "submit_to_first_text_us": 6421,
+              "submit_to_complete_us": 11643,
+              "total_us": 17533,
+              "broker": {
+                "handshake_us": 180,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11306,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5221,
+                  "first_text": 6,
+                  "provider_init": 6064,
+                  "queue_wait": 14
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-30",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5436,
+              "handshake_us": 470,
+              "prepare_us": 5907,
+              "submit_to_launched_us": 2194,
+              "submit_to_started_us": 7970,
+              "submit_to_first_text_us": 7982,
+              "submit_to_complete_us": 13095,
+              "total_us": 19038,
+              "broker": {
+                "handshake_us": 186,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 12731,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5206,
+                  "first_text": 8,
+                  "provider_init": 7507,
+                  "queue_wait": 9
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-31",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5736,
+              "handshake_us": 231,
+              "prepare_us": 5967,
+              "submit_to_launched_us": 12323,
+              "submit_to_started_us": 17676,
+              "submit_to_first_text_us": 17696,
+              "submit_to_complete_us": 22995,
+              "total_us": 28988,
+              "broker": {
+                "handshake_us": 111,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 22553,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5226,
+                  "first_text": 5,
+                  "provider_init": 5725,
+                  "queue_wait": 11595
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-b-32",
+              "app": "bench-b",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5419,
+              "handshake_us": 599,
+              "prepare_us": 6018,
+              "submit_to_launched_us": 6536,
+              "submit_to_started_us": 6559,
+              "submit_to_first_text_us": 6600,
+              "submit_to_complete_us": 11744,
+              "total_us": 17798,
+              "broker": {
+                "handshake_us": 224,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10816,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5165,
+                  "first_text": 5,
+                  "provider_init": 5612,
+                  "queue_wait": 33
+                }
+              }
+            }
+          ]
+        },
+        {
+          "app": "bench-c",
+          "role": "cold",
+          "completed": 30,
+          "failed": 0,
+          "metrics_us": {
+            "broker_cleanup_us": {
+              "n": 30,
+              "min": 0,
+              "p50": 1,
+              "p95": 2,
+              "max": 3,
+              "mean": 1
+            },
+            "broker_completion_us": {
+              "n": 30,
+              "min": 11,
+              "p50": 5192,
+              "p95": 5288,
+              "max": 5302,
+              "mean": 4857
+            },
+            "broker_first_text_us": {
+              "n": 30,
+              "min": 3,
+              "p50": 6,
+              "p95": 29,
+              "max": 30,
+              "mean": 8
+            },
+            "broker_handshake_us": {
+              "n": 30,
+              "min": 29,
+              "p50": 130,
+              "p95": 406,
+              "max": 962,
+              "mean": 182
+            },
+            "broker_provider_init_us": {
+              "n": 30,
+              "min": 5479,
+              "p50": 5720,
+              "p95": 10702,
+              "max": 11321,
+              "mean": 6268
+            },
+            "broker_queue_wait_us": {
+              "n": 30,
+              "min": 10,
+              "p50": 478,
+              "p95": 11653,
+              "max": 12481,
+              "mean": 3979
+            },
+            "broker_total_us": {
+              "n": 30,
+              "min": 10745,
+              "p50": 11478,
+              "p95": 22404,
+              "max": 23204,
+              "mean": 15114
+            },
+            "client_connect_us": {
+              "n": 30,
+              "min": 5194,
+              "p50": 5375,
+              "p95": 5954,
+              "max": 6033,
+              "mean": 5472
+            },
+            "client_handshake_us": {
+              "n": 30,
+              "min": 174,
+              "p50": 307,
+              "p95": 1067,
+              "max": 3663,
+              "mean": 459
+            },
+            "client_prepare_us": {
+              "n": 30,
+              "min": 5490,
+              "p50": 5768,
+              "p95": 7022,
+              "max": 9082,
+              "mean": 5932
+            },
+            "client_start_to_first_text_us": {
+              "n": 30,
+              "min": 11820,
+              "p50": 12590,
+              "p95": 24740,
+              "max": 25339,
+              "mean": 16871
+            },
+            "client_submit_to_complete_us": {
+              "n": 30,
+              "min": 11422,
+              "p50": 11844,
+              "p95": 23541,
+              "max": 23748,
+              "mean": 15735
+            },
+            "client_submit_to_first_text_us": {
+              "n": 30,
+              "min": 6281,
+              "p50": 6814,
+              "p95": 18326,
+              "max": 18606,
+              "mean": 10939
+            },
+            "client_submit_to_launched_us": {
+              "n": 30,
+              "min": 836,
+              "p50": 6483,
+              "p95": 13143,
+              "max": 13344,
+              "mean": 7027
+            },
+            "client_submit_to_started_us": {
+              "n": 30,
+              "min": 6274,
+              "p50": 6777,
+              "p95": 18305,
+              "max": 18588,
+              "mean": 10915
+            },
+            "client_total_us": {
+              "n": 30,
+              "min": 16939,
+              "p50": 17533,
+              "p95": 29864,
+              "max": 30667,
+              "mean": 21699
+            }
+          },
+          "samples": [
+            {
+              "id": "cold-three-app-bench-c-3",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5342,
+              "handshake_us": 280,
+              "prepare_us": 5622,
+              "submit_to_launched_us": 1634,
+              "submit_to_started_us": 6925,
+              "submit_to_first_text_us": 6977,
+              "submit_to_complete_us": 12140,
+              "total_us": 17786,
+              "broker": {
+                "handshake_us": 183,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11799,
+                "phases_us": {
+                  "cleanup": 3,
+                  "completion": 5302,
+                  "first_text": 8,
+                  "provider_init": 6440,
+                  "queue_wait": 46
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-4",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5345,
+              "handshake_us": 190,
+              "prepare_us": 5536,
+              "submit_to_launched_us": 1314,
+              "submit_to_started_us": 6517,
+              "submit_to_first_text_us": 6539,
+              "submit_to_complete_us": 11664,
+              "total_us": 17269,
+              "broker": {
+                "handshake_us": 79,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11282,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5137,
+                  "first_text": 4,
+                  "provider_init": 5628,
+                  "queue_wait": 513
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-5",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5215,
+              "handshake_us": 325,
+              "prepare_us": 5540,
+              "submit_to_launched_us": 1241,
+              "submit_to_started_us": 6582,
+              "submit_to_first_text_us": 6603,
+              "submit_to_complete_us": 11716,
+              "total_us": 17287,
+              "broker": {
+                "handshake_us": 127,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10975,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5167,
+                  "first_text": 6,
+                  "provider_init": 5773,
+                  "queue_wait": 29
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-6",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5645,
+              "handshake_us": 229,
+              "prepare_us": 5874,
+              "submit_to_launched_us": 6268,
+              "submit_to_started_us": 6274,
+              "submit_to_first_text_us": 6281,
+              "submit_to_complete_us": 11460,
+              "total_us": 17356,
+              "broker": {
+                "handshake_us": 119,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11171,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5165,
+                  "first_text": 22,
+                  "provider_init": 5955,
+                  "queue_wait": 27
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-7",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5580,
+              "handshake_us": 192,
+              "prepare_us": 5773,
+              "submit_to_launched_us": 6440,
+              "submit_to_started_us": 11681,
+              "submit_to_first_text_us": 11698,
+              "submit_to_complete_us": 11711,
+              "total_us": 17507,
+              "broker": {
+                "handshake_us": 134,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11363,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 11,
+                  "first_text": 6,
+                  "provider_init": 11321,
+                  "queue_wait": 24
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-8",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5305,
+              "handshake_us": 474,
+              "prepare_us": 5780,
+              "submit_to_launched_us": 12674,
+              "submit_to_started_us": 17354,
+              "submit_to_first_text_us": 17382,
+              "submit_to_complete_us": 22549,
+              "total_us": 28364,
+              "broker": {
+                "handshake_us": 173,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 21768,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5217,
+                  "first_text": 7,
+                  "provider_init": 5661,
+                  "queue_wait": 10881
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-9",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5419,
+              "handshake_us": 3663,
+              "prepare_us": 9082,
+              "submit_to_launched_us": 8828,
+              "submit_to_started_us": 16238,
+              "submit_to_first_text_us": 16257,
+              "submit_to_complete_us": 21561,
+              "total_us": 30667,
+              "broker": {
+                "handshake_us": 339,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 18829,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5288,
+                  "first_text": 7,
+                  "provider_init": 7803,
+                  "queue_wait": 5729
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-10",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 6033,
+              "handshake_us": 460,
+              "prepare_us": 6494,
+              "submit_to_launched_us": 11793,
+              "submit_to_started_us": 18211,
+              "submit_to_first_text_us": 18246,
+              "submit_to_complete_us": 23324,
+              "total_us": 29840,
+              "broker": {
+                "handshake_us": 146,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 22227,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5208,
+                  "first_text": 7,
+                  "provider_init": 6525,
+                  "queue_wait": 10486
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-11",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5655,
+              "handshake_us": 212,
+              "prepare_us": 5867,
+              "submit_to_launched_us": 6403,
+              "submit_to_started_us": 6410,
+              "submit_to_first_text_us": 6438,
+              "submit_to_complete_us": 11560,
+              "total_us": 17454,
+              "broker": {
+                "handshake_us": 111,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11212,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5128,
+                  "first_text": 3,
+                  "provider_init": 5522,
+                  "queue_wait": 558
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-12",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5429,
+              "handshake_us": 414,
+              "prepare_us": 5844,
+              "submit_to_launched_us": 1942,
+              "submit_to_started_us": 6777,
+              "submit_to_first_text_us": 6814,
+              "submit_to_complete_us": 11912,
+              "total_us": 17801,
+              "broker": {
+                "handshake_us": 78,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11601,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5252,
+                  "first_text": 6,
+                  "provider_init": 6332,
+                  "queue_wait": 10
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-13",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5389,
+              "handshake_us": 244,
+              "prepare_us": 5634,
+              "submit_to_launched_us": 2340,
+              "submit_to_started_us": 6446,
+              "submit_to_first_text_us": 6455,
+              "submit_to_complete_us": 11613,
+              "total_us": 17270,
+              "broker": {
+                "handshake_us": 87,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11406,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5180,
+                  "first_text": 4,
+                  "provider_init": 5744,
+                  "queue_wait": 478
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-14",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5634,
+              "handshake_us": 555,
+              "prepare_us": 6190,
+              "submit_to_launched_us": 12048,
+              "submit_to_started_us": 17269,
+              "submit_to_first_text_us": 17293,
+              "submit_to_complete_us": 22554,
+              "total_us": 28769,
+              "broker": {
+                "handshake_us": 406,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 22174,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5199,
+                  "first_text": 5,
+                  "provider_init": 5625,
+                  "queue_wait": 11344
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-15",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5195,
+              "handshake_us": 295,
+              "prepare_us": 5490,
+              "submit_to_launched_us": 964,
+              "submit_to_started_us": 6305,
+              "submit_to_first_text_us": 6330,
+              "submit_to_complete_us": 11422,
+              "total_us": 16939,
+              "broker": {
+                "handshake_us": 137,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10745,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5173,
+                  "first_text": 4,
+                  "provider_init": 5541,
+                  "queue_wait": 27
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-16",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5281,
+              "handshake_us": 380,
+              "prepare_us": 5661,
+              "submit_to_launched_us": 6553,
+              "submit_to_started_us": 6572,
+              "submit_to_first_text_us": 6596,
+              "submit_to_complete_us": 11564,
+              "total_us": 17249,
+              "broker": {
+                "handshake_us": 127,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11338,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5192,
+                  "first_text": 29,
+                  "provider_init": 6095,
+                  "queue_wait": 20
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-17",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5309,
+              "handshake_us": 278,
+              "prepare_us": 5587,
+              "submit_to_launched_us": 11943,
+              "submit_to_started_us": 17135,
+              "submit_to_first_text_us": 17170,
+              "submit_to_complete_us": 22387,
+              "total_us": 28011,
+              "broker": {
+                "handshake_us": 77,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 21305,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5237,
+                  "first_text": 6,
+                  "provider_init": 5677,
+                  "queue_wait": 10383
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-18",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5388,
+              "handshake_us": 487,
+              "prepare_us": 5876,
+              "submit_to_launched_us": 12370,
+              "submit_to_started_us": 17691,
+              "submit_to_first_text_us": 17707,
+              "submit_to_complete_us": 22793,
+              "total_us": 28708,
+              "broker": {
+                "handshake_us": 217,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 22404,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5217,
+                  "first_text": 5,
+                  "provider_init": 5528,
+                  "queue_wait": 11653
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-19",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5460,
+              "handshake_us": 307,
+              "prepare_us": 5768,
+              "submit_to_launched_us": 2344,
+              "submit_to_started_us": 6694,
+              "submit_to_first_text_us": 6721,
+              "submit_to_complete_us": 11815,
+              "total_us": 17615,
+              "broker": {
+                "handshake_us": 173,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11465,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5217,
+                  "first_text": 5,
+                  "provider_init": 6210,
+                  "queue_wait": 32
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-20",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5330,
+              "handshake_us": 213,
+              "prepare_us": 5544,
+              "submit_to_launched_us": 6456,
+              "submit_to_started_us": 6469,
+              "submit_to_first_text_us": 6494,
+              "submit_to_complete_us": 11608,
+              "total_us": 17181,
+              "broker": {
+                "handshake_us": 88,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10849,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5182,
+                  "first_text": 6,
+                  "provider_init": 5615,
+                  "queue_wait": 45
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-21",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5893,
+              "handshake_us": 200,
+              "prepare_us": 6093,
+              "submit_to_launched_us": 11771,
+              "submit_to_started_us": 17033,
+              "submit_to_first_text_us": 17050,
+              "submit_to_complete_us": 22207,
+              "total_us": 28332,
+              "broker": {
+                "handshake_us": 76,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 21515,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5197,
+                  "first_text": 7,
+                  "provider_init": 5514,
+                  "queue_wait": 10795
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-22",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5373,
+              "handshake_us": 315,
+              "prepare_us": 5689,
+              "submit_to_launched_us": 6483,
+              "submit_to_started_us": 6492,
+              "submit_to_first_text_us": 6520,
+              "submit_to_complete_us": 11611,
+              "total_us": 17324,
+              "broker": {
+                "handshake_us": 224,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10831,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5147,
+                  "first_text": 5,
+                  "provider_init": 5641,
+                  "queue_wait": 38
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-23",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5359,
+              "handshake_us": 421,
+              "prepare_us": 5781,
+              "submit_to_launched_us": 6444,
+              "submit_to_started_us": 6451,
+              "submit_to_first_text_us": 6478,
+              "submit_to_complete_us": 11697,
+              "total_us": 17514,
+              "broker": {
+                "handshake_us": 211,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11415,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5264,
+                  "first_text": 27,
+                  "provider_init": 6099,
+                  "queue_wait": 23
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-24",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5194,
+              "handshake_us": 368,
+              "prepare_us": 5563,
+              "submit_to_launched_us": 6812,
+              "submit_to_started_us": 6844,
+              "submit_to_first_text_us": 6894,
+              "submit_to_complete_us": 11844,
+              "total_us": 17433,
+              "broker": {
+                "handshake_us": 209,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11579,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5257,
+                  "first_text": 30,
+                  "provider_init": 6260,
+                  "queue_wait": 30
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-25",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5768,
+              "handshake_us": 174,
+              "prepare_us": 5942,
+              "submit_to_launched_us": 12815,
+              "submit_to_started_us": 18099,
+              "submit_to_first_text_us": 18108,
+              "submit_to_complete_us": 23294,
+              "total_us": 29269,
+              "broker": {
+                "handshake_us": 99,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 22191,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5235,
+                  "first_text": 6,
+                  "provider_init": 6528,
+                  "queue_wait": 10421
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-26",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5336,
+              "handshake_us": 311,
+              "prepare_us": 5648,
+              "submit_to_launched_us": 6523,
+              "submit_to_started_us": 11814,
+              "submit_to_first_text_us": 11837,
+              "submit_to_complete_us": 11854,
+              "total_us": 17533,
+              "broker": {
+                "handshake_us": 94,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11457,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 11,
+                  "first_text": 5,
+                  "provider_init": 10702,
+                  "queue_wait": 739
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-27",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5265,
+              "handshake_us": 500,
+              "prepare_us": 5766,
+              "submit_to_launched_us": 13143,
+              "submit_to_started_us": 18305,
+              "submit_to_first_text_us": 18326,
+              "submit_to_complete_us": 23541,
+              "total_us": 29342,
+              "broker": {
+                "handshake_us": 247,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 23204,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5187,
+                  "first_text": 5,
+                  "provider_init": 5530,
+                  "queue_wait": 12481
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-28",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5954,
+              "handshake_us": 1067,
+              "prepare_us": 7022,
+              "submit_to_launched_us": 11201,
+              "submit_to_started_us": 16503,
+              "submit_to_first_text_us": 16512,
+              "submit_to_complete_us": 21628,
+              "total_us": 28684,
+              "broker": {
+                "handshake_us": 962,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 21352,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5173,
+                  "first_text": 5,
+                  "provider_init": 5720,
+                  "queue_wait": 10452
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-29",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5372,
+              "handshake_us": 229,
+              "prepare_us": 5602,
+              "submit_to_launched_us": 1177,
+              "submit_to_started_us": 6507,
+              "submit_to_first_text_us": 6536,
+              "submit_to_complete_us": 11709,
+              "total_us": 17338,
+              "broker": {
+                "handshake_us": 109,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11321,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5208,
+                  "first_text": 4,
+                  "provider_init": 5630,
+                  "queue_wait": 478
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-30",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5854,
+              "handshake_us": 228,
+              "prepare_us": 6083,
+              "submit_to_launched_us": 13344,
+              "submit_to_started_us": 18588,
+              "submit_to_first_text_us": 18606,
+              "submit_to_complete_us": 23748,
+              "total_us": 29864,
+              "broker": {
+                "handshake_us": 29,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 21621,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5184,
+                  "first_text": 5,
+                  "provider_init": 5479,
+                  "queue_wait": 10951
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-31",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5375,
+              "handshake_us": 231,
+              "prepare_us": 5606,
+              "submit_to_launched_us": 6710,
+              "submit_to_started_us": 6723,
+              "submit_to_first_text_us": 6742,
+              "submit_to_complete_us": 11857,
+              "total_us": 17494,
+              "broker": {
+                "handshake_us": 130,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11545,
+                "phases_us": {
+                  "cleanup": 0,
+                  "completion": 5164,
+                  "first_text": 5,
+                  "provider_init": 5701,
+                  "queue_wait": 675
+                }
+              }
+            },
+            {
+              "id": "cold-three-app-bench-c-32",
+              "app": "bench-c",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5489,
+              "handshake_us": 530,
+              "prepare_us": 6019,
+              "submit_to_launched_us": 836,
+              "submit_to_started_us": 6543,
+              "submit_to_first_text_us": 6571,
+              "submit_to_complete_us": 11717,
+              "total_us": 17773,
+              "broker": {
+                "handshake_us": 272,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11478,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5212,
+                  "first_text": 6,
+                  "provider_init": 6248,
+                  "queue_wait": 11
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "counts": {
+        "requests_total": 99,
+        "fake_probes": 0,
+        "fake_turns": 99,
+        "broker_probes": 0,
+        "broker_launches": 90,
+        "companion_starts": 33
+      }
+    }
+  ],
+  "limitations": [
+    "Broker marks are taken when its hub thread observes an update, so they include the hub's polling interval (5 ms when idle) and cannot resolve differences smaller than that; client timings include the socket and the application's own scheduling.",
+    "Only compare results from the same machine, build profile and mode; a shared or virtualized machine adds noise of its own. `compare` warns when these differ.",
+    "`prepare` is connecting and the handshake. There is no provider-side preparation to measure yet: readiness is not cached (C-02) and there is no prepare API (C-03).",
+    "Resumed context continues a conversation in a fresh provider process; it is not process reuse, which is unsupported until a persistent-provider adapter exists (E-02).",
+    "A scenario's first request after warm-up is still the first of its kind in this run's broker; a genuinely cold machine (empty page cache, first start after installation) is not reproduced.",
+    "These runs use a fake provider: they measure what Seatline adds (broker, scheduling, process start, IPC) and contain no network or model latency, and a real provider's own start-up time is not in them. They say nothing about how soon a real answer begins."
+  ]
+}

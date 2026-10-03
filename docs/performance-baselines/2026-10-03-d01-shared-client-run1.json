@@ -1,0 +1,2951 @@
+{
+  "schema": 1,
+  "tool_version": "0.1.0-dev",
+  "mode": "fake",
+  "label": "D-01 shared client, run 1",
+  "environment": {
+    "os": "linux",
+    "arch": "x86_64",
+    "cpus": 4,
+    "harness_profile": "release",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "revision": "a8dd5af86c4a86b5b7f387ed661d8159bfe5e29c",
+    "dirty": false,
+    "companion_version": "Seatline companion 0.1.0-dev (protocol 1)",
+    "companion_profile": "release"
+  },
+  "broker": {
+    "arch": "x86_64",
+    "kind": "broker",
+    "limits": {
+      "listener_max_connections": 32,
+      "max_app_queue": 8,
+      "max_app_running": 2,
+      "max_app_sessions": 2000,
+      "max_connections": 32,
+      "max_provider_running": 2,
+      "max_queue": 64,
+      "max_running": 8,
+      "max_sessions": 10000,
+      "prune_interval_ms": 60000
+    },
+    "os": "linux",
+    "protocol": 1,
+    "schema": 1,
+    "version": "0.1.0-dev"
+  },
+  "providers": {
+    "behavior": "exec chosen by the first word of the question (`slow` takes about 300 ms, anything else answers at once); sign-in probe succeeds",
+    "kind": "fake",
+    "note": "deterministic: adds no network or model latency",
+    "persona": "codex"
+  },
+  "parameters": {
+    "samples": 30,
+    "warmup": 3,
+    "gap_ms": 40
+  },
+  "scenarios": [
+    {
+      "name": "warm-send",
+      "state": "warm_broker_fresh_provider",
+      "status": "measured",
+      "description": "A broker is already running. Each request is made on a new connection, as the shipped client does, and runs a fresh provider process. No sign-in probe.",
+      "apps": [
+        {
+          "app": "bench-a",
+          "role": "single",
+          "completed": 30,
+          "failed": 0,
+          "metrics_us": {
+            "broker_cleanup_us": {
+              "n": 30,
+              "min": 1,
+              "p50": 2,
+              "p95": 2,
+              "max": 2,
+              "mean": 1
+            },
+            "broker_completion_us": {
+              "n": 30,
+              "min": 15,
+              "p50": 5194,
+              "p95": 5266,
+              "max": 5315,
+              "mean": 5031
+            },
+            "broker_first_text_us": {
+              "n": 30,
+              "min": 6,
+              "p50": 11,
+              "p95": 15,
+              "max": 32,
+              "mean": 11
+            },
+            "broker_handshake_us": {
+              "n": 30,
+              "min": 113,
+              "p50": 165,
+              "p95": 320,
+              "max": 346,
+              "mean": 175
+            },
+            "broker_provider_init_us": {
+              "n": 30,
+              "min": 5452,
+              "p50": 5534,
+              "p95": 5728,
+              "max": 10784,
+              "mean": 5726
+            },
+            "broker_queue_wait_us": {
+              "n": 30,
+              "min": 2,
+              "p50": 3,
+              "p95": 5,
+              "max": 6,
+              "mean": 3
+            },
+            "broker_total_us": {
+              "n": 30,
+              "min": 10654,
+              "p50": 10745,
+              "p95": 10967,
+              "max": 10989,
+              "mean": 10773
+            },
+            "client_connect_us": {
+              "n": 30,
+              "min": 26,
+              "p50": 38,
+              "p95": 78,
+              "max": 300,
+              "mean": 50
+            },
+            "client_handshake_us": {
+              "n": 30,
+              "min": 195,
+              "p50": 286,
+              "p95": 419,
+              "max": 424,
+              "mean": 294
+            },
+            "client_prepare_us": {
+              "n": 30,
+              "min": 231,
+              "p50": 333,
+              "p95": 463,
+              "max": 680,
+              "mean": 345
+            },
+            "client_start_to_first_text_us": {
+              "n": 30,
+              "min": 6034,
+              "p50": 6251,
+              "p95": 6684,
+              "max": 11561,
+              "mean": 6498
+            },
+            "client_submit_to_complete_us": {
+              "n": 30,
+              "min": 10954,
+              "p50": 11092,
+              "p95": 11431,
+              "max": 11533,
+              "mean": 11145
+            },
+            "client_submit_to_first_text_us": {
+              "n": 30,
+              "min": 5796,
+              "p50": 5927,
+              "p95": 6310,
+              "max": 11158,
+              "mean": 6153
+            },
+            "client_submit_to_launched_us": {
+              "n": 30,
+              "min": 5747,
+              "p50": 5914,
+              "p95": 6193,
+              "max": 6238,
+              "mean": 5952
+            },
+            "client_submit_to_started_us": {
+              "n": 30,
+              "min": 5778,
+              "p50": 5921,
+              "p95": 6247,
+              "max": 11140,
+              "mean": 6133
+            },
+            "client_total_us": {
+              "n": 30,
+              "min": 11234,
+              "p50": 11458,
+              "p95": 11812,
+              "max": 11954,
+              "mean": 11517
+            }
+          },
+          "samples": [
+            {
+              "id": "warm-send-bench-a-3",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 38,
+              "handshake_us": 287,
+              "prepare_us": 325,
+              "submit_to_launched_us": 5845,
+              "submit_to_started_us": 5862,
+              "submit_to_first_text_us": 5891,
+              "submit_to_complete_us": 11087,
+              "total_us": 11434,
+              "broker": {
+                "handshake_us": 132,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10704,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5176,
+                  "first_text": 9,
+                  "provider_init": 5514,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-4",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 27,
+              "handshake_us": 237,
+              "prepare_us": 264,
+              "submit_to_launched_us": 5775,
+              "submit_to_started_us": 5790,
+              "submit_to_first_text_us": 5817,
+              "submit_to_complete_us": 11011,
+              "total_us": 11295,
+              "broker": {
+                "handshake_us": 165,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10668,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5181,
+                  "first_text": 11,
+                  "provider_init": 5471,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-5",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 53,
+              "handshake_us": 237,
+              "prepare_us": 291,
+              "submit_to_launched_us": 6193,
+              "submit_to_started_us": 6198,
+              "submit_to_first_text_us": 6203,
+              "submit_to_complete_us": 11306,
+              "total_us": 11618,
+              "broker": {
+                "handshake_us": 161,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10967,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5221,
+                  "first_text": 13,
+                  "provider_init": 5728,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-6",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 26,
+              "handshake_us": 313,
+              "prepare_us": 340,
+              "submit_to_launched_us": 5976,
+              "submit_to_started_us": 5983,
+              "submit_to_first_text_us": 5991,
+              "submit_to_complete_us": 11094,
+              "total_us": 11458,
+              "broker": {
+                "handshake_us": 149,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10720,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5173,
+                  "first_text": 9,
+                  "provider_init": 5534,
+                  "queue_wait": 2
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-7",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 300,
+              "handshake_us": 379,
+              "prepare_us": 680,
+              "submit_to_launched_us": 5828,
+              "submit_to_started_us": 5843,
+              "submit_to_first_text_us": 5875,
+              "submit_to_complete_us": 10971,
+              "total_us": 11687,
+              "broker": {
+                "handshake_us": 124,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10656,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5150,
+                  "first_text": 8,
+                  "provider_init": 5494,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-8",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 78,
+              "handshake_us": 248,
+              "prepare_us": 327,
+              "submit_to_launched_us": 5856,
+              "submit_to_started_us": 5860,
+              "submit_to_first_text_us": 5867,
+              "submit_to_complete_us": 11074,
+              "total_us": 11437,
+              "broker": {
+                "handshake_us": 149,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10760,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5242,
+                  "first_text": 11,
+                  "provider_init": 5503,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-9",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 64,
+              "handshake_us": 281,
+              "prepare_us": 346,
+              "submit_to_launched_us": 5846,
+              "submit_to_started_us": 5854,
+              "submit_to_first_text_us": 5872,
+              "submit_to_complete_us": 11009,
+              "total_us": 11380,
+              "broker": {
+                "handshake_us": 179,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10668,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5173,
+                  "first_text": 11,
+                  "provider_init": 5481,
+                  "queue_wait": 2
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-10",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 54,
+              "handshake_us": 370,
+              "prepare_us": 424,
+              "submit_to_launched_us": 6065,
+              "submit_to_started_us": 6081,
+              "submit_to_first_text_us": 6098,
+              "submit_to_complete_us": 11259,
+              "total_us": 11719,
+              "broker": {
+                "handshake_us": 160,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10812,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5194,
+                  "first_text": 11,
+                  "provider_init": 5601,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-11",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 47,
+              "handshake_us": 198,
+              "prepare_us": 245,
+              "submit_to_launched_us": 5932,
+              "submit_to_started_us": 5939,
+              "submit_to_first_text_us": 5966,
+              "submit_to_complete_us": 11082,
+              "total_us": 11355,
+              "broker": {
+                "handshake_us": 113,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10735,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5181,
+                  "first_text": 13,
+                  "provider_init": 5535,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-12",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 35,
+              "handshake_us": 195,
+              "prepare_us": 231,
+              "submit_to_launched_us": 5769,
+              "submit_to_started_us": 5785,
+              "submit_to_first_text_us": 5803,
+              "submit_to_complete_us": 10974,
+              "total_us": 11234,
+              "broker": {
+                "handshake_us": 126,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10740,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5266,
+                  "first_text": 10,
+                  "provider_init": 5461,
+                  "queue_wait": 2
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-13",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 37,
+              "handshake_us": 203,
+              "prepare_us": 241,
+              "submit_to_launched_us": 5879,
+              "submit_to_started_us": 5885,
+              "submit_to_first_text_us": 5892,
+              "submit_to_complete_us": 11092,
+              "total_us": 11352,
+              "broker": {
+                "handshake_us": 130,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10783,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5209,
+                  "first_text": 11,
+                  "provider_init": 5558,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-14",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 33,
+              "handshake_us": 276,
+              "prepare_us": 310,
+              "submit_to_launched_us": 6120,
+              "submit_to_started_us": 6127,
+              "submit_to_first_text_us": 6144,
+              "submit_to_complete_us": 11326,
+              "total_us": 11658,
+              "broker": {
+                "handshake_us": 209,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10860,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5190,
+                  "first_text": 11,
+                  "provider_init": 5654,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-15",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 29,
+              "handshake_us": 243,
+              "prepare_us": 272,
+              "submit_to_launched_us": 5801,
+              "submit_to_started_us": 5809,
+              "submit_to_first_text_us": 5829,
+              "submit_to_complete_us": 11090,
+              "total_us": 11382,
+              "broker": {
+                "handshake_us": 143,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10700,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5236,
+                  "first_text": 9,
+                  "provider_init": 5452,
+                  "queue_wait": 2
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-16",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 36,
+              "handshake_us": 286,
+              "prepare_us": 323,
+              "submit_to_launched_us": 5849,
+              "submit_to_started_us": 5857,
+              "submit_to_first_text_us": 5864,
+              "submit_to_complete_us": 11001,
+              "total_us": 11346,
+              "broker": {
+                "handshake_us": 191,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10654,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5183,
+                  "first_text": 9,
+                  "provider_init": 5457,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-17",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 31,
+              "handshake_us": 373,
+              "prepare_us": 404,
+              "submit_to_launched_us": 5867,
+              "submit_to_started_us": 5873,
+              "submit_to_first_text_us": 5880,
+              "submit_to_complete_us": 11027,
+              "total_us": 11455,
+              "broker": {
+                "handshake_us": 168,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10660,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5190,
+                  "first_text": 10,
+                  "provider_init": 5456,
+                  "queue_wait": 2
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-18",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 29,
+              "handshake_us": 269,
+              "prepare_us": 299,
+              "submit_to_launched_us": 5880,
+              "submit_to_started_us": 5886,
+              "submit_to_first_text_us": 5892,
+              "submit_to_complete_us": 11066,
+              "total_us": 11390,
+              "broker": {
+                "handshake_us": 167,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10749,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5194,
+                  "first_text": 13,
+                  "provider_init": 5537,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-19",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 32,
+              "handshake_us": 334,
+              "prepare_us": 366,
+              "submit_to_launched_us": 5848,
+              "submit_to_started_us": 5853,
+              "submit_to_first_text_us": 5860,
+              "submit_to_complete_us": 11120,
+              "total_us": 11512,
+              "broker": {
+                "handshake_us": 180,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10740,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5202,
+                  "first_text": 15,
+                  "provider_init": 5518,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-20",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 38,
+              "handshake_us": 268,
+              "prepare_us": 306,
+              "submit_to_launched_us": 5914,
+              "submit_to_started_us": 5921,
+              "submit_to_first_text_us": 5927,
+              "submit_to_complete_us": 11007,
+              "total_us": 11337,
+              "broker": {
+                "handshake_us": 182,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10675,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5181,
+                  "first_text": 9,
+                  "provider_init": 5481,
+                  "queue_wait": 2
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-21",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 47,
+              "handshake_us": 285,
+              "prepare_us": 333,
+              "submit_to_launched_us": 5953,
+              "submit_to_started_us": 5973,
+              "submit_to_first_text_us": 5995,
+              "submit_to_complete_us": 11162,
+              "total_us": 11518,
+              "broker": {
+                "handshake_us": 165,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10826,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5237,
+                  "first_text": 9,
+                  "provider_init": 5576,
+                  "queue_wait": 2
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-22",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 36,
+              "handshake_us": 302,
+              "prepare_us": 338,
+              "submit_to_launched_us": 5916,
+              "submit_to_started_us": 5943,
+              "submit_to_first_text_us": 5986,
+              "submit_to_complete_us": 11035,
+              "total_us": 11408,
+              "broker": {
+                "handshake_us": 149,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10708,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5129,
+                  "first_text": 10,
+                  "provider_init": 5564,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-23",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 49,
+              "handshake_us": 297,
+              "prepare_us": 347,
+              "submit_to_launched_us": 6105,
+              "submit_to_started_us": 6113,
+              "submit_to_first_text_us": 6144,
+              "submit_to_complete_us": 11431,
+              "total_us": 11812,
+              "broker": {
+                "handshake_us": 171,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10845,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5214,
+                  "first_text": 10,
+                  "provider_init": 5615,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-24",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 50,
+              "handshake_us": 241,
+              "prepare_us": 292,
+              "submit_to_launched_us": 6098,
+              "submit_to_started_us": 6106,
+              "submit_to_first_text_us": 6146,
+              "submit_to_complete_us": 11231,
+              "total_us": 11549,
+              "broker": {
+                "handshake_us": 120,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10934,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5196,
+                  "first_text": 13,
+                  "provider_init": 5719,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-25",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 37,
+              "handshake_us": 335,
+              "prepare_us": 373,
+              "submit_to_launched_us": 6238,
+              "submit_to_started_us": 6247,
+              "submit_to_first_text_us": 6310,
+              "submit_to_complete_us": 11389,
+              "total_us": 11786,
+              "broker": {
+                "handshake_us": 202,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10888,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5212,
+                  "first_text": 32,
+                  "provider_init": 5636,
+                  "queue_wait": 6
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-26",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 35,
+              "handshake_us": 361,
+              "prepare_us": 397,
+              "submit_to_launched_us": 6140,
+              "submit_to_started_us": 6149,
+              "submit_to_first_text_us": 6159,
+              "submit_to_complete_us": 11533,
+              "total_us": 11954,
+              "broker": {
+                "handshake_us": 180,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10989,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5315,
+                  "first_text": 10,
+                  "provider_init": 5658,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-27",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 39,
+              "handshake_us": 424,
+              "prepare_us": 463,
+              "submit_to_launched_us": 6152,
+              "submit_to_started_us": 6182,
+              "submit_to_first_text_us": 6221,
+              "submit_to_complete_us": 11292,
+              "total_us": 11792,
+              "broker": {
+                "handshake_us": 320,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10929,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5248,
+                  "first_text": 12,
+                  "provider_init": 5662,
+                  "queue_wait": 5
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-28",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 70,
+              "handshake_us": 332,
+              "prepare_us": 403,
+              "submit_to_launched_us": 6023,
+              "submit_to_started_us": 11140,
+              "submit_to_first_text_us": 11158,
+              "submit_to_complete_us": 11174,
+              "total_us": 11608,
+              "broker": {
+                "handshake_us": 221,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10810,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 15,
+                  "first_text": 6,
+                  "provider_init": 10784,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-29",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 40,
+              "handshake_us": 238,
+              "prepare_us": 279,
+              "submit_to_launched_us": 5963,
+              "submit_to_started_us": 5968,
+              "submit_to_first_text_us": 5972,
+              "submit_to_complete_us": 11250,
+              "total_us": 11549,
+              "broker": {
+                "handshake_us": 154,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10784,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5250,
+                  "first_text": 12,
+                  "provider_init": 5517,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-30",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 38,
+              "handshake_us": 305,
+              "prepare_us": 344,
+              "submit_to_launched_us": 5849,
+              "submit_to_started_us": 5854,
+              "submit_to_first_text_us": 5861,
+              "submit_to_complete_us": 11151,
+              "total_us": 11519,
+              "broker": {
+                "handshake_us": 234,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10745,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5212,
+                  "first_text": 10,
+                  "provider_init": 5518,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-31",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 43,
+              "handshake_us": 306,
+              "prepare_us": 349,
+              "submit_to_launched_us": 5747,
+              "submit_to_started_us": 5778,
+              "submit_to_first_text_us": 5796,
+              "submit_to_complete_us": 10954,
+              "total_us": 11334,
+              "broker": {
+                "handshake_us": 171,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10666,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5184,
+                  "first_text": 11,
+                  "provider_init": 5467,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-32",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 39,
+              "handshake_us": 419,
+              "prepare_us": 458,
+              "submit_to_launched_us": 6143,
+              "submit_to_started_us": 6158,
+              "submit_to_first_text_us": 6175,
+              "submit_to_complete_us": 11175,
+              "total_us": 11653,
+              "broker": {
+                "handshake_us": 346,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10844,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5180,
+                  "first_text": 11,
+                  "provider_init": 5647,
+                  "queue_wait": 4
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "counts": {
+        "requests_total": 33,
+        "fake_probes": 0,
+        "fake_turns": 33,
+        "broker_probes": 0,
+        "broker_launches": 30
+      }
+    },
+    {
+      "name": "warm-send-adapter",
+      "state": "warm_broker_fresh_provider",
+      "status": "measured",
+      "description": "As `warm-send`, but through the shipped `RemoteProvider` the way an application's adapter calls it, which starts a thread, a runtime and a connection for every exchange. Only what shows from outside is timed, from the call that starts the exchange, so connecting and the handshake are not reported apart.",
+      "apps": [
+        {
+          "app": "bench-a",
+          "role": "single",
+          "completed": 30,
+          "failed": 0,
+          "metrics_us": {
+            "broker_cleanup_us": {
+              "n": 30,
+              "min": 1,
+              "p50": 2,
+              "p95": 2,
+              "max": 2,
+              "mean": 1
+            },
+            "broker_completion_us": {
+              "n": 30,
+              "min": 5121,
+              "p50": 5190,
+              "p95": 5244,
+              "max": 5253,
+              "mean": 5190
+            },
+            "broker_first_text_us": {
+              "n": 30,
+              "min": 8,
+              "p50": 10,
+              "p95": 14,
+              "max": 32,
+              "mean": 11
+            },
+            "broker_handshake_us": {
+              "n": 30,
+              "min": 92,
+              "p50": 163,
+              "p95": 284,
+              "max": 306,
+              "mean": 175
+            },
+            "broker_provider_init_us": {
+              "n": 30,
+              "min": 5369,
+              "p50": 5516,
+              "p95": 5686,
+              "max": 5892,
+              "mean": 5548
+            },
+            "broker_queue_wait_us": {
+              "n": 30,
+              "min": 2,
+              "p50": 3,
+              "p95": 5,
+              "max": 6,
+              "mean": 3
+            },
+            "broker_total_us": {
+              "n": 30,
+              "min": 10501,
+              "p50": 10744,
+              "p95": 10897,
+              "max": 11086,
+              "mean": 10755
+            },
+            "client_start_to_first_text_us": {
+              "n": 30,
+              "min": 6158,
+              "p50": 6505,
+              "p95": 6967,
+              "max": 7084,
+              "mean": 6507
+            },
+            "client_submit_to_complete_us": {
+              "n": 30,
+              "min": 11205,
+              "p50": 11645,
+              "p95": 12119,
+              "max": 12264,
+              "mean": 11652
+            },
+            "client_submit_to_first_text_us": {
+              "n": 30,
+              "min": 6158,
+              "p50": 6505,
+              "p95": 6967,
+              "max": 7084,
+              "mean": 6507
+            },
+            "client_submit_to_launched_us": {
+              "n": 30,
+              "min": 6102,
+              "p50": 6486,
+              "p95": 6964,
+              "max": 7081,
+              "mean": 6491
+            },
+            "client_submit_to_started_us": {
+              "n": 30,
+              "min": 6103,
+              "p50": 6488,
+              "p95": 6966,
+              "max": 7083,
+              "mean": 6493
+            },
+            "client_total_us": {
+              "n": 30,
+              "min": 11206,
+              "p50": 11647,
+              "p95": 12121,
+              "max": 12265,
+              "mean": 11653
+            }
+          },
+          "samples": [
+            {
+              "id": "warm-send-adapter-bench-a-3",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6272,
+              "submit_to_started_us": 6274,
+              "submit_to_first_text_us": 6274,
+              "submit_to_complete_us": 11437,
+              "total_us": 11439,
+              "broker": {
+                "handshake_us": 112,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10684,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5210,
+                  "first_text": 8,
+                  "provider_init": 5463,
+                  "queue_wait": 2
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-4",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6351,
+              "submit_to_started_us": 6353,
+              "submit_to_first_text_us": 6395,
+              "submit_to_complete_us": 11552,
+              "total_us": 11553,
+              "broker": {
+                "handshake_us": 123,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10733,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5233,
+                  "first_text": 10,
+                  "provider_init": 5485,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-5",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6569,
+              "submit_to_started_us": 6571,
+              "submit_to_first_text_us": 6571,
+              "submit_to_complete_us": 11745,
+              "total_us": 11746,
+              "broker": {
+                "handshake_us": 200,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10706,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5218,
+                  "first_text": 9,
+                  "provider_init": 5474,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-6",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6435,
+              "submit_to_started_us": 6436,
+              "submit_to_first_text_us": 6437,
+              "submit_to_complete_us": 11717,
+              "total_us": 11719,
+              "broker": {
+                "handshake_us": 169,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10741,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5244,
+                  "first_text": 9,
+                  "provider_init": 5482,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-7",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6594,
+              "submit_to_started_us": 6596,
+              "submit_to_first_text_us": 6613,
+              "submit_to_complete_us": 11903,
+              "total_us": 11905,
+              "broker": {
+                "handshake_us": 163,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10832,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5175,
+                  "first_text": 8,
+                  "provider_init": 5642,
+                  "queue_wait": 5
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-8",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6486,
+              "submit_to_started_us": 6488,
+              "submit_to_first_text_us": 6489,
+              "submit_to_complete_us": 11627,
+              "total_us": 11629,
+              "broker": {
+                "handshake_us": 104,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10897,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5195,
+                  "first_text": 12,
+                  "provider_init": 5686,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-9",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6903,
+              "submit_to_started_us": 6905,
+              "submit_to_first_text_us": 6906,
+              "submit_to_complete_us": 12029,
+              "total_us": 12031,
+              "broker": {
+                "handshake_us": 284,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10869,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5253,
+                  "first_text": 10,
+                  "provider_init": 5602,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-10",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 7081,
+              "submit_to_started_us": 7083,
+              "submit_to_first_text_us": 7084,
+              "submit_to_complete_us": 12264,
+              "total_us": 12265,
+              "broker": {
+                "handshake_us": 306,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 11086,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5177,
+                  "first_text": 10,
+                  "provider_init": 5892,
+                  "queue_wait": 6
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-11",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6599,
+              "submit_to_started_us": 6600,
+              "submit_to_first_text_us": 6601,
+              "submit_to_complete_us": 11703,
+              "total_us": 11705,
+              "broker": {
+                "handshake_us": 127,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10862,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5203,
+                  "first_text": 12,
+                  "provider_init": 5641,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-12",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6964,
+              "submit_to_started_us": 6966,
+              "submit_to_first_text_us": 6967,
+              "submit_to_complete_us": 12119,
+              "total_us": 12121,
+              "broker": {
+                "handshake_us": 156,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10885,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5187,
+                  "first_text": 14,
+                  "provider_init": 5679,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-13",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6613,
+              "submit_to_started_us": 6615,
+              "submit_to_first_text_us": 6616,
+              "submit_to_complete_us": 11738,
+              "total_us": 11740,
+              "broker": {
+                "handshake_us": 220,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10829,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5167,
+                  "first_text": 9,
+                  "provider_init": 5647,
+                  "queue_wait": 5
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-14",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6542,
+              "submit_to_started_us": 6544,
+              "submit_to_first_text_us": 6544,
+              "submit_to_complete_us": 11752,
+              "total_us": 11754,
+              "broker": {
+                "handshake_us": 258,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10660,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5166,
+                  "first_text": 10,
+                  "provider_init": 5479,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-15",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6291,
+              "submit_to_started_us": 6293,
+              "submit_to_first_text_us": 6294,
+              "submit_to_complete_us": 11464,
+              "total_us": 11465,
+              "broker": {
+                "handshake_us": 173,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10716,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5187,
+                  "first_text": 8,
+                  "provider_init": 5516,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-16",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6455,
+              "submit_to_started_us": 6456,
+              "submit_to_first_text_us": 6515,
+              "submit_to_complete_us": 11618,
+              "total_us": 11620,
+              "broker": {
+                "handshake_us": 157,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10721,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5162,
+                  "first_text": 32,
+                  "provider_init": 5522,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-17",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6585,
+              "submit_to_started_us": 6587,
+              "submit_to_first_text_us": 6587,
+              "submit_to_complete_us": 11638,
+              "total_us": 11640,
+              "broker": {
+                "handshake_us": 195,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10752,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5234,
+                  "first_text": 12,
+                  "provider_init": 5501,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-18",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6502,
+              "submit_to_started_us": 6504,
+              "submit_to_first_text_us": 6505,
+              "submit_to_complete_us": 11655,
+              "total_us": 11657,
+              "broker": {
+                "handshake_us": 211,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10836,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5203,
+                  "first_text": 8,
+                  "provider_init": 5620,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-19",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6237,
+              "submit_to_started_us": 6239,
+              "submit_to_first_text_us": 6240,
+              "submit_to_complete_us": 11320,
+              "total_us": 11321,
+              "broker": {
+                "handshake_us": 92,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10670,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5162,
+                  "first_text": 11,
+                  "provider_init": 5492,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-20",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6541,
+              "submit_to_started_us": 6542,
+              "submit_to_first_text_us": 6543,
+              "submit_to_complete_us": 11645,
+              "total_us": 11647,
+              "broker": {
+                "handshake_us": 173,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10777,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5149,
+                  "first_text": 11,
+                  "provider_init": 5612,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-21",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6276,
+              "submit_to_started_us": 6278,
+              "submit_to_first_text_us": 6279,
+              "submit_to_complete_us": 11509,
+              "total_us": 11511,
+              "broker": {
+                "handshake_us": 141,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10694,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5205,
+                  "first_text": 13,
+                  "provider_init": 5470,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-22",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6614,
+              "submit_to_started_us": 6615,
+              "submit_to_first_text_us": 6669,
+              "submit_to_complete_us": 11700,
+              "total_us": 11702,
+              "broker": {
+                "handshake_us": 233,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10757,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5243,
+                  "first_text": 10,
+                  "provider_init": 5498,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-23",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6601,
+              "submit_to_started_us": 6603,
+              "submit_to_first_text_us": 6604,
+              "submit_to_complete_us": 11851,
+              "total_us": 11853,
+              "broker": {
+                "handshake_us": 201,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10791,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5179,
+                  "first_text": 11,
+                  "provider_init": 5596,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-24",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6319,
+              "submit_to_started_us": 6320,
+              "submit_to_first_text_us": 6320,
+              "submit_to_complete_us": 11407,
+              "total_us": 11409,
+              "broker": {
+                "handshake_us": 160,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10583,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5149,
+                  "first_text": 13,
+                  "provider_init": 5416,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-25",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6447,
+              "submit_to_started_us": 6448,
+              "submit_to_first_text_us": 6496,
+              "submit_to_complete_us": 11645,
+              "total_us": 11647,
+              "broker": {
+                "handshake_us": 244,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10755,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5194,
+                  "first_text": 10,
+                  "provider_init": 5546,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-26",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6282,
+              "submit_to_started_us": 6283,
+              "submit_to_first_text_us": 6284,
+              "submit_to_complete_us": 11577,
+              "total_us": 11579,
+              "broker": {
+                "handshake_us": 135,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10744,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5198,
+                  "first_text": 10,
+                  "provider_init": 5530,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-27",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6706,
+              "submit_to_started_us": 6740,
+              "submit_to_first_text_us": 6785,
+              "submit_to_complete_us": 11861,
+              "total_us": 11863,
+              "broker": {
+                "handshake_us": 230,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10875,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5190,
+                  "first_text": 13,
+                  "provider_init": 5665,
+                  "queue_wait": 5
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-28",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6200,
+              "submit_to_started_us": 6202,
+              "submit_to_first_text_us": 6203,
+              "submit_to_complete_us": 11505,
+              "total_us": 11506,
+              "broker": {
+                "handshake_us": 151,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10624,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5203,
+                  "first_text": 10,
+                  "provider_init": 5407,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-29",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6365,
+              "submit_to_started_us": 6367,
+              "submit_to_first_text_us": 6440,
+              "submit_to_complete_us": 11362,
+              "total_us": 11363,
+              "broker": {
+                "handshake_us": 129,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10691,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5170,
+                  "first_text": 10,
+                  "provider_init": 5507,
+                  "queue_wait": 2
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-30",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6220,
+              "submit_to_started_us": 6222,
+              "submit_to_first_text_us": 6223,
+              "submit_to_complete_us": 11254,
+              "total_us": 11256,
+              "broker": {
+                "handshake_us": 115,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10501,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5121,
+                  "first_text": 8,
+                  "provider_init": 5369,
+                  "queue_wait": 2
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-31",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6582,
+              "submit_to_started_us": 6584,
+              "submit_to_first_text_us": 6585,
+              "submit_to_complete_us": 11761,
+              "total_us": 11762,
+              "broker": {
+                "handshake_us": 179,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10851,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5206,
+                  "first_text": 11,
+                  "provider_init": 5629,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-adapter-bench-a-32",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "adapter",
+              "outcome": "completed",
+              "submit_to_launched_us": 6102,
+              "submit_to_started_us": 6103,
+              "submit_to_first_text_us": 6158,
+              "submit_to_complete_us": 11205,
+              "total_us": 11206,
+              "broker": {
+                "handshake_us": 134,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10540,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5134,
+                  "first_text": 8,
+                  "provider_init": 5394,
+                  "queue_wait": 3
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "counts": {
+        "requests_total": 33,
+        "fake_probes": 0,
+        "fake_turns": 33,
+        "broker_probes": 0,
+        "broker_launches": 30
+      }
+    },
+    {
+      "name": "warm-send-shared",
+      "state": "warm_broker_fresh_provider",
+      "status": "measured",
+      "description": "As `warm-send-adapter`, but the application makes one `RemoteClient` and every request is a request on its one runtime and one authenticated connection (D-01). The connection is made by the first request, a warm-up, so measured requests find it open. Compare with `warm-send-adapter` for what a connection per exchange costs.",
+      "apps": [
+        {
+          "app": "bench-a",
+          "role": "single",
+          "completed": 30,
+          "failed": 0,
+          "metrics_us": {
+            "broker_cleanup_us": {
+              "n": 30,
+              "min": 1,
+              "p50": 2,
+              "p95": 2,
+              "max": 2,
+              "mean": 1
+            },
+            "broker_completion_us": {
+              "n": 30,
+              "min": 5124,
+              "p50": 5183,
+              "p95": 5230,
+              "max": 5231,
+              "mean": 5186
+            },
+            "broker_first_text_us": {
+              "n": 30,
+              "min": 7,
+              "p50": 10,
+              "p95": 15,
+              "max": 17,
+              "mean": 10
+            },
+            "broker_provider_init_us": {
+              "n": 30,
+              "min": 5390,
+              "p50": 5511,
+              "p95": 5657,
+              "max": 56880,
+              "mean": 7223
+            },
+            "broker_queue_wait_us": {
+              "n": 30,
+              "min": 2,
+              "p50": 3,
+              "p95": 4,
+              "max": 6,
+              "mean": 3
+            },
+            "broker_total_us": {
+              "n": 30,
+              "min": 10525,
+              "p50": 10696,
+              "p95": 10855,
+              "max": 62125,
+              "mean": 12425
+            },
+            "client_start_to_first_text_us": {
+              "n": 30,
+              "min": 5980,
+              "p50": 6138,
+              "p95": 57732,
+              "max": 60492,
+              "mean": 9678
+            },
+            "client_submit_to_complete_us": {
+              "n": 30,
+              "min": 11026,
+              "p50": 11237,
+              "p95": 60493,
+              "max": 62722,
+              "mean": 14600
+            },
+            "client_submit_to_first_text_us": {
+              "n": 30,
+              "min": 5980,
+              "p50": 6138,
+              "p95": 57732,
+              "max": 60492,
+              "mean": 9678
+            },
+            "client_submit_to_launched_us": {
+              "n": 30,
+              "min": 5977,
+              "p50": 6136,
+              "p95": 57729,
+              "max": 60489,
+              "mean": 9676
+            },
+            "client_submit_to_started_us": {
+              "n": 30,
+              "min": 5979,
+              "p50": 6138,
+              "p95": 57732,
+              "max": 60491,
+              "mean": 9678
+            },
+            "client_total_us": {
+              "n": 30,
+              "min": 11026,
+              "p50": 11238,
+              "p95": 60494,
+              "max": 62724,
+              "mean": 14602
+            }
+          },
+          "samples": [
+            {
+              "id": "warm-send-shared-bench-a-3",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6215,
+              "submit_to_started_us": 6217,
+              "submit_to_first_text_us": 6217,
+              "submit_to_complete_us": 11156,
+              "total_us": 11158,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10692,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5173,
+                  "first_text": 11,
+                  "provider_init": 5504,
+                  "queue_wait": 2
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-4",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6065,
+              "submit_to_started_us": 6067,
+              "submit_to_first_text_us": 6067,
+              "submit_to_complete_us": 11259,
+              "total_us": 11260,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10665,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5182,
+                  "first_text": 15,
+                  "provider_init": 5463,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-5",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6248,
+              "submit_to_started_us": 6250,
+              "submit_to_first_text_us": 6250,
+              "submit_to_complete_us": 11363,
+              "total_us": 11365,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10779,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5219,
+                  "first_text": 11,
+                  "provider_init": 5544,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-6",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6271,
+              "submit_to_started_us": 6274,
+              "submit_to_first_text_us": 6274,
+              "submit_to_complete_us": 11303,
+              "total_us": 11304,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10855,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5183,
+                  "first_text": 10,
+                  "provider_init": 5657,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-7",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6017,
+              "submit_to_started_us": 6019,
+              "submit_to_first_text_us": 6019,
+              "submit_to_complete_us": 11148,
+              "total_us": 11150,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10683,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5185,
+                  "first_text": 11,
+                  "provider_init": 5482,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-8",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6052,
+              "submit_to_started_us": 6054,
+              "submit_to_first_text_us": 6054,
+              "submit_to_complete_us": 11450,
+              "total_us": 11451,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10666,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5177,
+                  "first_text": 9,
+                  "provider_init": 5475,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-9",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6220,
+              "submit_to_started_us": 6223,
+              "submit_to_first_text_us": 6223,
+              "submit_to_complete_us": 11117,
+              "total_us": 11118,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10688,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5198,
+                  "first_text": 9,
+                  "provider_init": 5476,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-10",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6091,
+              "submit_to_started_us": 6094,
+              "submit_to_first_text_us": 6094,
+              "submit_to_complete_us": 11148,
+              "total_us": 11150,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10619,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5146,
+                  "first_text": 10,
+                  "provider_init": 5458,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-11",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6126,
+              "submit_to_started_us": 6128,
+              "submit_to_first_text_us": 6128,
+              "submit_to_complete_us": 11215,
+              "total_us": 11216,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10704,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5179,
+                  "first_text": 9,
+                  "provider_init": 5511,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-12",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6153,
+              "submit_to_started_us": 6156,
+              "submit_to_first_text_us": 6156,
+              "submit_to_complete_us": 11137,
+              "total_us": 11138,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10611,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5142,
+                  "first_text": 8,
+                  "provider_init": 5457,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-13",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6151,
+              "submit_to_started_us": 6152,
+              "submit_to_first_text_us": 6153,
+              "submit_to_complete_us": 11186,
+              "total_us": 11188,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10695,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5133,
+                  "first_text": 7,
+                  "provider_init": 5552,
+                  "queue_wait": 2
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-14",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6103,
+              "submit_to_started_us": 6105,
+              "submit_to_first_text_us": 6105,
+              "submit_to_complete_us": 11250,
+              "total_us": 11251,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10626,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5154,
+                  "first_text": 11,
+                  "provider_init": 5458,
+                  "queue_wait": 2
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-15",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6121,
+              "submit_to_started_us": 6124,
+              "submit_to_first_text_us": 6124,
+              "submit_to_complete_us": 11208,
+              "total_us": 11210,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10683,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5193,
+                  "first_text": 10,
+                  "provider_init": 5474,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-16",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6198,
+              "submit_to_started_us": 6199,
+              "submit_to_first_text_us": 6200,
+              "submit_to_complete_us": 11324,
+              "total_us": 11326,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10742,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5180,
+                  "first_text": 11,
+                  "provider_init": 5546,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-17",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6388,
+              "submit_to_started_us": 6390,
+              "submit_to_first_text_us": 6390,
+              "submit_to_complete_us": 11553,
+              "total_us": 11555,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10747,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5186,
+                  "first_text": 9,
+                  "provider_init": 5546,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-18",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6137,
+              "submit_to_started_us": 6138,
+              "submit_to_first_text_us": 6138,
+              "submit_to_complete_us": 11335,
+              "total_us": 11336,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10682,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5180,
+                  "first_text": 12,
+                  "provider_init": 5485,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-19",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6147,
+              "submit_to_started_us": 6149,
+              "submit_to_first_text_us": 6149,
+              "submit_to_complete_us": 11282,
+              "total_us": 11283,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10702,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5222,
+                  "first_text": 8,
+                  "provider_init": 5467,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-20",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 60489,
+              "submit_to_started_us": 60491,
+              "submit_to_first_text_us": 60492,
+              "submit_to_complete_us": 60493,
+              "total_us": 60494,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10688,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5199,
+                  "first_text": 12,
+                  "provider_init": 5473,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-21",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 57729,
+              "submit_to_started_us": 57732,
+              "submit_to_first_text_us": 57732,
+              "submit_to_complete_us": 62722,
+              "total_us": 62724,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 62125,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5223,
+                  "first_text": 17,
+                  "provider_init": 56880,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-22",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6037,
+              "submit_to_started_us": 6039,
+              "submit_to_first_text_us": 6040,
+              "submit_to_complete_us": 11185,
+              "total_us": 11187,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10681,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5203,
+                  "first_text": 15,
+                  "provider_init": 5460,
+                  "queue_wait": 2
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-23",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6238,
+              "submit_to_started_us": 6239,
+              "submit_to_first_text_us": 6239,
+              "submit_to_complete_us": 11268,
+              "total_us": 11270,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10793,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5195,
+                  "first_text": 13,
+                  "provider_init": 5580,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-24",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6136,
+              "submit_to_started_us": 6138,
+              "submit_to_first_text_us": 6138,
+              "submit_to_complete_us": 11361,
+              "total_us": 11363,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10844,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5228,
+                  "first_text": 10,
+                  "provider_init": 5601,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-25",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6200,
+              "submit_to_started_us": 6202,
+              "submit_to_first_text_us": 6203,
+              "submit_to_complete_us": 11237,
+              "total_us": 11238,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10754,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5218,
+                  "first_text": 12,
+                  "provider_init": 5518,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-26",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6066,
+              "submit_to_started_us": 6068,
+              "submit_to_first_text_us": 6068,
+              "submit_to_complete_us": 11133,
+              "total_us": 11135,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10713,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5180,
+                  "first_text": 10,
+                  "provider_init": 5518,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-27",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6082,
+              "submit_to_started_us": 6084,
+              "submit_to_first_text_us": 6085,
+              "submit_to_complete_us": 11288,
+              "total_us": 11289,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10777,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5231,
+                  "first_text": 12,
+                  "provider_init": 5529,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-28",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6456,
+              "submit_to_started_us": 6458,
+              "submit_to_first_text_us": 6459,
+              "submit_to_complete_us": 11463,
+              "total_us": 11465,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10843,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5230,
+                  "first_text": 11,
+                  "provider_init": 5594,
+                  "queue_wait": 6
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-29",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6058,
+              "submit_to_started_us": 6060,
+              "submit_to_first_text_us": 6060,
+              "submit_to_complete_us": 11136,
+              "total_us": 11138,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10739,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5155,
+                  "first_text": 9,
+                  "provider_init": 5570,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-30",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 5977,
+              "submit_to_started_us": 5979,
+              "submit_to_first_text_us": 5980,
+              "submit_to_complete_us": 11053,
+              "total_us": 11055,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10696,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5169,
+                  "first_text": 10,
+                  "provider_init": 5512,
+                  "queue_wait": 3
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-31",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6023,
+              "submit_to_started_us": 6025,
+              "submit_to_first_text_us": 6025,
+              "submit_to_complete_us": 11225,
+              "total_us": 11226,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10750,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 5211,
+                  "first_text": 11,
+                  "provider_init": 5522,
+                  "queue_wait": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-shared-bench-a-32",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "shared",
+              "outcome": "completed",
+              "submit_to_launched_us": 6092,
+              "submit_to_started_us": 6094,
+              "submit_to_first_text_us": 6094,
+              "submit_to_complete_us": 11026,
+              "total_us": 11026,
+              "broker": {
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 10525,
+                "phases_us": {
+                  "cleanup": 1,
+                  "completion": 5124,
+                  "first_text": 7,
+                  "provider_init": 5390,
+                  "queue_wait": 3
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "counts": {
+        "requests_total": 33,
+        "fake_probes": 0,
+        "fake_turns": 33,
+        "broker_probes": 0,
+        "broker_launches": 30
+      }
+    }
+  ],
+  "limitations": [
+    "Broker marks are taken when its hub thread observes an update, so they include the hub's polling interval (5 ms when idle) and cannot resolve differences smaller than that; client timings include the socket and the application's own scheduling.",
+    "Only compare results from the same machine, build profile and mode; a shared or virtualized machine adds noise of its own. `compare` warns when these differ.",
+    "`prepare` is connecting and the handshake. There is no provider-side preparation to measure yet: readiness is not cached (C-02) and there is no prepare API (C-03).",
+    "Resumed context continues a conversation in a fresh provider process; it is not process reuse, which is unsupported until a persistent-provider adapter exists (E-02).",
+    "A scenario's first request after warm-up is still the first of its kind in this run's broker; a genuinely cold machine (empty page cache, first start after installation) is not reproduced.",
+    "These runs use a fake provider: they measure what Seatline adds (broker, scheduling, process start, IPC) and contain no network or model latency, and a real provider's own start-up time is not in them. They say nothing about how soon a real answer begins."
+  ]
+}
