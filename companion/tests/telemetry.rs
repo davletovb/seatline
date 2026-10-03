@@ -39,6 +39,9 @@ impl Fixture {
             .output()
             .unwrap();
         assert!(authorized.status.success());
+        // Match client startup: choose the endpoint before spawning the broker.
+        // On Windows, simultaneous first lookups can create different pipe IDs.
+        client::socket_name(&root).unwrap();
         // No provider can be found, so the request does not depend on one
         // being installed on the machine that runs the test.
         let empty = root.join("no-providers");
