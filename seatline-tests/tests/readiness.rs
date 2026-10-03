@@ -11,6 +11,19 @@ use support::{FIXTURES, FakeClaude, FakeCodex, FakeGemini, FakeGrok, run_to_end}
 
 const CACHED: Freshness = Freshness::Cached { max_age_ms: 30_000 };
 
+// These tests copy the fake executable to give each cache a stable identity.
+// A concurrent spawn can inherit another test's temporary writable copy fd
+// until exec closes it, making that test's CLI fail with ETXTBSY. Serialize
+// fixture lifetimes; concurrent readiness subscribers are exercised within
+// the tests themselves.
+static FIXTURE_LIFETIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn fixture_lifetime() -> std::sync::MutexGuard<'static, ()> {
+    FIXTURE_LIFETIME
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
 fn state(updates: &[Update]) -> &ProviderState {
     updates
         .iter()
@@ -35,6 +48,7 @@ fn independent_executable(dir: &std::path::Path, name: &str) {
 
 #[test]
 fn claude_mixed_state_rewrites_preserve_cache_but_account_changes_invalidate_it() {
+    let _fixture = fixture_lifetime();
     // Exercise both the default home file and the relocated profile file.
     for relocated in [false, true] {
         let fake = FakeClaude::install(FIXTURES, "answers", "signed-in");
@@ -108,6 +122,7 @@ fn claude_mixed_state_rewrites_preserve_cache_but_account_changes_invalidate_it(
 
 #[test]
 fn codex_session_files_do_not_invalidate_readiness_but_profile_config_changes_do() {
+    let _fixture = fixture_lifetime();
     let fake = FakeCodex::install(FIXTURES, "answers", "subscription");
     independent_executable(&fake.dir, FakeCodex::file_name());
     let home = fake.dir.join("isolated-home");
@@ -118,6 +133,18 @@ fn codex_session_files_do_not_invalidate_readiness_but_profile_config_changes_do
         let mut exchange = ready.prepare(CACHED);
         let updates = run_to_end(exchange.as_mut());
         assert_eq!(updates.last(), Some(&Update::Completed), "{updates:?}");
+        assert_eq!(
+            state(&updates).availability,
+            Availability::Available,
+            "{updates:?}; invocations: {:?}",
+            fake.invocations()
+        );
+        assert_eq!(
+            state(&updates).authentication,
+            Authentication::Authenticated,
+            "{updates:?}; invocations: {:?}",
+            fake.invocations()
+        );
         state(&updates).readiness.unwrap().source
     };
     assert_eq!(check(), Source::Fresh);
@@ -133,6 +160,7 @@ fn codex_session_files_do_not_invalidate_readiness_but_profile_config_changes_do
 
 #[test]
 fn all_providers_prepare_without_generating_then_reuse_verified_readiness() {
+    let _fixture = fixture_lifetime();
     let codex = FakeCodex::install(FIXTURES, "answers", "subscription");
     let claude = FakeClaude::install(FIXTURES, "answers", "signed-in");
     let gemini = FakeGemini::install(FIXTURES);
@@ -274,6 +302,7 @@ fn all_providers_prepare_without_generating_then_reuse_verified_readiness() {
 
 #[test]
 fn provider_conformance_covers_signed_out_unknown_unavailable_and_timeout() {
+    let _fixture = fixture_lifetime();
     for scenario in ["signed-out", "broken", "hangs"] {
         let codex = FakeCodex::install(FIXTURES, "answers", scenario);
         let claude = FakeClaude::install(FIXTURES, "answers", scenario);
@@ -331,6 +360,7 @@ fn provider_conformance_covers_signed_out_unknown_unavailable_and_timeout() {
 
 #[test]
 fn codex_classification_uses_only_known_status_phrases_and_never_exposes_output() {
+    let _fixture = fixture_lifetime();
     for (scenario, expected) in [
         ("signed-in", SignInClassification::ApiKey),
         ("subscription", SignInClassification::Subscription),
@@ -354,6 +384,7 @@ fn codex_classification_uses_only_known_status_phrases_and_never_exposes_output(
 
 #[test]
 fn credential_changes_and_executable_removal_recover_without_stale_readiness() {
+    let _fixture = fixture_lifetime();
     let grok = FakeGrok::install(FIXTURES);
     let ready = Ready::new(grok.adapter());
     run_to_end(ready.prepare(CACHED).as_mut());
@@ -389,6 +420,7 @@ fn credential_changes_and_executable_removal_recover_without_stale_readiness() {
 
 #[test]
 fn claude_classification_uses_documented_auth_method_without_account_data() {
+    let _fixture = fixture_lifetime();
     for (scenario, expected) in [
         ("subscription", SignInClassification::Subscription),
         ("api-key", SignInClassification::ApiKey),
@@ -407,6 +439,7 @@ fn claude_classification_uses_documented_auth_method_without_account_data() {
 
 #[test]
 fn all_providers_distinguish_missing_executables_from_an_unavailable_workspace() {
+    let _fixture = fixture_lifetime();
     use seatline_core::discovery::SearchPath;
     use seatline_core::turn::Namespace;
     use seatline_providers::{claude::Claude, codex::Codex, gemini::Gemini, grok::Grok};
