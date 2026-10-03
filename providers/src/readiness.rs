@@ -278,7 +278,9 @@ impl Provider for Ready {
 fn invalidate(state: &Rc<RefCell<State>>) {
     let mut state = state.borrow_mut();
     state.epoch = state.epoch.wrapping_add(1);
-    state.invalidations.set(state.invalidations.get().wrapping_add(1));
+    state
+        .invalidations
+        .set(state.invalidations.get().wrapping_add(1));
     state.cached = None;
     state.flight = None;
 }
@@ -1090,10 +1092,8 @@ mod tests {
     #[test]
     fn one_exchanges_readiness_failure_does_not_revoke_a_peers_valid_evidence() {
         let (ready, control) = setup();
-        let mut short = ready.send_with_readiness(
-            turn(false),
-            Freshness::Cached { max_age_ms: 1_000 },
-        );
+        let mut short =
+            ready.send_with_readiness(turn(false), Freshness::Cached { max_age_ms: 1_000 });
         let mut peer = ready.send_with_readiness(turn(false), CACHED);
         assert!(matches!(
             short.next(Instant::now()),
