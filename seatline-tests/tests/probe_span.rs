@@ -29,11 +29,17 @@ fn ask(check_sign_in: bool) -> Turn {
     }
 }
 
-/// Runs `exchange` under a scheduler with a timeline, to its end.
-fn timed(exchange: Box<dyn Exchange>, kind: Kind) -> (EndReason, Timeline) {
+/// Runs the exchange `build` makes under a scheduler with a timeline, to its end.
+///
+/// `build` makes the exchange *after* the timeline exists and the request is
+/// admitted, as the hub does (received, admitted, then the adapter builds): an
+/// adapter takes its probe's start instant while it builds, so building first
+/// would put that instant before the request was received.
+fn timed(build: impl FnOnce() -> Box<dyn Exchange>, kind: Kind) -> (EndReason, Timeline) {
     let mut scheduler = Scheduler::new();
     let mut timeline = Timeline::new(kind, Instant::now());
     timeline.admitted(Instant::now());
+    let exchange = build();
     let id = scheduler.start_timed(
         exchange,
         Some(support::TEST_LIMITS.timeouts),
@@ -90,7 +96,7 @@ fn names(timeline: &Timeline) -> Vec<&'static str> {
 #[test]
 fn codex_reports_the_probe_it_ran_before_its_turn() {
     let fake = FakeCodex::install(FIXTURES, "answers", "signed-in");
-    let (reason, timeline) = timed(fake.adapter().send(ask(true)), Kind::Send);
+    let (reason, timeline) = timed(|| fake.adapter().send(ask(true)), Kind::Send);
     assert_eq!(reason, EndReason::Completed);
     assert_eq!(
         names(&timeline),
@@ -144,7 +150,7 @@ fn a_turn_that_asks_for_no_probe_has_no_probe_span() {
 #[test]
 fn a_signed_out_probe_ends_the_span_and_the_request_before_any_launch() {
     let fake = FakeCodex::install(FIXTURES, "answers", "signed-out");
-    let (reason, timeline) = timed(fake.adapter().send(ask(true)), Kind::Send);
+    let (reason, timeline) = timed(|| fake.adapter().send(ask(true)), Kind::Send);
     assert!(matches!(reason, EndReason::Failed(_)), "{reason:?}");
     assert_eq!(
         names(&timeline),
@@ -179,7 +185,7 @@ fn cancelling_during_the_probe_ends_the_span() {
 #[test]
 fn claude_reports_the_probe_it_ran_before_its_turn() {
     let fake = FakeClaude::install(FIXTURES, "answers", "signed-in");
-    let (reason, timeline) = timed(fake.adapter().send(ask(true)), Kind::Send);
+    let (reason, timeline) = timed(|| fake.adapter().send(ask(true)), Kind::Send);
     assert_eq!(reason, EndReason::Completed);
     assert!(names(&timeline).contains(&"probe_started"));
     assert!(names(&timeline).contains(&"probe_ended"));
@@ -194,7 +200,7 @@ fn claude_reports_the_probe_it_ran_before_its_turn() {
 #[test]
 fn a_status_request_is_counted_as_one_readiness_check() {
     let fake = FakeCodex::install(FIXTURES, "answers", "signed-in");
-    let (reason, timeline) = timed(fake.adapter().status(), Kind::Status);
+    let (reason, timeline) = timed(|| fake.adapter().status(), Kind::Status);
     assert_eq!(reason, EndReason::Completed);
     assert!(timeline.marks().status.is_some());
     assert_eq!((timeline.probes(), timeline.launches()), (1, 0));
