@@ -123,11 +123,16 @@ impl Running {
     fn finish_timeline(&mut self) -> Option<Timeline> {
         let mut timeline = self.timeline.take()?;
         timeline.terminal(Instant::now());
-        if let Some(span) = self
-            .exchange
-            .as_ref()
-            .and_then(|exchange| exchange.probe_span())
-        {
+        // Like every other call into an adapter, behind the panic boundary: this
+        // runs after the turn has left `running`, so a panic escaping here
+        // would leave nothing to report the turn's end. Telemetry is an extra,
+        // so a probe report that panics is simply dropped.
+        let probe = self.exchange.as_ref().and_then(|exchange| {
+            catch_unwind(AssertUnwindSafe(|| exchange.probe_span()))
+                .ok()
+                .flatten()
+        });
+        if let Some(span) = probe {
             timeline.set_probe(span);
         }
         self.drop_exchange();
@@ -897,6 +902,49 @@ mod tests {
         assert!(marks.probe_started.is_some() && marks.probe_ended.is_some());
         assert_eq!(timeline.probes(), 1);
         assert_eq!(timeline.phases().sum(), timeline.total_us());
+    }
+
+    /// An exchange that finishes normally but panics when asked for its probe.
+    struct PanicsReportingItsProbe(VecDeque<Update>);
+
+    impl Exchange for PanicsReportingItsProbe {
+        fn next(&mut self, _deadline: Instant) -> Option<Update> {
+            self.0.pop_front()
+        }
+
+        fn cancel(&mut self, _grace: Duration) {}
+
+        fn probe_span(&self) -> Option<Span> {
+            panic!("a broken probe report")
+        }
+    }
+
+    #[test]
+    fn an_adapter_that_panics_reporting_its_probe_still_ends_its_turn_normally() {
+        let mut supervisor = Supervisor::new();
+        let id = supervisor.start_timed(
+            Box::new(PanicsReportingItsProbe(VecDeque::from([
+                Update::Started,
+                Update::Completed,
+            ]))),
+            Some(limits()),
+            Duration::ZERO,
+            timeline(),
+        );
+        let events = supervisor.poll(Duration::from_millis(1));
+        // Telemetry is an extra: the turn ends the way it would have without it,
+        // and is not mistaken for a scheduler panic that strands its slot.
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::Ended { turn_id, reason: EndReason::Completed } if *turn_id == id
+            )),
+            "{events:?}"
+        );
+        assert!(!supervisor.contains(id));
+        let timeline = supervisor.take_timeline(id).expect("a timeline");
+        assert_eq!(timeline.probes(), 0, "the broken report is dropped");
+        assert!(timeline.marks().released.is_some());
     }
 
     #[test]
