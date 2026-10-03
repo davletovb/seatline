@@ -53,6 +53,11 @@ impl AccountFile {
             }
         }
         let digest = if stamp.is_some() {
+            // Reject special files before open: a FIFO could otherwise block
+            // the hub before the bounded JSON reader is even constructed.
+            if !path.is_file() {
+                return None;
+            }
             let file = std::fs::File::open(&path).ok()?;
             if file.metadata().ok()?.len() > STATE_BYTES {
                 return None;
@@ -79,5 +84,44 @@ impl AccountFile {
             digest,
         });
         Some(key.with_projection(path, digest))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "Creates a local fixture with a fixed OS utility, never provider/request execution"
+    )]
+    fn a_fifo_state_path_disables_caching_without_waiting_for_a_writer() {
+        let root =
+            std::env::temp_dir().join(format!("seatline-account-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(".claude.json");
+        assert!(
+            std::process::Command::new("/usr/bin/mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let key = Key::watch(
+                &std::env::current_exe().unwrap(),
+                [],
+                super::super::CAPABILITIES,
+            )
+            .unwrap();
+            let _ = send.send(AccountFile::default().watch(key, path).is_none());
+        });
+        let result = receive.recv_timeout(Duration::from_secs(2));
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(result, Ok(true));
+        worker.join().unwrap();
     }
 }
