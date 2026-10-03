@@ -1,4 +1,4 @@
-fake provider, release build, run 1 — mode `fake`, linux x86_64, 4 CPUs, harness release build, revision 071ab6d662ca
+fake provider, release build, run 1 — mode `fake`, linux x86_64, 4 CPUs, harness release, companion release builds, revision 071ab6d662ca
 
 30 measured requests per application after 3 warm-up; p50 / p95 in milliseconds.
 

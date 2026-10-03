@@ -32,7 +32,7 @@ A fake provider answers at once, and timed directly from outside a turn takes ab
 
 These come from the tracker and bind every performance claim made about Seatline:
 
-1. **Compare like with like.** A second request, a warm broker or a reused connection is not a faster first request. Quote a number only for the state it was measured in, and compare only the same scenario, machine, build profile and mode. `seatline-bench compare` warns when platform, profile or mode differ.
+1. **Compare like with like.** A second request, a warm broker or a reused connection is not a faster first request. Quote a number only for the state it was measured in, and compare only the same scenario, machine, build profile of the harness *and* of the companion (the broker is what is timed), and mode. `seatline-bench compare` warns when platform, either profile or mode differ, and a report names both profiles.
 2. **No claim from reuse alone.** A request that is faster because something was already warm has not made the cold path faster. Show the cold path.
 3. **Fake runs cannot support latency claims about real answers.** They support claims about Seatline's own overhead, and they are labelled `fake`.
 4. **Know the noise.** The broker's hub polls every 5 ms when idle, so many metrics move in steps of about 5 ms. Two identical runs of the baseline below agree to within 0.2 ms at p50 and 0.6 ms at p95 in every single-application scenario. The multi-application scenarios (`three-app-short`, `short-contended`) depend on how independent processes line up and differ by up to about 5.5 ms at p50 and 6.3 ms at p95. A p95 over 30 samples is the 29th value, so two requests landing on a slow tick move it by a whole step: an earlier run on the same machine did that to a single-application p95. A change smaller than this noise is not evidence; repeat the run to know what it is on your machine.
@@ -49,7 +49,7 @@ target/release/seatline-bench compare before.json after.json
 target/release/seatline-bench overhead      # scheduler cost of phase timing
 ```
 
-Run from the repository root so the report records the revision and whether the tree has uncommitted changes. `seatline-companion` and the fake provider are looked for next to the harness binary; `--companion` and `--fake-provider` override that. `--scenario NAME` (repeatable) picks scenarios. A report is JSON with every measured request in it, so any summary can be recomputed; `seatline-bench report FILE.json` renders the tables.
+Run from the repository root so the report records the revision and whether the tree has uncommitted changes. `seatline-companion` and the fake provider are looked for next to the harness binary; `--companion` and `--fake-provider` override that. `--scenario NAME` (repeatable) picks scenarios. A scenario that cannot run does not discard the others: it is kept in the report as `failed` with its reason, the run goes on, and the command exits non-zero once the report is written. A report is JSON with every measured request in it, so any summary can be recomputed; `seatline-bench report FILE.json` renders the tables.
 
 Reports hold no path, user name, host name or credential: only the OS and architecture, the CPU count, the compiler and companion versions, the revision, the broker's limits and the measurements. A test asserts that the scratch and source paths and the word "token" do not appear.
 

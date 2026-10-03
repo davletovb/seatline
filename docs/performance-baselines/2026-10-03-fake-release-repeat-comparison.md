@@ -1,5 +1,5 @@
-before: fake provider, release build, run 1 (`071ab6d662ca`, release build)  
-after: fake provider, release build, run 2 (`071ab6d662ca`, release build)
+before: fake provider, release build, run 1 (`071ab6d662ca`, harness release, companion release)  
+after: fake provider, release build, run 2 (`071ab6d662ca`, harness release, companion release)
 
 | scenario | app | metric | p50 before → after (ms) | Δ p50 | p95 before → after (ms) | Δ p95 |
 |---|---|---|---|---|---|---|

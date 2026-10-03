@@ -26,7 +26,7 @@ A timeline holds **marks**, monotonic instants at which a boundary was observed.
 | `provider_init` | `admitted` | `started`, less `sign_in_probe` | Finding the executable, preparing the workspace, starting the process, and the provider's own start-up until it accepts the turn. |
 | `first_text` | `started` | `first_text` | Waiting for the first answer text. Includes the model and the network. |
 | `completion` | `first_text` | `terminal` | The rest of the answer, until the terminal update. |
-| `cleanup` | `terminal` | `released` | Dropping the exchange: killing and reaping the provider process and joining its reader threads. |
+| `cleanup` | `terminal` | `released` | Dropping the exchange: killing and reaping the provider process and joining its reader threads. For a `forget` or `cleanup` request the scheduler runs, it starts at `admitted` instead: the work, and the drop of its exchange, both count. |
 
 ### The marks
 
@@ -59,7 +59,7 @@ The span up to the terminal update belongs to the phase the request was in; late
 | failed during `provider_init` (executable missing, signed out) | `queue_wait`, `sign_in_probe` if one ran, `provider_init`, `cleanup` |
 | completed with no answer text | up to `first_text`, which absorbs the wait; `completion` is absent |
 | is a `status` request | `queue_wait`, `sign_in_probe` (the whole check), `completion`, `cleanup` |
-| is a `forget` or `cleanup` request | `queue_wait`, `cleanup` (the work itself) |
+| is a `forget` or `cleanup` request | `queue_wait`, `cleanup` (the work itself, and the drop of its exchange, so `cleanup` ends at `released` and the phases still add up to the total) |
 
 ### Cancellation and other endings
 
