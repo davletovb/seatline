@@ -28,8 +28,7 @@ fn data_dir(what: &str) -> PathBuf {
     ))
 }
 
-/// A companion that logs each start, then becomes the real one, which leaves
-/// two seconds after it is idle.
+/// A companion that logs each start, then becomes the real one.
 #[cfg(unix)]
 fn counting_companion(dir: &Path) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
@@ -38,7 +37,7 @@ fn counting_companion(dir: &Path) -> (PathBuf, PathBuf) {
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\necho $$ >> '{}'\nSEATLINE_BROKER_IDLE_SECS=2 exec '{}' serve\n",
+            "#!/bin/sh\necho $$ >> '{}'\nexec '{}' serve\n",
             log.display(),
             env!("CARGO_BIN_EXE_seatline-companion"),
         ),
@@ -98,8 +97,11 @@ fn clients_that_need_a_broker_together_start_one_and_every_failure_recovers() {
     let (counting, log) = counting_companion(&scripts);
     #[cfg(not(unix))]
     let counting = PathBuf::from(env!("CARGO_BIN_EXE_seatline-companion"));
+    // The brokers these cases start leave two seconds after they are idle, on
+    // every platform, so that none outlives the test.
     let startup = Startup {
         executable: Some(counting.clone()),
+        environment: vec![("SEATLINE_BROKER_IDLE_SECS".into(), "2".into())],
         ..Startup::default()
     };
 

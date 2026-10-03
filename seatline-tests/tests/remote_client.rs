@@ -273,6 +273,9 @@ fn a_cancel_stops_one_turn_and_reaps_only_its_process() {
     first.cancel(Duration::ZERO);
     let updates = drain(first.as_mut());
     assert_eq!(updates.last(), Some(&Update::Stopped), "{updates:?}");
+    // The harness can tell which launches are still alive only on Unix; on
+    // Windows the cancellation itself is what is checked.
+    #[cfg(unix)]
     wait_until("the cancelled turn's process to be reaped", || {
         world.fake.still_running().len() == 1
     });
@@ -282,6 +285,7 @@ fn a_cancel_stops_one_turn_and_reaps_only_its_process() {
     }
     second.cancel(Duration::ZERO);
     assert_eq!(drain(second.as_mut()).last(), Some(&Update::Stopped));
+    #[cfg(unix)]
     wait_until("both processes to be reaped", || {
         world.fake.still_running().is_empty()
     });

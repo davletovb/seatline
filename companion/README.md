@@ -117,7 +117,9 @@ lock on `start.lock` in the data directory, released by the operating system
 when its holder exits), starts the companion; the others keep trying to
 connect, and one takes over a claim whose holder goes away or never starts a
 broker. Clients look for a starting broker every millisecond at first, backing
-off to a hundred, within a five-second budget. It exits after ten
+off to a hundred, within a five-second budget; no single try may outlast the
+budget, and one that hangs for a second is given up on so the client can go on
+to start the broker itself. It exits after ten
 minutes with no connections (`SEATLINE_BROKER_IDLE_SECS` changes this; `0` keeps
 it running), so after running `install` again the next start uses the new
 version. `install` keeps the new copy and the one registered before it and
@@ -189,7 +191,9 @@ let mut exchange = client.send("codex", &turn);    // a `Box<dyn Exchange>`, as 
   order they are made, and their events are routed to their own exchange.
   `exchange.cancel()` stops that request and no other.
 - The client keeps at most 64 requests in flight (`Limits::max_in_flight`); one
-  more fails at once with a retryable `QUEUE_FULL`. A request too big for a
+  more fails at once with a retryable `QUEUE_FULL`. A request holds its place
+  until its terminal event is read or its exchange is dropped, so a finished
+  exchange that is kept does not count. A request too big for a
   frame fails alone with `INVALID_REQUEST`.
 - Each request queues at most 4 MiB of unread events
   (`Limits::max_unread_bytes`). The connection is shared, so the client never

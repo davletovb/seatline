@@ -19,7 +19,11 @@
 //!   [`Startup::takeover_after`] without a broker, and has started none, starts
 //!   one without the claim. The broker's own lock still keeps one serving, so
 //!   this costs at most a process that exits at once, once per waiting client.
-//! - **Timeouts.** Every attempt ends within [`Startup::budget`].
+//! - **Timeouts.** Every attempt ends within [`Startup::budget`], and so does
+//!   every try to reach the broker inside it: a try that never finishes is cut
+//!   off at [`Startup::attempt_limit`] (or the budget, if sooner) and the loop
+//!   goes on, so a hung connection cannot keep a client from starting a broker,
+//!   and one that finishes after the budget is not accepted.
 //! - **Upgrades.** The claim names no version: whichever client holds it starts
 //!   the companion the installation registers now, and a broker that was
 //!   already running keeps serving until it is idle and leaves, as before.
@@ -28,6 +32,7 @@
 //! a hundred: a companion listens about two milliseconds after it is started,
 //! so the wait for it is now that, and not the length of a backoff step.
 
+use std::ffi::OsString;
 use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -50,6 +55,13 @@ pub struct Startup {
     pub takeover_after: Duration,
     /// How many times one client starts the companion.
     pub max_starts: usize,
+    /// The longest one try to reach the broker may take before it is given up
+    /// on and the next step (a start, another try) goes ahead. Every try is
+    /// also cut off at the budget.
+    pub attempt_limit: Duration,
+    /// Variables the companion is started with, in addition to the data
+    /// directory: for a test that wants the broker it starts to leave soon.
+    pub environment: Vec<(OsString, OsString)>,
 }
 
 impl Default for Startup {
@@ -59,6 +71,8 @@ impl Default for Startup {
             budget: Duration::from_secs(5),
             takeover_after: Duration::from_secs(2),
             max_starts: 2,
+            attempt_limit: Duration::from_secs(1),
+            environment: Vec::new(),
         }
     }
 }
@@ -101,6 +115,12 @@ pub fn start_companion(root: &Path, startup: &Startup) -> io::Result<Child> {
     Command::new(executable)
         .arg("serve")
         .env("SEATLINE_DATA_DIR", root)
+        .envs(
+            startup
+                .environment
+                .iter()
+                .map(|(name, value)| (name, value)),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -111,6 +131,26 @@ pub fn start_companion(root: &Path, startup: &Startup) -> io::Result<Child> {
 /// reaped by asking, so it does not linger as a zombie.
 pub fn exited(child: &mut Child) -> bool {
     child.try_wait().map_or(true, |status| status.is_some())
+}
+
+/// One try to reach the broker, cut off at `limit` or the deadline, whichever
+/// is sooner, so that a try that hangs neither outlives the budget nor keeps
+/// the loop from its other steps, and a connection that arrives late is not
+/// accepted.
+async fn try_once<T, Fut>(
+    connect: &mut impl FnMut() -> Fut,
+    deadline: Instant,
+    limit: Duration,
+) -> io::Result<T>
+where
+    Fut: Future<Output = io::Result<T>>,
+{
+    let allowed = deadline
+        .saturating_duration_since(Instant::now())
+        .min(limit);
+    tokio::time::timeout(allowed, connect())
+        .await
+        .unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into()))
 }
 
 /// Connects, starting the companion if need be and nobody else is.
@@ -138,7 +178,7 @@ where
     let mut started: Option<Started> = None;
     let mut starts = 0;
     loop {
-        if let Ok(value) = connect().await {
+        if let Ok(value) = try_once(&mut connect, deadline, startup.attempt_limit).await {
             return Ok(value);
         }
         let now = Instant::now();
@@ -157,7 +197,8 @@ where
                 if let Some(claim) = claim()? {
                     held = Some(claim);
                     // The client that held it before may have just finished.
-                    if let Ok(value) = connect().await {
+                    if let Ok(value) = try_once(&mut connect, deadline, startup.attempt_limit).await
+                    {
                         return Ok(value);
                     }
                     may_start = true;
@@ -441,6 +482,95 @@ mod tests {
                 .all(|pair| pair[1] - pair[0] <= LAST_DELAY + Duration::from_millis(1)),
             "{attempts:?}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_attempt_that_never_finishes_ends_within_the_budget() {
+        let startup = Startup {
+            budget: Duration::from_millis(5),
+            ..Startup::default()
+        };
+        let began = Instant::now();
+        // An outer timeout longer than the budget: the loop must end on its own.
+        let result = tokio::time::timeout(
+            Duration::from_millis(10),
+            start_or_wait::<(), (), (), _>(
+                &startup,
+                std::future::pending::<io::Result<()>>,
+                || Ok(None),
+                || Ok(()),
+                |_| false,
+            ),
+        )
+        .await
+        .expect("the loop outlived its budget");
+        assert!(result.unwrap_err().to_string().contains("did not start"));
+        assert_eq!(began.elapsed(), Duration::from_millis(5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_that_arrives_after_the_budget_is_not_accepted() {
+        let startup = Startup {
+            budget: Duration::from_millis(5),
+            ..Startup::default()
+        };
+        let began = Instant::now();
+        let result = start_or_wait::<(), (), (), _>(
+            &startup,
+            || async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Ok(())
+            },
+            || Ok(None),
+            || Ok(()),
+            |_| false,
+        )
+        .await;
+        assert!(result.is_err(), "a late connection was accepted");
+        assert_eq!(began.elapsed(), Duration::from_millis(5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_attempt_does_not_keep_the_client_from_starting_the_companion() {
+        // The first tries hang, as one to a socket nobody serves may; the
+        // client gives each up at the attempt limit, takes the claim, starts
+        // the companion and connects.
+        let world = world(1);
+        let startup = Startup {
+            attempt_limit: Duration::from_millis(50),
+            ..Startup::default()
+        };
+        let begun = Instant::now();
+        start_or_wait(
+            &startup,
+            || {
+                let up = world.up();
+                async move {
+                    if up {
+                        Ok(())
+                    } else {
+                        std::future::pending().await
+                    }
+                }
+            },
+            || {
+                Ok(if world.claimed.replace(true) {
+                    None
+                } else {
+                    Some(Guard(world.clone()))
+                })
+            },
+            || {
+                world.starts.set(world.starts.get() + 1);
+                world.listening_from.set(Some(Instant::now()));
+                Ok(())
+            },
+            |_| false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(world.starts.get(), 1);
+        assert!(begun.elapsed() < startup.budget);
     }
 
     #[tokio::test(start_paused = true)]
