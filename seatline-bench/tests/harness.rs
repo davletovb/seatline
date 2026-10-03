@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 
@@ -54,8 +55,19 @@ fn harness(args: &[&str]) -> Output {
         .unwrap()
 }
 
+/// A file name no other test in this process, or another process, is using:
+/// the tests run in parallel and each writes, reads and removes its own report.
+fn unique_file(what: &str) -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    Path::new(SCRATCH).join(format!(
+        "bench-{what}-{}-{}.json",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
 fn report(args: &[&str]) -> (Value, String) {
-    let file = Path::new(SCRATCH).join(format!("bench-{}.json", std::process::id()));
+    let file = unique_file("report");
     let mut full = args.to_vec();
     let path = file.to_str().unwrap().to_owned();
     full.extend(["--output", &path]);
@@ -301,7 +313,7 @@ fn a_saved_report_can_be_rendered_and_compared() {
         "--warmup",
         "0",
     ]);
-    let file = Path::new(SCRATCH).join(format!("bench-compare-{}.json", std::process::id()));
+    let file = unique_file("compare");
     std::fs::write(&file, text).unwrap();
     let path = file.to_str().unwrap();
     #[allow(clippy::disallowed_methods)] // Runs the harness binary this package builds.
