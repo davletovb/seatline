@@ -105,7 +105,8 @@ impl Running {
     fn observe(&mut self, update: &Update) {
         let stopped = self.stop.is_some();
         if let Some(timeline) = self.timeline.as_mut() {
-            if !stopped || update.is_terminal() {
+            // The clock is read only for an update that sets a mark.
+            if (!stopped || update.is_terminal()) && timeline.wants(update) {
                 timeline.observe(update, Instant::now());
             }
         }

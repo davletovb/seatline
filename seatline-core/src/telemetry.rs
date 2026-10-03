@@ -165,6 +165,20 @@ impl Timeline {
         self.probe.get_or_insert(span);
     }
 
+    /// Whether `update` would set a mark that is not set yet. A host that
+    /// reads the clock for [`Timeline::observe`] can ask first, so that a
+    /// flood of progress, or every delta after the first, costs no clock read.
+    pub fn wants(&self, update: &Update) -> bool {
+        match update {
+            Update::Launched => self.launched.is_none(),
+            Update::Started => self.started.is_none(),
+            Update::Delta(text) => !text.is_empty() && self.first_text.is_none(),
+            Update::Status { .. } => self.status.is_none(),
+            Update::Completed | Update::Failed(_) | Update::Stopped => self.terminal.is_none(),
+            _ => false,
+        }
+    }
+
     /// Stamps what an update shows, when the host observed it at `at`.
     pub fn observe(&mut self, update: &Update, at: Instant) {
         match update {
@@ -782,6 +796,31 @@ mod tests {
         assert_eq!(marks.first_text, Some(30));
         assert_eq!(marks.terminal, Some(40));
         assert_eq!(marks.stop_requested, Some(35));
+    }
+
+    #[test]
+    fn a_timeline_only_wants_updates_that_would_set_a_mark() {
+        let clock = Clock::new();
+        let mut timeline = Timeline::new(Kind::Send, clock.at(0));
+        for update in [
+            Update::Launched,
+            Update::Started,
+            delta("a"),
+            Update::Completed,
+        ] {
+            assert!(timeline.wants(&update), "{update:?} is a new boundary");
+            timeline.observe(&update, clock.at(1));
+            assert!(!timeline.wants(&update), "{update:?} was already marked");
+        }
+        for update in [
+            Update::Activity,
+            delta(""),
+            Update::Session("native".into()),
+            failed(),
+            Update::Stopped,
+        ] {
+            assert!(!timeline.wants(&update), "{update:?}");
+        }
     }
 
     #[test]
