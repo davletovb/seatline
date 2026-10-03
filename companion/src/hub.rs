@@ -80,6 +80,11 @@ struct Request {
 struct Active {
     request: Request,
     persistent: bool,
+    /// A local failure can end the client-visible request before the
+    /// supervisor finishes stopping/reaping its exchange. Keep its slot until
+    /// Ended, but release its request ID and never forward more output after
+    /// this boundary.
+    terminal_sent: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -267,7 +272,12 @@ impl Hub {
                 if self
                     .queue
                     .iter()
-                    .chain(self.active.values().map(|active| &active.request))
+                    .chain(
+                        self.active
+                            .values()
+                            .filter(|active| !active.terminal_sent)
+                            .map(|active| &active.request),
+                    )
                     .chain(self.cleanup.iter().map(|p| &p.request))
                     .any(|other| other.connection == connection && other.id == request.id)
                 {
@@ -456,9 +466,13 @@ impl Hub {
         for event in self.supervisor.poll(Duration::from_millis(1)) {
             match event {
                 Event::Update { turn_id, update } => {
-                    let Some(active) = self.active.remove(&turn_id) else {
+                    let Some(mut active) = self.active.remove(&turn_id) else {
                         continue;
                     };
+                    if active.terminal_sent {
+                        self.active.insert(turn_id, active);
+                        continue;
+                    }
                     let update = match update {
                         Update::Session(native) if active.persistent => {
                             let app = active.request.app.clone();
@@ -488,12 +502,14 @@ impl Hub {
                         }
                         other => other,
                     };
+                    active.terminal_sent = update.is_terminal();
                     self.event(&active.request, update);
                     self.active.insert(turn_id, active);
                 }
                 Event::Ended { turn_id, reason } => {
                     self.telemetry.ended(turn_id, &reason, &mut self.supervisor);
-                    if let Some(active) = self.active.remove(&turn_id) {
+                    if let Some(active) = self.active.remove(&turn_id).filter(|a| !a.terminal_sent)
+                    {
                         self.event(
                             &active.request,
                             match reason {
@@ -681,6 +697,7 @@ impl Hub {
                     Active {
                         request,
                         persistent,
+                        terminal_sent: false,
                     },
                 );
             }
@@ -1084,6 +1101,166 @@ mod tests {
                     native: format!("native-{app}-{index}"),
                 },
             );
+        }
+    }
+
+    #[test]
+    fn ledger_failures_end_the_request_once_and_do_not_forward_late_output() {
+        for storage_failure in [false, true] {
+            let (mut hub, mut output) = setup();
+            let reason = if storage_failure {
+                // A directory at the ledger path forces atomic replacement to fail.
+                std::fs::create_dir(hub.root.join("sessions.json")).unwrap();
+                wire::reason::SESSION_STORE_FAILED
+            } else {
+                fill_ledger(&mut hub, "first", MAX_APP_SESSIONS);
+                wire::reason::SESSION_LIMIT_REACHED
+            };
+            request(&mut hub, 1, "failing", "send", turn(None));
+            let mut other_turn = turn(None);
+            other_turn["session"] = json!("ephemeral");
+            request(&mut hub, 2, "unrelated", "send", other_turn);
+            for _ in 0..8 {
+                hub.tick();
+            }
+            let failed = drain(&mut output[0]);
+            assert_eq!(failed.len(), 1, "output leaked after {reason}: {failed:?}");
+            assert_eq!(failed[0]["event"]["type"], "failed");
+            assert_eq!(failure_reason(&failed).as_deref(), Some(reason));
+            let other = drain(&mut output[1]);
+            assert!(other.iter().any(|v| v["event"]["type"] == "delta"));
+            assert_eq!(other.last().unwrap()["event"]["type"], "completed");
+            assert!(hub.active.is_empty());
+            assert!(hub.supervisor.is_empty());
+            std::fs::remove_dir_all(&hub.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_early_terminal_failure_keeps_its_slot_but_releases_its_request_id() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct DelayedStop {
+            session_sent: bool,
+            release: Rc<Cell<bool>>,
+            cancelled: Rc<Cell<bool>>,
+        }
+        impl Exchange for DelayedStop {
+            fn next(&mut self, _: Instant) -> Option<Update> {
+                if !std::mem::replace(&mut self.session_sent, true) {
+                    Some(Update::Session("new-native-handle".into()))
+                } else if self.release.get() {
+                    Some(Update::Stopped)
+                } else {
+                    None
+                }
+            }
+            fn cancel(&mut self, _: Duration) {
+                self.cancelled.set(true);
+            }
+        }
+
+        for storage_failure in [false, true] {
+            let (mut hub, mut output) = setup();
+            let reason = if storage_failure {
+                std::fs::create_dir(hub.root.join("sessions.json")).unwrap();
+                wire::reason::SESSION_STORE_FAILED
+            } else {
+                fill_ledger(&mut hub, "first", MAX_APP_SESSIONS);
+                wire::reason::SESSION_LIMIT_REACHED
+            };
+            let release = Rc::new(Cell::new(false));
+            let cancelled = Rc::new(Cell::new(false));
+            let turn_id = hub.supervisor.start(
+                Box::new(DelayedStop {
+                    session_sent: false,
+                    release: release.clone(),
+                    cancelled: cancelled.clone(),
+                }),
+                None,
+                Duration::from_secs(2),
+            );
+            hub.active.insert(
+                turn_id,
+                Active {
+                    request: Request {
+                        connection: 1,
+                        id: "failing".into(),
+                        app: "first".into(),
+                        provider: "codex".into(),
+                        method: "send".into(),
+                        params: turn(None),
+                    },
+                    persistent: true,
+                    terminal_sent: false,
+                },
+            );
+            hub.tick();
+            assert!(cancelled.get());
+            assert!(hub.active[&turn_id].terminal_sent);
+            assert!(!hub.supervisor.is_empty());
+            let failed = drain(&mut output[0]);
+            assert_eq!(failed.len(), 1);
+            assert_eq!(failure_reason(&failed).as_deref(), Some(reason));
+
+            // The client can reuse the ID as soon as it receives the terminal
+            // event, even while the old provider still occupies a cleanup slot.
+            let mut retry = turn(None);
+            retry["session"] = json!("ephemeral");
+            request(&mut hub, 1, "failing", "send", retry);
+            assert!(hub.connections.contains_key(&1));
+            assert_eq!(hub.queue.len(), 1);
+            for _ in 0..8 {
+                hub.tick();
+            }
+            let retried = drain(&mut output[0]);
+            assert!(retried.iter().all(|event| event["id"] == "failing"));
+            assert!(retried.iter().any(|v| v["event"]["type"] == "delta"));
+            assert_eq!(retried.last().unwrap()["event"]["type"], "completed");
+            assert_eq!(
+                retried
+                    .iter()
+                    .filter(|v| matches!(
+                        v["event"]["type"].as_str(),
+                        Some("completed" | "failed" | "stopped")
+                    ))
+                    .count(),
+                1,
+            );
+            assert_eq!(hub.active.len(), 1);
+            assert!(hub.active[&turn_id].terminal_sent);
+
+            release.set(true);
+            hub.tick();
+            assert!(hub.active.is_empty());
+            assert!(hub.supervisor.is_empty());
+            assert!(drain(&mut output[0]).is_empty());
+            std::fs::remove_dir_all(&hub.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn duplicate_outstanding_request_ids_still_close_the_connection() {
+        for active in [false, true] {
+            let (mut hub, _output) = setup();
+            request(&mut hub, 1, "duplicate", "send", turn(None));
+            if active {
+                hub.tick();
+                assert_eq!(hub.active.len(), 1);
+                assert!(!hub.active.values().next().unwrap().terminal_sent);
+            } else {
+                assert_eq!(hub.queue.len(), 1);
+            }
+            request(&mut hub, 1, "duplicate", "send", turn(None));
+            assert!(!hub.connections.contains_key(&1));
+            assert!(hub.queue.is_empty());
+            for _ in 0..8 {
+                hub.tick();
+            }
+            assert!(hub.active.is_empty());
+            assert!(hub.supervisor.is_empty());
+            std::fs::remove_dir_all(&hub.root).unwrap();
         }
     }
 

@@ -67,6 +67,10 @@ login=hangs          never answer
 login=floods         write stdout and stderr without end
 
 exec=answers         answer the question (the default)
+exec=completed-stdout-flood   answer, then flood stdout with progress events
+exec=completed-unknown-flood  answer, then flood stdout with unknown events
+exec=completed-stderr-flood   answer, then flood stderr without exiting
+exec=failed-stdout-flood      fail, then flood stdout without exiting
 exec=two-messages    answer in two agent messages
 exec=slow            answer in two messages 300 ms apart
 exec=huge            answer with 300,000 bytes, mostly multi-byte characters

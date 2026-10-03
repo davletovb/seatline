@@ -66,3 +66,6 @@ idna_adapter = "=1.2.0"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
