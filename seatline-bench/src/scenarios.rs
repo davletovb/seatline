@@ -550,6 +550,15 @@ pub fn metrics(measured: &[Sample]) -> BTreeMap<String, Summary> {
         "client_total_us".into(),
         done.iter().map(|s| s.total_us).collect(),
     );
+    // From the application's own start of the request, preparation included:
+    // the one figure that is the same thing over the wire and through an
+    // adapter, which cannot time its connect apart.
+    add(
+        "client_start_to_first_text_us".into(),
+        done.iter()
+            .filter_map(|s| Some(s.prepare_us.unwrap_or(0) + s.submit_to_first_text_us?))
+            .collect(),
+    );
     add(
         "client_submit_to_launched_us".into(),
         done.iter()

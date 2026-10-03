@@ -140,6 +140,13 @@ fn warm_scenarios_count_processes_the_way_the_fake_provider_did() {
     assert_eq!(app["completed"], 3);
     assert!(metric(app, "client_prepare_us").is_null());
     assert_eq!(metric(app, "client_submit_to_first_text_us")["n"], 3);
+    // The one figure the wire and the adapter share starts at the application.
+    assert_eq!(metric(app, "client_start_to_first_text_us")["n"], 3);
+    assert_eq!(
+        metric(&send["apps"][0], "client_start_to_first_text_us")["n"],
+        3
+    );
+    assert!(report["broker"]["limits"]["idle_exit_ms"].is_null());
     assert_eq!(metric(app, "broker_provider_init_us")["n"], 3);
 
     // With one: the probe is a second process, and the broker says so.

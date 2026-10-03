@@ -224,6 +224,17 @@ fn run_scenarios(args: &[String]) -> io::Result<()> {
         broker = broker.or(lab.broker_record.clone());
     }
 
+    // How long a broker idles before exiting is the harness's own setting, and
+    // differs by scenario (a cold start lets it leave after a second): it is not
+    // part of what the broker ran with.
+    if let Some(limits) = broker
+        .as_mut()
+        .and_then(|record| record.get_mut("limits"))
+        .and_then(Value::as_object_mut)
+    {
+        limits.remove("idle_exit_ms");
+    }
+
     let report = Report {
         schema: report::SCHEMA,
         tool_version: env!("CARGO_PKG_VERSION").to_owned(),

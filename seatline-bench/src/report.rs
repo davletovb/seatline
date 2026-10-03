@@ -91,9 +91,10 @@ fn ms(us: u64) -> String {
     format!("{:.1}", us as f64 / 1000.0)
 }
 
-const SHOWN: [(&str, &str); 9] = [
+const SHOWN: [(&str, &str); 10] = [
     ("client_prepare_us", "prepare"),
     ("client_submit_to_first_text_us", "submit→text"),
+    ("client_start_to_first_text_us", "start→text"),
     ("client_submit_to_complete_us", "submit→done"),
     ("broker_queue_wait_us", "queue wait"),
     ("broker_sign_in_probe_us", "probe"),
