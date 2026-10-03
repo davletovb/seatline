@@ -105,6 +105,8 @@ fn warm_scenarios_count_processes_the_way_the_fake_provider_did() {
         "--scenario",
         "warm-send-adapter",
         "--scenario",
+        "warm-send-shared",
+        "--scenario",
         "warm-send-probe",
         "--scenario",
         "warm-status",
@@ -160,6 +162,20 @@ fn warm_scenarios_count_processes_the_way_the_fake_provider_did() {
     );
     assert!(report["broker"]["limits"]["idle_exit_ms"].is_null());
     assert_eq!(metric(app, "broker_provider_init_us")["n"], 3);
+
+    // Through one shared client: the same work again, on one connection that
+    // the first request, a warm-up, opened. Joined by order too, and with no
+    // handshake of its own to report: the one handshake is not a request's.
+    let shared = scenario(&report, "warm-send-shared");
+    assert_eq!(shared["state"], "warm_broker_fresh_provider");
+    assert_eq!(shared["counts"]["fake_turns"], 4);
+    assert_eq!(shared["counts"]["broker_launches"], 3, "joined by order");
+    let app = &shared["apps"][0];
+    assert_eq!(app["completed"], 3);
+    assert!(metric(app, "client_prepare_us").is_null());
+    assert_eq!(metric(app, "client_start_to_first_text_us")["n"], 3);
+    assert_eq!(metric(app, "broker_provider_init_us")["n"], 3);
+    assert!(metric(app, "broker_handshake_us").is_null());
 
     // With one: the probe is a second process, and the broker says so.
     let probe = scenario(&report, "warm-send-probe");

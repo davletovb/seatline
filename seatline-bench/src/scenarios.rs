@@ -24,10 +24,11 @@ pub struct Params {
 }
 
 /// Every scenario, in the order they are run.
-pub const ALL: [&str; 10] = [
+pub const ALL: [&str; 11] = [
     "cold-broker",
     "warm-send",
     "warm-send-adapter",
+    "warm-send-shared",
     "warm-send-probe",
     "warm-status",
     "resumed-context",
@@ -39,10 +40,11 @@ pub const ALL: [&str; 10] = [
 
 /// The scenarios a live provider can be asked for. The competing-load ones
 /// need requests of a known length, which only the fake provider has.
-pub const LIVE: [&str; 7] = [
+pub const LIVE: [&str; 8] = [
     "cold-broker",
     "warm-send",
     "warm-send-adapter",
+    "warm-send-shared",
     "warm-send-probe",
     "warm-status",
     "resumed-context",
@@ -71,6 +73,10 @@ fn describe(name: &str) -> Option<Description> {
         "warm-send-adapter" => Description {
             state: "warm_broker_fresh_provider",
             text: "As `warm-send`, but through the shipped `RemoteProvider` the way an application's adapter calls it, which starts a thread, a runtime and a connection for every exchange. Only what shows from outside is timed, from the call that starts the exchange, so connecting and the handshake are not reported apart.",
+        },
+        "warm-send-shared" => Description {
+            state: "warm_broker_fresh_provider",
+            text: "As `warm-send-adapter`, but the application makes one `RemoteClient` and every request is a request on its one runtime and one authenticated connection (D-01). The connection is made by the first request, a warm-up, so measured requests find it open. Compare with `warm-send-adapter` for what a connection per exchange costs.",
         },
         "warm-send-probe" => Description {
             state: "warm_broker_fresh_provider",
@@ -232,6 +238,11 @@ pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
             app: "bench-a",
             role: "single",
             requests: sequence(name, "bench-a", live, params, |req| req.via = Via::Adapter),
+        }],
+        "warm-send-shared" => vec![Plan {
+            app: "bench-a",
+            role: "single",
+            requests: sequence(name, "bench-a", live, params, |req| req.via = Via::Shared),
         }],
         "warm-send-probe" => vec![Plan {
             app: "bench-a",
@@ -503,23 +514,56 @@ pub fn join(samples: &mut [Sample], records: &[Value]) {
 /// by position; if the counts differ the order cannot be trusted and nothing is
 /// matched.
 pub fn join_in_order(samples: &mut [Sample], records: &[Value]) {
+    join_by_position(samples, records, |id| id == "request", true);
+}
+
+/// [`join_in_order`] for requests made through a shared `RemoteClient`, which
+/// names its requests `r1`, `r2`... One connection serves them all, so the one
+/// handshake is not any request's: it is left out.
+pub fn join_shared(samples: &mut [Sample], records: &[Value]) {
+    join_by_position(
+        samples,
+        records,
+        |id| {
+            id.strip_prefix('r')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        },
+        false,
+    );
+}
+
+fn join_by_position(
+    samples: &mut [Sample],
+    records: &[Value],
+    ours: impl Fn(&str) -> bool,
+    with_handshake: bool,
+) {
     let handshakes = handshakes(records);
     let theirs: Vec<&Value> = records
         .iter()
-        .filter(|record| record["kind"] == "request" && record["request"] == "request")
+        .filter(|record| {
+            record["kind"] == "request" && record["request"].as_str().is_some_and(&ours)
+        })
         .collect();
     if theirs.len() != samples.len() {
         return;
     }
     for (sample, record) in samples.iter_mut().zip(theirs) {
-        sample.broker = Some(broker_of(record, &handshakes));
+        let mut broker = broker_of(record, &handshakes);
+        if !with_handshake {
+            broker.handshake_us = None;
+        }
+        sample.broker = Some(broker);
     }
 }
 
 /// Joins by whichever means the samples' client allows.
 fn join_for(samples: &mut [Sample], records: &[Value]) {
-    if !samples.is_empty() && samples.iter().all(|sample| sample.via == Via::Adapter) {
+    let all = |via: Via| !samples.is_empty() && samples.iter().all(|sample| sample.via == via);
+    if all(Via::Adapter) {
         join_in_order(samples, records);
+    } else if all(Via::Shared) {
+        join_shared(samples, records);
     } else {
         join(samples, records);
     }
@@ -813,6 +857,31 @@ mod tests {
         }
         join_for(&mut samples, &records);
         assert!(samples.iter().all(|sample| sample.broker.is_none()));
+    }
+
+    #[test]
+    fn requests_through_a_shared_client_are_matched_by_order_without_a_handshake() {
+        let records: Vec<Value> = [
+            r#"{"kind":"connection","connection":1,"handshake_us":50}"#,
+            r#"{"kind":"request","connection":1,"request":"r1","outcome":"completed","probes":0,"launches":1,"total_us":100,"phases_us":{"queue_wait":1}}"#,
+            r#"{"kind":"request","connection":1,"request":"r2","outcome":"failed","probes":0,"launches":0,"total_us":200,"phases_us":{"queue_wait":2}}"#,
+            // Another client's request, or a legacy adapter's, is not ours.
+            r#"{"kind":"request","connection":2,"request":"request","outcome":"completed","probes":0,"launches":1,"total_us":300,"phases_us":{}}"#,
+            r#"{"kind":"request","connection":3,"request":"r","outcome":"completed","probes":0,"launches":1,"total_us":400,"phases_us":{}}"#,
+        ]
+        .iter()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+        let mut samples = vec![sample("a", 0, None), sample("b", 0, None)];
+        for sample in &mut samples {
+            sample.via = Via::Shared;
+        }
+        join_for(&mut samples, &records);
+        let first = samples[0].broker.as_ref().unwrap();
+        assert_eq!(first.total_us, 100);
+        // The one handshake belongs to the connection, not to either request.
+        assert_eq!(first.handshake_us, None);
+        assert_eq!(samples[1].broker.as_ref().unwrap().outcome, "failed");
     }
 
     #[test]
