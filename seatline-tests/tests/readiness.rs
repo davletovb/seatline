@@ -34,6 +34,104 @@ fn independent_executable(dir: &std::path::Path, name: &str) {
 }
 
 #[test]
+fn claude_mixed_state_rewrites_preserve_cache_but_account_changes_invalidate_it() {
+    // Exercise both the default home file and the relocated profile file.
+    for relocated in [false, true] {
+        let fake = FakeClaude::install(FIXTURES, "answers", "signed-in");
+        independent_executable(&fake.dir, FakeClaude::file_name());
+        let home = fake.dir.join("isolated-home");
+        let config = home.join(if relocated { "profile" } else { ".claude" });
+        std::fs::create_dir_all(&config).unwrap();
+        let state_file = if relocated {
+            config.join(".claude.json")
+        } else {
+            home.join(".claude.json")
+        };
+        let mut mixed = serde_json::json!({
+            "oauthAccount": {"accountUuid":"account-one","organizationUuid":"org-one"},
+            "numStartups": 1,
+            "projects": {"history": "x".repeat(2 * 1024 * 1024)},
+        });
+        let write = |value: &serde_json::Value| {
+            // An atomic replacement changes inode/timestamps as well as the
+            // volatile state, like the real CLI's global config writer.
+            let temporary = state_file.with_extension("new");
+            std::fs::write(&temporary, serde_json::to_vec(value).unwrap()).unwrap();
+            if state_file.exists() {
+                std::fs::remove_file(&state_file).unwrap();
+            }
+            std::fs::rename(temporary, &state_file).unwrap();
+        };
+        write(&mixed);
+        let mut host = vec![(
+            OsString::from(if cfg!(windows) { "USERPROFILE" } else { "HOME" }),
+            home.into_os_string(),
+        )];
+        if relocated {
+            host.push(("CLAUDE_CONFIG_DIR".into(), config.clone().into_os_string()));
+        }
+        let ready = Ready::new(fake.adapter_with_env(host));
+        let check = || {
+            let mut exchange = ready.prepare(CACHED);
+            let updates = run_to_end(exchange.as_mut());
+            assert_eq!(updates.last(), Some(&Update::Completed), "{updates:?}");
+            state(&updates).readiness.unwrap().source
+        };
+        assert_eq!(check(), Source::Fresh);
+        mixed["numStartups"] = serde_json::json!(2);
+        mixed["lastSessionId"] = serde_json::json!("session-two");
+        write(&mixed);
+        std::fs::write(config.join("history.jsonl"), "unrelated session history").unwrap();
+        std::fs::create_dir(config.join("debug")).unwrap();
+        assert_eq!(check(), Source::Cached);
+        assert_eq!(fake.invocations().len(), 1);
+        mixed["oauthAccount"]["accountUuid"] = serde_json::json!("account-two");
+        write(&mixed);
+        assert_eq!(check(), Source::Fresh);
+        assert_eq!(fake.invocations().len(), 2);
+        std::fs::write(config.join(".credentials.json"), "new credentials").unwrap();
+        assert_eq!(check(), Source::Fresh);
+        assert_eq!(fake.invocations().len(), 3);
+        mixed["primaryApiKey"] = serde_json::json!("fake-key");
+        write(&mixed);
+        assert_eq!(check(), Source::Fresh);
+        std::fs::write(&state_file, "malformed json").unwrap();
+        assert_eq!(check(), Source::Fresh);
+        assert_eq!(check(), Source::Fresh);
+        assert_eq!(fake.invocations().len(), 6);
+        std::fs::write(&state_file, vec![b' '; 16 * 1024 * 1024 + 1]).unwrap();
+        assert_eq!(check(), Source::Fresh);
+        assert_eq!(check(), Source::Fresh);
+        assert_eq!(fake.invocations().len(), 8);
+    }
+}
+
+#[test]
+fn codex_session_files_do_not_invalidate_readiness_but_profile_config_changes_do() {
+    let fake = FakeCodex::install(FIXTURES, "answers", "subscription");
+    independent_executable(&fake.dir, FakeCodex::file_name());
+    let home = fake.dir.join("isolated-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let ready =
+        Ready::new(fake.adapter_with_env([("CODEX_HOME".into(), home.clone().into_os_string())]));
+    let check = || {
+        let mut exchange = ready.prepare(CACHED);
+        let updates = run_to_end(exchange.as_mut());
+        assert_eq!(updates.last(), Some(&Update::Completed), "{updates:?}");
+        state(&updates).readiness.unwrap().source
+    };
+    assert_eq!(check(), Source::Fresh);
+    std::fs::write(home.join("history.jsonl"), "session history").unwrap();
+    std::fs::create_dir(home.join("sessions")).unwrap();
+    assert_eq!(check(), Source::Cached);
+    std::fs::write(home.join("work.config.toml"), "model = 'other'").unwrap();
+    assert_eq!(check(), Source::Fresh);
+    std::fs::write(home.join("auth.json"), "new credentials").unwrap();
+    assert_eq!(check(), Source::Fresh);
+    assert_eq!(fake.invocations().len(), 3);
+}
+
+#[test]
 fn all_providers_prepare_without_generating_then_reuse_verified_readiness() {
     let codex = FakeCodex::install(FIXTURES, "answers", "subscription");
     let claude = FakeClaude::install(FIXTURES, "answers", "signed-in");

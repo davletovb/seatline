@@ -55,6 +55,29 @@ impl FileStamp {
             ),
         }))
     }
+
+    /// Track a directory's identity and permissions, without treating log or
+    /// session-file creation as a change to the account configuration.
+    pub fn read_directory(path: &Path) -> std::io::Result<Option<Self>> {
+        let mut stamp = Self::read(path)?;
+        if let Some(stamp) = &mut stamp {
+            if !path.is_dir() {
+                return Err(std::io::Error::other("expected a directory"));
+            }
+            stamp.length = 0;
+            stamp.modified = None;
+            #[cfg(unix)]
+            {
+                stamp.identity.2 = 0;
+                stamp.identity.3 = 0;
+            }
+            #[cfg(windows)]
+            {
+                stamp.identity.1 = 0;
+            }
+        }
+        Ok(stamp)
+    }
 }
 
 #[derive(Debug)]
@@ -123,6 +146,29 @@ impl CachedSearchPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_fingerprints_ignore_history_but_notice_scope_replacement() {
+        let root = super::super::tests::temp_dir("directory-stamp");
+        let directory = root.join("account");
+        assert_eq!(FileStamp::read_directory(&directory).unwrap(), None);
+        fs::create_dir(&directory).unwrap();
+        let before = FileStamp::read_directory(&directory).unwrap().unwrap();
+        fs::write(directory.join("history.jsonl"), "new history").unwrap();
+        fs::create_dir(directory.join("sessions")).unwrap();
+        assert_eq!(
+            FileStamp::read_directory(&directory).unwrap().as_ref(),
+            Some(&before)
+        );
+        fs::rename(&directory, root.join("previous-account")).unwrap();
+        fs::create_dir(&directory).unwrap();
+        assert_ne!(
+            FileStamp::read_directory(&directory).unwrap().as_ref(),
+            Some(&before)
+        );
+        assert!(FileStamp::read_directory(&root.join("previous-account/history.jsonl")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn replacement_removal_installation_and_priority_recover() {

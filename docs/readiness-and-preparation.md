@@ -62,13 +62,17 @@ Before reuse, the adapter revalidates its workspace and fingerprints the executa
 | Adapter | Watched account/configuration inputs |
 | --- | --- |
 | Codex | Effective `CODEX_HOME` or home `.codex`: `auth.json`, `config.toml`, additional `*.config.toml` files and the directory; current tool-isolation capabilities. |
-| Claude | Effective config directory: `.credentials.json`, `settings.json`, `settings.local.json`, directory, and home `.claude.json`. |
+| Claude | Effective config directory: `.credentials.json`, `settings.json`, `settings.local.json` and directory identity. Account/auth fields from home `.claude.json`, or `CLAUDE_CONFIG_DIR/.claude.json` for a relocated profile. |
 | Gemini | Home `.gemini/oauth_creds.json`, `settings.json`, and Antigravity CLI `auth.json`/`config.json`. |
 | Grok | Effective `GROK_AUTH_PATH`, `GROK_HOME/auth.json`, or home `.grok/auth.json`. |
 
 File identity/canonical target, metadata and bounded content digests detect removal, replacement, account/config edits and creation of previously missing files. Digests are kept in memory and never serialized or debug-printed. Unreadable or oversized configuration disables caching. OS-keyring changes and server-side revocation may have no local file signal, so the 30-second ceiling still applies; request a fresh check after login/logout or an account change. `invalidate_readiness()` explicitly drops local cached evidence and executable discovery. Authentication failures from a subsequent turn also invalidate evidence. Failed/obsolete probes cannot repopulate an invalidated cache.
 
-The hub compares the grant's workspace title as well as its token/provider/tool permissions, checks authorization again at queue admission, and drops the app's adapters/evidence when its grant changes or is revoked. Another app's cache and exchanges remain independent.
+Directory fingerprints retain canonical target, identity and permissions; timestamps/size caused by unrelated history, log or session entries do not invalidate readiness. Credential/settings files still track full metadata and bounded content. Claude's mixed state file is streamed with a 16 MiB input limit and a 1 MiB account projection limit. The projection includes `oauthAccount`, `primaryApiKey`, `apiKeyHelper`, `customApiKeyResponses`, `userID` and account/subscription/organization metadata. Startup counters, project history and UI state are ignored, including during atomic file replacement. An unchanged file stamp reuses its private projection digest. Malformed, unreadable, concurrently changed or oversized state disables caching. This file is application state rather than a settings file; see [Claude's file reference](https://code.claude.com/docs/en/claude-directory).
+
+Cached preparation and explicit sends compute fingerprints at two consumption boundaries: before delivering cached Status and immediately before Completed/launch. The second check protects callers that pause between updates. A fresh check fingerprints before probing and on completion; a shared subscriber revalidates a peer's retained completion before using it. Explicit sends use those checks without repeating their filesystem work. Filesystem work remains synchronous; moving it off the hub thread is later work.
+
+The hub retains the originating grant with each adapter and compares its workspace title, token/provider/tool permissions and app at queue admission. It drops only that app's adapters/evidence when the scope changes, including after every old connection has disconnected and a new grant is used to reconnect. An unchanged grant retains cached evidence across per-exchange connections. Another app's cache and exchanges remain independent.
 
 ## Companion wire methods
 
@@ -80,7 +84,7 @@ Protocol version 1 gains additive methods. Update the companion to use them; an 
 | `prepare` | Same freshness object. |
 | `send_ready` | `{"turn":<existing Turn object>,"freshness":<freshness object>}` |
 
-All methods require the provider in the app's grant and use existing request IDs, limits, cancellation and terminal delivery. Malformed freshness is `INVALID_REQUEST`; unsupported preparation is `PREPARATION_UNSUPPORTED`. Configuration changes while checking or before launch are `READINESS_CHANGED`; an expired shared result is `READINESS_EXPIRED`; an unverified explicit send is `READINESS_UNVERIFIED`. None of those failures launches a model turn.
+All methods require the provider in the app's grant and use existing request IDs, limits, cancellation and terminal delivery. Malformed freshness is `INVALID_REQUEST`; unsupported preparation is `PREPARATION_UNSUPPORTED`. Configuration changes while checking or before launch are `READINESS_CHANGED`; expired evidence after Status is `READINESS_EXPIRED` for fresh, shared and cached checks; an unverified explicit send is `READINESS_UNVERIFIED`. None of those failures launches a model turn.
 
 Fresh checks count as readiness probes in telemetry. Cache hits and shared subscribers count zero new probes; their local readiness work/wait belongs to `provider_init`, with the remaining completion/cleanup phases unchanged. The initiating explicit send reports the readiness span for all four adapters.
 

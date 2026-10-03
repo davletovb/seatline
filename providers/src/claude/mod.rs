@@ -36,6 +36,7 @@ use seatline_platform::layout::Layout;
 use seatline_platform::workspace;
 
 pub mod output;
+mod readiness;
 
 use output::Line;
 
@@ -198,6 +199,7 @@ pub struct Claude {
     search: CachedSearchPath,
     launch: Rc<Launch>,
     limits: Limits,
+    account_file: readiness::AccountFile,
 }
 
 impl Claude {
@@ -214,6 +216,7 @@ impl Claude {
             search: CachedSearchPath::new(search),
             launch: Rc::new(Launch::new(work_dir, std::env::vars_os().collect())),
             limits: LIMITS,
+            account_file: readiness::AccountFile::default(),
         }
     }
 
@@ -243,7 +246,7 @@ impl Claude {
 impl Provider for Claude {
     fn readiness_key(&self) -> Option<crate::readiness::Key> {
         self.launch.workspace().ok()?;
-        let mut files: Vec<_> = claude_config_dir(&self.launch)
+        let files: Vec<_> = claude_config_dir(&self.launch)
             .into_iter()
             .flat_map(|dir| {
                 [
@@ -254,10 +257,17 @@ impl Provider for Claude {
                 ]
             })
             .collect();
-        if let Some(home) = environment::home_dir(&self.launch.inherited) {
-            files.push(home.join(".claude.json"));
+        let key = crate::readiness::Key::watch(&self.executable()?, files, self.capabilities())?;
+        let account_path = environment::lookup(&self.launch.inherited, "CLAUDE_CONFIG_DIR")
+            .map(|dir| PathBuf::from(dir).join(".claude.json"))
+            .or_else(|| {
+                environment::home_dir(&self.launch.inherited).map(|home| home.join(".claude.json"))
+            });
+        if let Some(path) = account_path {
+            self.account_file.watch(key, path)
+        } else {
+            Some(key)
         }
-        crate::readiness::Key::watch(&self.executable()?, files, self.capabilities())
     }
     fn id(&self) -> &str {
         ID
@@ -277,6 +287,7 @@ impl Provider for Claude {
 
     fn invalidate_readiness(&self) {
         self.search.invalidate();
+        self.account_file.invalidate();
     }
 
     fn capabilities(&self) -> Capabilities {

@@ -52,7 +52,11 @@ impl Key {
         )];
         watched[0].1.as_ref()?;
         for path in files {
-            let stamp = FileStamp::read(&path).ok()?;
+            let stamp = if path.is_dir() {
+                FileStamp::read_directory(&path).ok()?
+            } else {
+                FileStamp::read(&path).ok()?
+            };
             let digest = if stamp.is_some() && path.is_file() {
                 let file = std::fs::File::open(&path).ok()?;
                 let mut bytes = Vec::new();
@@ -72,6 +76,14 @@ impl Key {
             files: watched,
             capabilities,
         })
+    }
+
+    /// A mixed state file may be atomically rewritten for unrelated history
+    /// or counters. Its account projection, rather than inode/timestamps or
+    /// the entire file, defines readiness. None records a missing file.
+    pub(crate) fn with_projection(mut self, path: PathBuf, digest: Option<u64>) -> Self {
+        self.files.push((path, None, digest));
+        self
     }
 }
 
@@ -115,12 +127,14 @@ impl Ready {
         if max_age == Duration::ZERO {
             self.provider.invalidate_readiness();
         }
-        let key = self.provider.readiness_key();
-        let mut state = self.state.borrow_mut();
         if max_age != Duration::ZERO {
+            let state = self.state.borrow();
             if let Some(cached) = &state.cached {
                 let age = now.saturating_duration_since(cached.at);
-                if key.as_ref() == Some(&cached.key) && age <= max_age && age < MAX_AGE {
+                // Validate lazily when Status is consumed, then again at
+                // Completed. Computing here would duplicate the first read
+                // and would not protect a caller that holds the exchange.
+                if age < max_age && age < MAX_AGE {
                     return Box::new(CachedHit {
                         ready: self.clone(),
                         status: cached.status.clone(),
@@ -133,20 +147,22 @@ impl Ready {
                     });
                 }
             }
-            if key.is_some() {
-                if let Some(flight) = state.flight.as_ref().and_then(Weak::upgrade) {
-                    let shared = flight.borrow();
-                    if shared.key == key && shared.epoch == state.epoch && !shared.done {
-                        drop(shared);
-                        return Box::new(Subscriber {
-                            flight: Some(flight),
-                            cursor: 0,
-                            source: Source::Shared,
-                            stopped: false,
-                            cancelled_span: None,
-                            max_age,
-                        });
-                    }
+        }
+        let key = self.provider.readiness_key();
+        let mut state = self.state.borrow_mut();
+        if max_age != Duration::ZERO && key.is_some() {
+            if let Some(flight) = state.flight.as_ref().and_then(Weak::upgrade) {
+                let shared = flight.borrow();
+                if shared.key == key && shared.epoch == state.epoch && !shared.done {
+                    drop(shared);
+                    return Box::new(Subscriber {
+                        flight: Some(flight),
+                        cursor: 0,
+                        source: Source::Shared,
+                        stopped: false,
+                        cancelled_span: None,
+                        max_age,
+                    });
                 }
             }
         }
@@ -238,13 +254,6 @@ impl Provider for Ready {
             status: None,
             span: None,
             stopped: false,
-            observed: None,
-            key: None,
-            max_age: if freshness.max_age() == Duration::ZERO {
-                MAX_AGE
-            } else {
-                freshness.max_age()
-            },
         }))
     }
     fn invalidate_readiness(&self) {
@@ -391,7 +400,8 @@ impl Exchange for Subscriber {
         }
         let flight = self.flight.as_ref()?;
         let mut flight = flight.borrow_mut();
-        if self.cursor == flight.updates.len() {
+        let polled = self.cursor == flight.updates.len();
+        if polled {
             flight.poll(deadline);
         }
         let mut update = flight.updates.get(self.cursor)?.clone();
@@ -410,6 +420,35 @@ impl Exchange for Subscriber {
                 source: self.source,
                 age_ms: age_ms(age),
             });
+        }
+        if update == Update::Completed {
+            // A peer may have completed this flight while this subscriber
+            // paused. Revalidate retained terminal evidence at consumption;
+            // a newly polled completion already checked its fingerprint.
+            let reason = if flight
+                .observed
+                .is_some_and(|at| at.elapsed() >= self.max_age)
+            {
+                Some("READINESS_EXPIRED")
+            } else if flight
+                .state
+                .upgrade()
+                .is_some_and(|state| state.borrow().epoch != flight.epoch)
+                || (!polled
+                    && flight.key.is_some()
+                    && flight.provider.readiness_key() != flight.key)
+            {
+                Some("READINESS_CHANGED")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                update = Update::Failed(Failure {
+                    code: ErrorCode::ProviderFailed,
+                    reason,
+                    retryable: true,
+                });
+            }
         }
         Some(update)
     }
@@ -452,6 +491,11 @@ impl Exchange for CachedHit {
                     || self.ready.provider.readiness_key().as_ref() != Some(&self.key)
                     || self.ready.state.borrow().epoch != self.epoch
                 {
+                    // Discard only this stale cache. A newer epoch may have
+                    // already published different, valid evidence.
+                    if self.ready.state.borrow().epoch == self.epoch {
+                        invalidate(&self.ready.state);
+                    }
                     self.inner = Some(self.ready.check(self.freshness));
                     return self.inner.as_mut().unwrap().next(deadline);
                 }
@@ -468,13 +512,19 @@ impl Exchange for CachedHit {
             }
             1 => {
                 self.cursor = 2;
-                if self.at.elapsed() >= self.freshness.max_age()
-                    || self.ready.state.borrow().epoch != self.epoch
+                let reason = if self.at.elapsed() >= self.freshness.max_age() {
+                    Some("READINESS_EXPIRED")
+                } else if self.ready.state.borrow().epoch != self.epoch
                     || self.ready.provider.readiness_key().as_ref() != Some(&self.key)
                 {
+                    Some("READINESS_CHANGED")
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
                     Some(Update::Failed(Failure {
                         code: ErrorCode::ProviderFailed,
-                        reason: "READINESS_CHANGED",
+                        reason,
                         retryable: true,
                     }))
                 } else {
@@ -527,9 +577,6 @@ struct PreparedSend {
     status: Option<ProviderState>,
     span: Option<Span>,
     stopped: bool,
-    observed: Option<Instant>,
-    key: Option<Key>,
-    max_age: Duration,
 }
 
 impl Exchange for PreparedSend {
@@ -547,24 +594,12 @@ impl Exchange for PreparedSend {
         match update {
             Update::Status { ref status, .. } => {
                 self.status = Some(status.clone());
-                self.observed = Instant::now().checked_sub(Duration::from_millis(
-                    status.readiness.map_or(0, |r| r.age_ms),
-                ));
-                self.key = self.provider.readiness_key();
                 Some(update)
             }
             Update::Completed => {
+                // Both cached and shared checks validate age/configuration
+                // at this boundary, immediately before the turn is launched.
                 self.check.take();
-                if self.observed.is_some_and(|at| at.elapsed() >= self.max_age)
-                    || (self.key.is_some() && self.provider.readiness_key() != self.key)
-                {
-                    self.turn.take();
-                    return Some(Update::Failed(Failure {
-                        code: ErrorCode::ProviderFailed,
-                        reason: "READINESS_CHANGED",
-                        retryable: true,
-                    }));
-                }
                 let status = self.status.take();
                 let error = match status.as_ref().map(|s| (s.availability, s.authentication)) {
                     Some((Availability::Available, Authentication::Authenticated)) => None,
@@ -625,6 +660,7 @@ mod tests {
 
     struct Control {
         probes: Cell<usize>,
+        fingerprints: Cell<usize>,
         sends: Cell<usize>,
         cancels: Cell<usize>,
         pending: Cell<bool>,
@@ -650,6 +686,7 @@ mod tests {
             self.0.supported.get()
         }
         fn readiness_key(&self) -> Option<Key> {
+            self.0.fingerprints.set(self.0.fingerprints.get() + 1);
             Some(Key {
                 files: vec![(PathBuf::from("fixture"), None, Some(self.0.key.get()))],
                 capabilities: self.capabilities(),
@@ -707,6 +744,7 @@ mod tests {
     fn setup() -> (Ready, Rc<Control>) {
         let control = Rc::new(Control {
             probes: Cell::new(0),
+            fingerprints: Cell::new(0),
             sends: Cell::new(0),
             cancels: Cell::new(0),
             pending: Cell::new(false),
@@ -848,6 +886,146 @@ mod tests {
     }
 
     #[test]
+    fn cached_preparation_and_send_only_fingerprint_at_consumption_boundaries() {
+        let (ready, control) = setup();
+        drain(ready.prepare(CACHED));
+        assert_eq!(control.fingerprints.get(), 2);
+        control.fingerprints.set(0);
+        let check = ready.prepare(CACHED);
+        assert_eq!(control.fingerprints.get(), 0);
+        assert_eq!(source(&drain(check)), Source::Cached);
+        assert_eq!(control.fingerprints.get(), 2);
+        control.fingerprints.set(0);
+        let send = ready.send_with_readiness(turn(false), CACHED);
+        assert_eq!(control.fingerprints.get(), 0);
+        assert_eq!(drain(send).last(), Some(&Update::Completed));
+        assert_eq!(control.fingerprints.get(), 2);
+        assert_eq!((control.probes.get(), control.sends.get()), (1, 1));
+        control.fingerprints.set(0);
+        drain(ready.send_with_readiness(turn(true), CACHED));
+        assert_eq!(control.fingerprints.get(), 2);
+    }
+
+    #[test]
+    fn configuration_changes_before_a_cached_status_trigger_a_fresh_probe() {
+        let (ready, control) = setup();
+        drain(ready.prepare(CACHED));
+        let held = ready.prepare(CACHED);
+        control.key.set(1);
+        assert_eq!(source(&drain(held)), Source::Fresh);
+        assert_eq!(control.probes.get(), 2);
+    }
+
+    #[test]
+    fn shared_send_revalidates_a_peers_completed_evidence_before_launch() {
+        let (ready, control) = setup();
+        let mut first = ready.prepare(CACHED);
+        let mut send = ready.send_with_readiness(turn(false), CACHED);
+        assert!(matches!(
+            first.next(Instant::now()),
+            Some(Update::Status { .. })
+        ));
+        assert!(matches!(
+            send.next(Instant::now()),
+            Some(Update::Status { .. })
+        ));
+        assert_eq!(first.next(Instant::now()), Some(Update::Completed));
+        control.key.set(1);
+        assert!(
+            matches!(send.next(Instant::now()), Some(Update::Failed(error)) if error.reason == "READINESS_CHANGED")
+        );
+        assert_eq!(control.sends.get(), 0);
+    }
+
+    #[test]
+    fn fresh_send_returns_expired_when_status_ages_before_launch() {
+        let (ready, control) = setup();
+        let mut send = ready.send_with_readiness(turn(false), Freshness::Fresh);
+        assert!(matches!(
+            send.next(Instant::now()),
+            Some(Update::Status { .. })
+        ));
+        let flight = ready
+            .state
+            .borrow()
+            .flight
+            .as_ref()
+            .unwrap()
+            .upgrade()
+            .unwrap();
+        flight.borrow_mut().observed = Some(Instant::now() - MAX_AGE);
+        assert!(
+            matches!(send.next(Instant::now()), Some(Update::Failed(error)) if error.reason == "READINESS_EXPIRED")
+        );
+        assert_eq!(control.sends.get(), 0);
+    }
+
+    #[test]
+    fn cached_send_returns_expired_when_status_ages_before_launch() {
+        let (ready, control) = setup();
+        drain(ready.prepare(CACHED));
+        let state = ready.state.borrow();
+        let cached = state.cached.as_ref().unwrap();
+        let mut hit = CachedHit {
+            ready: ready.clone(),
+            status: cached.status.clone(),
+            at: cached.at,
+            key: cached.key.clone(),
+            freshness: CACHED,
+            inner: None,
+            cursor: 0,
+            epoch: state.epoch,
+        };
+        drop(state);
+        let Some(Update::Status { status, .. }) = hit.next(Instant::now()) else {
+            panic!("cached status")
+        };
+        hit.at = Instant::now() - MAX_AGE;
+        let mut send = PreparedSend {
+            check: Some(Box::new(hit)),
+            provider: Rc::clone(&ready.provider),
+            turn: Some(turn(false)),
+            running: None,
+            status: Some(status),
+            span: None,
+            stopped: false,
+        };
+        assert!(
+            matches!(send.next(Instant::now()), Some(Update::Failed(error)) if error.reason == "READINESS_EXPIRED")
+        );
+        assert_eq!(control.sends.get(), 0);
+    }
+
+    #[test]
+    fn shared_completed_evidence_can_expire_while_a_subscriber_pauses() {
+        let (ready, control) = setup();
+        let mut first = ready.prepare(CACHED);
+        let mut send = ready.send_with_readiness(turn(false), CACHED);
+        assert!(matches!(
+            first.next(Instant::now()),
+            Some(Update::Status { .. })
+        ));
+        assert!(matches!(
+            send.next(Instant::now()),
+            Some(Update::Status { .. })
+        ));
+        assert_eq!(first.next(Instant::now()), Some(Update::Completed));
+        let flight = ready
+            .state
+            .borrow()
+            .flight
+            .as_ref()
+            .unwrap()
+            .upgrade()
+            .unwrap();
+        flight.borrow_mut().observed = Some(Instant::now() - MAX_AGE);
+        assert!(
+            matches!(send.next(Instant::now()), Some(Update::Failed(error)) if error.reason == "READINESS_EXPIRED")
+        );
+        assert_eq!(control.sends.get(), 0);
+    }
+
+    #[test]
     fn probe_completion_does_not_extend_the_lifetime_of_old_status() {
         let (ready, _) = setup();
         let mut held = ready.prepare(CACHED);
@@ -864,7 +1042,9 @@ mod tests {
             .upgrade()
             .unwrap();
         flight.borrow_mut().observed = Some(Instant::now() - MAX_AGE);
-        assert_eq!(held.next(Instant::now()), Some(Update::Completed));
+        assert!(
+            matches!(held.next(Instant::now()), Some(Update::Failed(error)) if error.reason == "READINESS_EXPIRED")
+        );
         assert_eq!(source(&drain(ready.prepare(CACHED))), Source::Fresh);
     }
 
