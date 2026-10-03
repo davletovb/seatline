@@ -201,10 +201,18 @@ impl Telemetry {
     }
 
     /// A request reached the hub.
+    ///
+    /// The method is whatever the client sent, so only the methods the broker
+    /// serves are kept by name: anything else is `unknown`, and no record can
+    /// carry text a client chose beyond its request ID.
     pub fn received(&mut self, connection: u64, id: &str, app: &str, provider: &str, method: &str) {
         if !self.enabled() || self.waiting.len() >= MAX_WAITING {
             return;
         }
+        let method = match method {
+            "send" | "status" | "forget" | "cleanup" => method,
+            _ => "unknown",
+        };
         self.waiting.insert(
             (connection, id.to_owned()),
             Waiting {
@@ -249,6 +257,9 @@ impl Telemetry {
 
     /// A scheduled turn ended: write its record.
     pub fn ended(&mut self, turn: TurnId, reason: &EndReason, supervisor: &mut Supervisor) {
+        if !self.enabled() {
+            return;
+        }
         let identity = self.scheduled.remove(&turn);
         let Some(timeline) = supervisor.take_timeline(turn) else {
             return;
@@ -369,6 +380,27 @@ mod tests {
         for (reason, outcome, detail) in cases {
             assert_eq!(outcome_of(&reason), (outcome, detail), "{reason:?}");
         }
+    }
+
+    #[test]
+    fn a_method_a_client_made_up_never_reaches_a_record() {
+        let memory = Arc::new(Memory::new());
+        let mut telemetry = Telemetry::new(memory.clone());
+        let invented = "x".repeat(4096);
+        telemetry.received(1, "r", "app", "codex", &invented);
+        telemetry.unscheduled(1, "r", &Update::Stopped);
+        telemetry.received(1, "s", "app", "codex", "status");
+        telemetry.unscheduled(1, "s", &Update::Stopped);
+        let records = memory.take();
+        let methods: Vec<&str> = records
+            .iter()
+            .map(|record| match record {
+                Record::Request(record) => record.method.as_str(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(methods, ["unknown", "status"]);
+        assert!(!serde_json::to_string(&records).unwrap().contains("xxxx"));
     }
 
     #[test]

@@ -295,7 +295,7 @@ pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
             requests: plan.requests.clone(),
             stop_file: plan.is_background().then(|| stop_file.clone()),
         };
-        children.push(lab.spawn_app(&instance, &apps, 0, &spec)?);
+        children.push(lab.spawn_app(&instance, &apps, crate::lab::WARM_IDLE_SECS, &spec)?);
     }
     // Every application is ready: start them together.
     for child in &mut children {

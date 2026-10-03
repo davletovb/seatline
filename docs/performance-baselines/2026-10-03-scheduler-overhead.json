@@ -1,0 +1,80 @@
+{
+ "what": "seatline-bench overhead (default arguments), release build, three consecutive invocations; revision 071ab6d662ca, clean tree",
+ "runs": [
+  {
+   "build": "release",
+   "ns_per_update": {
+    "timing_off": {
+     "max": 145,
+     "mean": 115,
+     "min": 101,
+     "n": 15,
+     "p50": 107,
+     "p95": 145
+    },
+    "timing_on": {
+     "max": 165,
+     "mean": 127,
+     "min": 115,
+     "n": 15,
+     "p50": 118,
+     "p95": 165
+    }
+   },
+   "rounds": 15,
+   "timing_on_minus_off_p50_ns": 11,
+   "turns": 200,
+   "updates_per_turn": 200
+  },
+  {
+   "build": "release",
+   "ns_per_update": {
+    "timing_off": {
+     "max": 115,
+     "mean": 105,
+     "min": 103,
+     "n": 15,
+     "p50": 105,
+     "p95": 115
+    },
+    "timing_on": {
+     "max": 129,
+     "mean": 118,
+     "min": 115,
+     "n": 15,
+     "p50": 117,
+     "p95": 129
+    }
+   },
+   "rounds": 15,
+   "timing_on_minus_off_p50_ns": 12,
+   "turns": 200,
+   "updates_per_turn": 200
+  },
+  {
+   "build": "release",
+   "ns_per_update": {
+    "timing_off": {
+     "max": 144,
+     "mean": 134,
+     "min": 131,
+     "n": 15,
+     "p50": 133,
+     "p95": 144
+    },
+    "timing_on": {
+     "max": 169,
+     "mean": 150,
+     "min": 144,
+     "n": 15,
+     "p50": 148,
+     "p95": 169
+    }
+   },
+   "rounds": 15,
+   "timing_on_minus_off_p50_ns": 15,
+   "turns": 200,
+   "updates_per_turn": 200
+  }
+ ]
+}

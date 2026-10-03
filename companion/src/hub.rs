@@ -1339,6 +1339,20 @@ mod tests {
     }
 
     #[test]
+    fn a_method_nobody_serves_is_a_failed_record_that_does_not_echo_it() {
+        let (mut hub, _output, memory) = telemetry_setup();
+        request(&mut hub, 1, "odd", "shell-me-a-secret", Value::Null);
+        ticks(&mut hub, 4);
+        let records = requests(&memory);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].method, "unknown");
+        assert_eq!(records[0].outcome, Outcome::Failed);
+        assert_eq!(records[0].detail, Some("INVALID_REQUEST"));
+        assert!(!serde_json::to_string(&records).unwrap().contains("secret"));
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
     fn with_telemetry_off_the_hub_keeps_no_timelines() {
         let (mut hub, mut output) = setup();
         request(&mut hub, 1, "a", "send", turn(None));

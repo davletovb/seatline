@@ -10,7 +10,8 @@ It provides:
 - `seatline-scheduler`: bounded concurrent turn scheduling and panic isolation;
 - `seatline-service`: a threaded in-process service API;
 - `seatline-companion`: one shared native installation with app-scoped IPC and encrypted outbound web transport;
-- `seatline-fake-provider`, `seatline-tests`, and `seatline-fuzz`: deterministic test and fuzz infrastructure.
+- `seatline-fake-provider`, `seatline-tests`, and `seatline-fuzz`: deterministic test and fuzz infrastructure;
+- `seatline-bench`: a reproducible benchmark harness for request overhead (fake providers by default, live providers opt-in).
 
 Applications own conversation/product policy. Seatline owns provider execution mechanics.
 
@@ -41,6 +42,23 @@ cargo +nightly fuzz run --fuzz-dir seatline-fuzz stream_lines
 ```
 
 Real-provider smoke tests live under `seatline-tests/tests/live_*.rs` and are opt-in.
+
+## Measuring performance
+
+Request overhead is measured, not guessed. The broker can record privacy-safe
+[phase timings](docs/telemetry.md) for each request when asked
+(`SEATLINE_TELEMETRY_FILE`), and `seatline-bench` runs named scenarios against
+the real broker and joins what an application saw with what the broker recorded:
+
+```bash
+cargo build --release --locked -p seatline-companion -p seatline-bench
+target/release/seatline-bench run --output after.json
+target/release/seatline-bench compare before.json after.json
+```
+
+[Measuring performance](docs/performance-measurement.md) gives the method, what
+a measurement may and may not be used to claim, the baseline, and the budgets it
+sets. Live-provider runs are opt-in and send real prompts.
 
 ## Provenance
 

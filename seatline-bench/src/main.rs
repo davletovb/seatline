@@ -219,7 +219,7 @@ fn run_scenarios(args: &[String]) -> io::Result<()> {
     let mut broker = None;
     for name in &chosen {
         eprintln!("running {name} ...");
-        let mut lab = Lab::new(&settings, name)?;
+        let mut lab = Lab::new(&settings)?;
         results.push(scenarios::run(&mut lab, name, params)?);
         broker = broker.or(lab.broker_record.clone());
     }

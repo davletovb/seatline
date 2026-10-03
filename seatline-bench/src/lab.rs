@@ -40,6 +40,11 @@ pub struct Settings {
     pub keep: bool,
 }
 
+/// How long a broker the harness starts for a warm scenario may sit idle before
+/// it leaves. It is never idle that long while a scenario runs, and a broker
+/// whose harness was killed does not outlive it for long.
+pub const WARM_IDLE_SECS: u64 = 120;
+
 /// The default place for scratch directories: private to the user.
 pub fn default_scratch() -> PathBuf {
     let base = if cfg!(windows) {
@@ -92,14 +97,13 @@ impl Drop for Lab {
 }
 
 impl Lab {
-    pub fn new(settings: &Settings, name: &str) -> io::Result<Self> {
+    pub fn new(settings: &Settings) -> io::Result<Self> {
         // Short: a socket's path has a length limit.
         let scratch = settings.scratch.join(format!(
             "{}-{}",
             std::process::id(),
             &config::random_token()?[..6]
         ));
-        let _ = name;
         // A Unix socket's path has a length limit (104 bytes on macOS), and the
         // broker's socket is in a data directory below this one. Say so now
         // rather than let the broker fail to bind.
@@ -225,7 +229,7 @@ impl Lab {
     pub fn start_broker(&self, instance: &Instance, apps: &[&str]) -> io::Result<Broker> {
         let child = Command::new(&self.settings.companion)
             .arg("serve")
-            .envs(self.environment(instance, apps, 0)?)
+            .envs(self.environment(instance, apps, WARM_IDLE_SECS)?)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

@@ -14,6 +14,11 @@ use seatline_core::telemetry::Timeline;
 
 const STOP_SLACK: Duration = Duration::from_secs(1);
 
+/// Timelines of ended turns kept for the host to take. A host that starts timed
+/// turns takes each one when its turn ends; one that never does loses the
+/// oldest past this many instead of growing without bound.
+const MAX_FINISHED: usize = 4096;
+
 pub type TurnId = u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,7 +170,8 @@ impl Drop for Running {
 pub struct Scheduler {
     next_id: TurnId,
     running: Vec<Running>,
-    /// Timelines of turns that ended, until the host takes them.
+    /// Timelines of turns that ended, until the host takes them (at most
+    /// [`MAX_FINISHED`]).
     finished: BTreeMap<TurnId, Timeline>,
     #[cfg(test)]
     panic_next_poll: bool,
@@ -254,6 +260,15 @@ impl Scheduler {
     /// started with a timeline, or whose timeline was taken, has none.
     pub fn take_timeline(&mut self, id: TurnId) -> Option<Timeline> {
         self.finished.remove(&id)
+    }
+
+    /// Keeps an ended turn's timeline for its host, dropping the oldest one a
+    /// host has left untaken once there are too many.
+    fn keep(&mut self, id: TurnId, timeline: Timeline) {
+        self.finished.insert(id, timeline);
+        while self.finished.len() > MAX_FINISHED {
+            self.finished.pop_first();
+        }
     }
 
     pub fn contains(&self, id: TurnId) -> bool {
@@ -364,7 +379,7 @@ impl Scheduler {
                 let mut running = self.running.remove(index);
                 let id = running.id;
                 if let Some(timeline) = running.finish_timeline() {
-                    self.finished.insert(id, timeline);
+                    self.keep(id, timeline);
                 }
                 running.drop_exchange();
                 out.push(Event::Ended {
@@ -738,6 +753,27 @@ mod tests {
         assert!(
             scheduler.take_timeline(id).is_none(),
             "a timeline is taken once"
+        );
+    }
+
+    #[test]
+    fn timelines_a_host_never_takes_are_bounded() {
+        let mut scheduler = Scheduler::new();
+        let mut first = None;
+        for _ in 0..MAX_FINISHED + 50 {
+            let id = scheduler.start_timed(
+                Box::new(Scripted::new([Update::Completed])),
+                Some(limits()),
+                Duration::ZERO,
+                timeline(),
+            );
+            first.get_or_insert(id);
+            let _ = scheduler.poll(Duration::ZERO);
+        }
+        assert_eq!(scheduler.finished.len(), MAX_FINISHED);
+        assert!(
+            scheduler.take_timeline(first.unwrap()).is_none(),
+            "the oldest was the one dropped"
         );
     }
 
