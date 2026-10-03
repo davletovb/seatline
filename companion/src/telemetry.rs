@@ -43,7 +43,8 @@ pub struct JsonLines {
 
 impl JsonLines {
     /// Opens `path` for appending, creating it readable only by its owner where
-    /// the platform has such permissions.
+    /// the platform has such permissions, and making a file that already
+    /// existed readable only by its owner too. Only a regular file is accepted.
     pub fn open(path: &Path) -> io::Result<Self> {
         let mut options = OpenOptions::new();
         options.create(true).append(true);
@@ -53,7 +54,22 @@ impl JsonLines {
             options.mode(0o600);
         }
         let file = options.open(path)?;
-        let written = file.metadata()?.len();
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::other("the telemetry path is not a regular file"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // The creation mode only applies to a file that did not exist; one
+            // that did keeps whatever mode it had, and records name apps and
+            // requests. Tighten it, or refuse (so that telemetry is off) if it
+            // is not the user's to tighten.
+            if metadata.permissions().mode() & 0o077 != 0 {
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+        }
+        let written = metadata.len();
         let (records, queue) = mpsc::sync_channel(QUEUE);
         let dropped = Arc::new(AtomicU64::new(0));
         let lost = Arc::clone(&dropped);
@@ -178,6 +194,8 @@ pub struct Telemetry {
     sink: Option<Arc<dyn Sink>>,
     waiting: HashMap<(u64, String), Waiting>,
     scheduled: HashMap<TurnId, Identity>,
+    /// For a scheduled turn the hub ended itself, what its client was told.
+    told: HashMap<TurnId, (Outcome, Option<&'static str>)>,
 }
 
 impl Telemetry {
@@ -186,6 +204,7 @@ impl Telemetry {
             sink: None,
             waiting: HashMap::new(),
             scheduled: HashMap::new(),
+            told: HashMap::new(),
         }
     }
 
@@ -255,11 +274,23 @@ impl Telemetry {
         self.scheduled.insert(turn, identity);
     }
 
-    /// A scheduled turn ended: write its record.
+    /// The hub ended a scheduled turn's request itself, before the scheduler
+    /// did, by sending its client a terminal update (a session-ledger failure).
+    /// The record then says what the client was told.
+    pub fn client_saw(&mut self, turn: TurnId, update: &Update) {
+        if self.enabled() {
+            self.told.insert(turn, outcome_of_update(update));
+        }
+    }
+
+    /// A scheduled turn ended: write its record. The outcome is what the client
+    /// was told when the hub ended the request itself, and otherwise how the
+    /// scheduler ended the turn.
     pub fn ended(&mut self, turn: TurnId, reason: &EndReason, supervisor: &mut Supervisor) {
         if !self.enabled() {
             return;
         }
+        let told = self.told.remove(&turn);
         let identity = self.scheduled.remove(&turn);
         let Some(timeline) = supervisor.take_timeline(turn) else {
             return;
@@ -267,7 +298,7 @@ impl Telemetry {
         let Some(identity) = identity else {
             return;
         };
-        let (outcome, detail) = outcome_of(reason);
+        let (outcome, detail) = told.unwrap_or_else(|| outcome_of(reason));
         self.write(RequestRecord::new(identity, &timeline, outcome, detail));
     }
 
@@ -434,6 +465,35 @@ mod tests {
             telemetry.received(1, &index.to_string(), "app", "codex", "send");
         }
         assert_eq!(telemetry.in_flight(), MAX_WAITING);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_telemetry_file_that_already_exists_is_made_private_before_it_is_appended_to() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "seatline-telemetry-perm-{}.jsonl",
+            crate::config::random_token().unwrap()
+        ));
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let sink = JsonLines::open(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "an existing file was left readable by others");
+        drop(sink);
+
+        // A new file is private from the moment it exists.
+        let fresh = path.with_extension("fresh.jsonl");
+        let sink = JsonLines::open(&fresh).unwrap();
+        let mode = std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        drop(sink);
+
+        // Only a regular file is appended to: a directory is not a log.
+        assert!(JsonLines::open(&std::env::temp_dir()).is_err());
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&fresh);
     }
 
     #[test]

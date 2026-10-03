@@ -502,6 +502,12 @@ impl Hub {
                         }
                         other => other,
                     };
+                    if update.is_terminal() {
+                        // The hub ended this request itself and will stop the
+                        // exchange: the client was told this, whatever the
+                        // scheduler later ends with.
+                        self.telemetry.client_saw(turn_id, &update);
+                    }
                     active.terminal_sent = update.is_terminal();
                     self.event(&active.request, update);
                     self.active.insert(turn_id, active);
@@ -1526,6 +1532,28 @@ mod tests {
         assert_eq!(records[0].outcome, Outcome::Failed);
         assert_eq!(records[0].detail, Some("INVALID_REQUEST"));
         assert!(!serde_json::to_string(&records).unwrap().contains("secret"));
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn a_ledger_failure_is_recorded_as_the_failure_the_client_was_told() {
+        let (mut hub, mut output, memory) = telemetry_setup();
+        fill_ledger(&mut hub, "first", MAX_APP_SESSIONS);
+        // The turn is persistent, so its session handle needs a ledger slot.
+        request(&mut hub, 1, "full", "send", turn(None));
+        ticks(&mut hub, 8);
+        let told = drain(&mut output[0]);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0]["event"]["type"], "failed");
+        let records = requests(&memory);
+        assert_eq!(records.len(), 1, "{records:?}");
+        // The scheduler may have seen the exchange complete already, or end it
+        // as cancelled after the hub stopped it: either way the record says what
+        // the client was told, not how the exchange ended.
+        assert_eq!(records[0].outcome, Outcome::Failed);
+        assert_eq!(records[0].detail, Some("SESSION_LIMIT_REACHED"));
+        assert_eq!(records[0].phases_us.sum(), records[0].total_us);
+        assert_eq!(hub.telemetry.in_flight(), 0);
         std::fs::remove_dir_all(&hub.root).unwrap();
     }
 

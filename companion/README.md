@@ -125,8 +125,9 @@ exits when idle). It then appends one JSON line per request with durations
 for each phase (queue wait, sign-in probe, provider initialization, first text,
 completion, cleanup) and per connection for the handshake, and no prompt,
 answer, token, account name, path or session handle. The file is created
-readable only by its owner, written off the request path through a bounded
-queue, and stops growing at 16 MiB. See [phase telemetry](../docs/telemetry.md)
+readable only by its owner (one that already exists is tightened to that),
+written off the request path through a bounded queue, and stops growing at
+16 MiB. See [phase telemetry](../docs/telemetry.md)
 for the exact boundaries, what is missing per provider, and the format.
 
 ## What Seatline does and does not guarantee
