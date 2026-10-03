@@ -437,6 +437,36 @@ fn dropping_an_exchange_cancels_its_request_and_frees_its_place() {
 }
 
 #[test]
+fn a_finished_exchange_its_consumer_keeps_does_not_hold_a_place_in_flight() {
+    let broker = FakeBroker::start(&["app"], by_label());
+    let client = broker.client_with(
+        "app",
+        Limits {
+            max_in_flight: 1,
+            ..Limits::default()
+        },
+    );
+    let mut first = request(&client, "quick");
+    assert_eq!(drain(first.as_mut()).last(), Some(&Update::Completed));
+    // `first` is still held, and nothing is in flight: the next is admitted.
+    let mut second = request(&client, "quick");
+    assert_eq!(drain(second.as_mut()).last(), Some(&Update::Completed));
+    drop((first, second));
+
+    // However many finished exchanges are kept, the default limit is never
+    // used up by them.
+    let client = broker.client("app");
+    let kept: Vec<_> = (0..Limits::default().max_in_flight + 6)
+        .map(|_| {
+            let mut exchange = request(&client, "quick");
+            assert_eq!(drain(exchange.as_mut()).last(), Some(&Update::Completed));
+            exchange
+        })
+        .collect();
+    assert_eq!(kept.len(), Limits::default().max_in_flight + 6);
+}
+
+#[test]
 fn a_slow_consumer_is_stopped_alone_with_what_it_was_given_intact() {
     const BOUND: usize = 32 * 1024;
     let handler: Handler = Arc::new(|ctx, frame| {

@@ -192,7 +192,7 @@ impl RemoteClient {
             updates,
             backlog,
             commands: self.shared.commands.clone(),
-            _slot: slot,
+            slot: Some(slot),
             ended: false,
         })
     }
@@ -237,8 +237,8 @@ fn disconnected() -> Update {
     ))
 }
 
-/// One of the client's places for a request in flight, freed when its
-/// exchange is dropped.
+/// One of the client's places for a request in flight, freed when the request
+/// ends or its exchange is dropped.
 struct Slot(Arc<AtomicUsize>);
 
 impl Slot {
@@ -288,7 +288,10 @@ struct Remote {
     updates: mpsc::Receiver<Update>,
     backlog: Arc<Backlog>,
     commands: tokio_mpsc::UnboundedSender<Command>,
-    _slot: Slot,
+    /// The request's place among those in flight, until it ends or the
+    /// exchange is dropped, whichever is first: a finished exchange that its
+    /// consumer keeps must not count against the client's limit.
+    slot: Option<Slot>,
     ended: bool,
 }
 
@@ -303,13 +306,17 @@ impl Exchange for Remote {
         {
             Ok(update) => {
                 self.backlog.read(&update);
-                self.ended = update.is_terminal();
+                if update.is_terminal() {
+                    self.ended = true;
+                    self.slot = None;
+                }
                 Some(update)
             }
             Err(mpsc::RecvTimeoutError::Timeout) => None,
             // The client's thread is gone without having ended the request.
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 self.ended = true;
+                self.slot = None;
                 Some(disconnected())
             }
         }
