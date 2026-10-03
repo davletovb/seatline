@@ -84,6 +84,10 @@ pub struct Counts {
     /// What the broker's telemetry counted for the measured requests.
     pub broker_probes: u64,
     pub broker_launches: u64,
+    /// How many times applications started the companion, for a scenario that
+    /// counts them.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub companion_starts: Option<u64>,
 }
 
 /// A summary line for a metric, in milliseconds with one decimal.
@@ -182,9 +186,12 @@ pub fn markdown(report: &Report) -> String {
             let _ = writeln!(out);
         }
         let counts = &scenario.counts;
+        let starts = counts.companion_starts.map_or_else(String::new, |starts| {
+            format!("; applications started the companion {starts} times")
+        });
         let _ = writeln!(
             out,
-            "\nRequests {}; broker counted {} sign-in probes and {} provider launches for the measured ones{}.\n",
+            "\nRequests {}; broker counted {} sign-in probes and {} provider launches for the measured ones{}{starts}.\n",
             counts.requests_total,
             counts.broker_probes,
             counts.broker_launches,
@@ -398,5 +405,10 @@ mod tests {
         assert!(text.contains("### `cold-broker`"));
         assert!(text.contains("| bench-a | single | 2 / 0 |"));
         assert!(text.contains("only a test"));
+        // Starts of the companion are only said for a scenario that counts them.
+        assert!(!text.contains("started the companion"));
+        let mut counted = report(&[1_000]);
+        counted.scenarios[0].counts.companion_starts = Some(7);
+        assert!(markdown(&counted).contains("applications started the companion 7 times"));
     }
 }

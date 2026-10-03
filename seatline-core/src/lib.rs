@@ -3,6 +3,7 @@
 //! Browser transport, such as Chrome Native Messaging framing, and protocol
 //! policy belong to the application.
 
+pub mod backlog;
 pub mod discovery;
 pub mod exchange;
 pub mod process;
