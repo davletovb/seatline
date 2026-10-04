@@ -416,10 +416,14 @@ impl Provider for Gemini {
             return Box::new(Scripted::failed(NO_WORKSPACE));
         };
         let agent = agent_name(&self.namespace, native_search);
-        let cleanup_permit = match self.cleanup_worker.as_deref().map_or_else(
-            || Worker::cleanup().and_then(Worker::reserve),
-            Worker::reserve,
-        ) {
+        let worker = match self.cleanup_worker.as_deref() {
+            Some(worker) => worker,
+            None => match Worker::cleanup() {
+                Ok(worker) => worker,
+                Err(_) => return Box::new(Scripted::failed(CLEANUP_BACKLOG_FULL)),
+            },
+        };
+        let cleanup_permit = match worker.reserve() {
             Ok(permit) => permit,
             Err(_) => return Box::new(Scripted::failed(CLEANUP_BACKLOG_FULL)),
         };
@@ -433,15 +437,29 @@ impl Provider for Gemini {
             .cleanup_group
             .clone()
             .unwrap_or_else(|| UNGROUPED.to_owned());
-        // A restart can retry even a cancelled run whose init was never read.
-        let marker = match self
-            .cleanup_dir
-            .as_deref()
-            .map(|dir| record_workspace(dir, &cleanup_group, workspace.path()))
-            .transpose()
-        {
-            Ok(marker) => marker,
-            Err(_) => return Box::new(Scripted::failed(CLEANUP_FAILED)),
+        // Persist before launch, away from the hub. A second reservation covers
+        // initialization; the original permit remains reserved for deletion.
+        let (marker, persistence) = match self.cleanup_dir.clone() {
+            Some(dir) => {
+                let marker = match workspace_marker(&dir, &cleanup_group, workspace.path()) {
+                    Ok(marker) => marker,
+                    Err(_) => return Box::new(Scripted::failed(CLEANUP_FAILED)),
+                };
+                let permit = match worker.reserve() {
+                    Ok(permit) => permit,
+                    Err(_) => return Box::new(Scripted::failed(CLEANUP_BACKLOG_FULL)),
+                };
+                let path = workspace.path().to_owned();
+                let group = cleanup_group.clone();
+                let result = match permit
+                    .submit(move || record_workspace(&dir, &group, &path).map(|_| ()))
+                {
+                    Ok(result) => result,
+                    Err(_) => return Box::new(Scripted::failed(CLEANUP_FAILED)),
+                };
+                (Some(marker), Some(result))
+            }
+            None => (None, None),
         };
         // The system prompt is in the agent, not in the prompt.
         let prompt = prompt::render(None, &request.messages, request.tools);
@@ -454,20 +472,13 @@ impl Provider for Gemini {
 ";
         let args = agy_args(&agent, request.model.as_deref());
         let spec = self.launch.command(workspace.path(), &executable, args);
-        let Ok(mut process) = Process::spawn(&spec) else {
-            return Box::new(Scripted::failed(START_FAILED));
-        };
-        let mut launched = VecDeque::from([Update::Launched]);
-        if process.write(input.as_bytes()).is_err() {
-            process.kill();
-            return Box::new(Scripted::failed(START_FAILED));
-        }
-        process.close_stdin();
-
         Box::new(Turn {
-            stream: Some(
-                LineStream::new(process, MAX_LINE_BYTES).keeping_stderr_tail(STDERR_TAIL_BYTES),
-            ),
+            stream: None,
+            pending_launch: Some(PendingLaunch {
+                persistence,
+                spec,
+                input,
+            }),
             cleanup_permit: Some(cleanup_permit),
             cleanup_result: None,
             terminal: None,
@@ -476,7 +487,7 @@ impl Provider for Gemini {
             home: self.launch.home.clone(),
             cleanup_dir: self.cleanup_dir.clone(),
             pending_cleanups: Rc::clone(&self.pending_cleanups),
-            queue: std::mem::take(&mut launched),
+            queue: VecDeque::new(),
             cleanup_group,
             expected_agent: agent,
             initialized: false,
@@ -517,13 +528,28 @@ impl Provider for Gemini {
         let work_group = group.clone();
         Cleanup::new(
             move || {
+                let mut first_error = None;
                 if let Some(dir) = cleanup_dir.as_deref() {
                     let group_dir = cleanup_conversation_dir(dir, &work_group)?;
                     match fs::read_dir(&group_dir) {
                         Ok(entries) => {
+                            let base = fs::canonicalize(workspace::prepare(&workspace_base)?)?;
                             for entry in entries {
-                                let entry = entry?;
-                                if !entry.file_type()?.is_file()
+                                let entry = match entry {
+                                    Ok(entry) => entry,
+                                    Err(error) => {
+                                        first_error.get_or_insert(error);
+                                        continue;
+                                    }
+                                };
+                                let kind = match entry.file_type() {
+                                    Ok(kind) => kind,
+                                    Err(error) => {
+                                        first_error.get_or_insert(error);
+                                        continue;
+                                    }
+                                };
+                                if !kind.is_file()
                                     || !entry
                                         .file_name()
                                         .to_string_lossy()
@@ -531,30 +557,41 @@ impl Provider for Gemini {
                                 {
                                     continue;
                                 }
-                                let bytes = fs::read(entry.path())?;
-                                let workspace: PathBuf =
-                                    serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-                                // Use the same platform-specific path form as
-                                // launch (Windows keeps the non-verbatim form).
-                                if workspace.parent()
-                                    != Some(workspace::prepare(&workspace_base)?.as_path())
-                                    || !workspace
-                                        .file_name()
-                                        .is_some_and(|s| s.to_string_lossy().starts_with("turn-"))
-                                {
-                                    return Err(io::Error::other(
-                                        "cleanup workspace outside app scope",
-                                    ));
+                                let result = (|| {
+                                    let bytes = fs::read(entry.path())?;
+                                    let workspace: PathBuf = match serde_json::from_slice(&bytes) {
+                                        Ok(path) => path,
+                                        Err(error) => {
+                                            quarantine_marker(dir, &work_group, &entry.path())?;
+                                            return Err(io::Error::other(error));
+                                        }
+                                    };
+                                    if let Err(error) =
+                                        validate_cleanup_workspace(&workspace, &base)
+                                    {
+                                        // Keep invalid evidence outside the active group. It
+                                        // must never block other markers or touch that path.
+                                        if matches!(
+                                            error.kind(),
+                                            io::ErrorKind::InvalidInput | io::ErrorKind::NotFound
+                                        ) {
+                                            quarantine_marker(dir, &work_group, &entry.path())?;
+                                        }
+                                        return Err(error);
+                                    }
+                                    clean_runtime(
+                                        home.as_deref(),
+                                        Some(dir),
+                                        &work_group,
+                                        &workspace,
+                                        None,
+                                    )?;
+                                    forget::remove(&workspace)?;
+                                    forget::remove(&entry.path())
+                                })();
+                                if let Err(error) = result {
+                                    first_error.get_or_insert(error);
                                 }
-                                clean_runtime(
-                                    home.as_deref(),
-                                    Some(dir),
-                                    &work_group,
-                                    &workspace,
-                                    None,
-                                )?;
-                                forget::remove(&workspace)?;
-                                forget::remove(&entry.path())?;
                             }
                         }
                         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -575,8 +612,24 @@ impl Provider for Gemini {
                         )
                     })?;
                     for id in &ids {
-                        remove_antigravity_transcript(home, id)?;
+                        match remove_antigravity_transcript(home, id) {
+                            Ok(()) => {
+                                if let Some(dir) = cleanup_dir.as_deref() {
+                                    if let Err(error) =
+                                        forget_cleanup_id_record(dir, &work_group, id)
+                                    {
+                                        first_error.get_or_insert(error);
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                first_error.get_or_insert(error);
+                            }
+                        }
                     }
+                }
+                if let Some(error) = first_error {
+                    return Err(error);
                 }
                 if let Some(dir) = cleanup_dir.as_deref() {
                     forget_cleanup_record(dir, &work_group)?;
@@ -588,6 +641,36 @@ impl Provider for Gemini {
             },
         )
     }
+}
+
+fn validate_cleanup_workspace(path: &Path, canonical_base: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("invalid cleanup workspace"))?;
+    if !path
+        .file_name()
+        .is_some_and(|s| s.to_string_lossy().starts_with("turn-"))
+        || fs::canonicalize(parent)? != canonical_base
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cleanup workspace outside app scope",
+        ));
+    }
+    // Validate the stored form too, but only after proving it names our base.
+    // Canonicalizing both existing parents handles Windows case, separators
+    // and verbatim prefixes without changing the string used in transcripts.
+    workspace::prepare(parent)?;
+    Ok(())
+}
+
+fn quarantine_marker(base: &Path, group: &str, marker: &Path) -> io::Result<()> {
+    let dir = base.join(".quarantine").join(group);
+    private_fs::create_private_dir(&dir)?;
+    let name = marker
+        .file_name()
+        .ok_or_else(|| io::Error::other("invalid marker"))?;
+    fs::rename(marker, dir.join(name))
 }
 
 fn status_update(
@@ -755,10 +838,17 @@ impl Drop for TurnWorkspace {
     }
 }
 
+struct PendingLaunch {
+    persistence: Option<Receiver<io::Result<()>>>,
+    spec: ProcessSpec,
+    input: String,
+}
+
 struct Turn {
     // Keep the process before the workspace so dropping a live turn stops the
     // child before its cwd is removed.
     stream: Option<LineStream>,
+    pending_launch: Option<PendingLaunch>,
     cleanup_permit: Option<Permit>,
     cleanup_result: Option<Receiver<io::Result<()>>>,
     terminal: Option<Update>,
@@ -796,6 +886,48 @@ struct Turn {
 }
 
 impl Turn {
+    /// Do not launch until the crash-recovery marker is durable. Startup errors
+    /// use the same deletion boundary as normal turns, including a child that
+    /// started but could not accept its first input.
+    fn launch(&mut self, deadline: Instant) -> bool {
+        let Some(launch) = self.pending_launch.take() else {
+            return true;
+        };
+        if let Some(result) = &launch.persistence {
+            match result.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(Ok(())) => {}
+                Err(RecvTimeoutError::Timeout) => {
+                    self.pending_launch = Some(launch);
+                    return false;
+                }
+                _ => {
+                    self.terminal = Some(Update::Failed(CLEANUP_FAILED));
+                    self.cleanup_runtime();
+                    return true;
+                }
+            }
+        }
+        let mut process = match Process::spawn(&launch.spec) {
+            Ok(process) => process,
+            Err(_) => {
+                self.terminal = Some(Update::Failed(START_FAILED));
+                self.cleanup_runtime();
+                return true;
+            }
+        };
+        let failed = process.write(launch.input.as_bytes()).is_err();
+        process.close_stdin();
+        self.stream =
+            Some(LineStream::new(process, MAX_LINE_BYTES).keeping_stderr_tail(STDERR_TAIL_BYTES));
+        if failed {
+            self.terminal = Some(Update::Failed(START_FAILED));
+            self.cleanup_runtime();
+        } else {
+            self.queue.push_back(Update::Launched);
+        }
+        true
+    }
+
     fn fail(&mut self, error: ErrorBody) {
         self.queue.clear();
         self.outcome = Some(Err(error));
@@ -1014,7 +1146,12 @@ impl Turn {
     /// The process is gone before this job can scan or remove its transcript.
     /// Keep the terminal boundary pending until deletion succeeds or fails.
     fn cleanup_runtime(&mut self) {
+        let launched = self.stream.is_some();
         self.stream.take();
+        let persistence = self
+            .pending_launch
+            .take()
+            .and_then(|launch| launch.persistence);
         let Some(workspace) = self.workspace.take() else {
             return;
         };
@@ -1026,13 +1163,22 @@ impl Turn {
         if let Some(permit) = self.cleanup_permit.take() {
             self.cleanup_result = permit
                 .submit(move || {
-                    let result = clean_runtime(
-                        home.as_deref(),
-                        dir.as_deref(),
-                        &group,
-                        workspace.path(),
-                        id.as_deref(),
-                    );
+                    // A cancelled/dropped pre-launch turn must wait for its
+                    // marker job before deleting that marker and workspace.
+                    if let Some(result) = persistence {
+                        let _ = result.recv();
+                    }
+                    let result = if launched {
+                        clean_runtime(
+                            home.as_deref(),
+                            dir.as_deref(),
+                            &group,
+                            workspace.path(),
+                            id.as_deref(),
+                        )
+                    } else {
+                        Ok(())
+                    };
                     if result.is_ok() {
                         forget::remove(workspace.path())?;
                         if let Some(marker) = marker {
@@ -1059,9 +1205,11 @@ impl Turn {
                 Update::Failed(MALFORMED_OUTPUT)
             }
             None => {
-                let failure = output::provider_failure(&String::from_utf8_lossy(
-                    self.stream.as_ref().unwrap().stderr_tail(),
-                ));
+                let stderr = self
+                    .stream
+                    .as_ref()
+                    .map_or(&[][..], LineStream::stderr_tail);
+                let failure = output::provider_failure(&String::from_utf8_lossy(stderr));
                 if failure.reason == "PROVIDER_UNAVAILABLE" {
                     Update::Failed(PROCESS_EXITED)
                 } else {
@@ -1108,17 +1256,27 @@ impl Exchange for Turn {
             if self.done || Instant::now() >= busy_until {
                 return None;
             }
+            if self.pending_launch.is_some() {
+                if !self.launch(deadline) {
+                    return None;
+                }
+                continue;
+            }
+            let Some(stream) = self.stream.as_mut() else {
+                self.done = true;
+                return Some(Update::Failed(CLEANUP_FAILED));
+            };
             if self
                 .finish_by
                 .is_some_and(|finish_by| Instant::now() >= finish_by)
             {
                 self.finish_by = None;
-                self.stream.as_mut().unwrap().cancel(Duration::ZERO);
+                stream.cancel(Duration::ZERO);
             }
             let wait = self
                 .finish_by
                 .map_or(deadline, |finish_by| deadline.min(finish_by));
-            match self.stream.as_mut().unwrap().next(wait) {
+            match stream.next(wait) {
                 Some(Output::Line(line)) => self.on_line(&line),
                 Some(Output::Final(exit) | Output::Stopped(exit)) => {
                     let update = self.ended(&exit);
@@ -1152,6 +1310,10 @@ impl Exchange for Turn {
         self.cancelled = true;
         self.queue.clear();
         self.finish_by = None;
+        if self.pending_launch.is_some() {
+            self.terminal = Some(Update::Stopped);
+            self.cleanup_runtime();
+        }
         if let Some(stream) = &mut self.stream {
             stream.cancel(grace);
         }
@@ -1172,7 +1334,7 @@ impl Drop for Turn {
 
 const CLEANUP_FAILED: ErrorBody = ErrorBody {
     code: ErrorCode::InternalError,
-    reason: "CLEANUP_FAILED",
+    reason: seatline_core::protocol::CLEANUP_FAILED,
     retryable: true,
 };
 const CLEANUP_BACKLOG_FULL: ErrorBody = ErrorBody {
@@ -1187,15 +1349,19 @@ fn write_cleanup_record(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 fn record_workspace(base: &Path, group: &str, workspace: &Path) -> io::Result<PathBuf> {
+    let marker = workspace_marker(base, group, workspace)?;
+    private_fs::create_private_dir(marker.parent().unwrap())?;
+    write_cleanup_record(&marker, &serde_json::to_vec(workspace)?)?;
+    Ok(marker)
+}
+
+fn workspace_marker(base: &Path, group: &str, workspace: &Path) -> io::Result<PathBuf> {
     let name = workspace
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| io::Error::other("invalid workspace"))?;
     let dir = cleanup_conversation_dir(base, group)?;
-    private_fs::create_private_dir(&dir)?;
-    let marker = dir.join(format!("workspace-{name}.json"));
-    write_cleanup_record(&marker, &serde_json::to_vec(workspace)?)?;
-    Ok(marker)
+    Ok(dir.join(format!("workspace-{name}.json")))
 }
 
 fn clean_runtime(

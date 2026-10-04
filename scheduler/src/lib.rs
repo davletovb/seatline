@@ -361,7 +361,9 @@ impl Scheduler {
                         // Failed deletion remains actionable even if generation
                         // was cancelled or timed out. Do not report a successful
                         // stop while the adapter has retained cleanup retry state.
-                        (_, Update::Failed(error)) if error.reason == "CLEANUP_FAILED" => {
+                        (_, Update::Failed(error))
+                            if error.reason == seatline_core::protocol::CLEANUP_FAILED =>
+                        {
                             EndReason::Failed(error)
                         }
                         (Some(StopReason::Timeout(kind)), _) => EndReason::Timeout(kind),

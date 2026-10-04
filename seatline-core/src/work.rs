@@ -63,10 +63,9 @@ impl Worker {
 
     /// Shared bounded pool for provider/companion cleanup, initialized lazily.
     pub fn cleanup() -> io::Result<&'static Self> {
-        static POOL: OnceLock<io::Result<Worker>> = OnceLock::new();
-        POOL.get_or_init(|| Self::new(2, 32))
-            .as_ref()
-            .map_err(|_| io::Error::other("cleanup worker unavailable"))
+        static POOL: OnceLock<Worker> = OnceLock::new();
+        static INIT: Mutex<()> = Mutex::new(());
+        initialize(&POOL, &INIT, || Self::new(2, 32))
     }
 
     pub fn reserve(&self) -> io::Result<Permit> {
@@ -93,6 +92,26 @@ impl Worker {
             outstanding: self.outstanding.clone(),
         })
     }
+}
+
+// Rust 1.85 has no stable get_or_try_init. Serialize initialization and cache
+// only success, so a transient thread-spawn failure can be retried.
+fn initialize<'a>(
+    pool: &'a OnceLock<Worker>,
+    gate: &Mutex<()>,
+    create: impl FnOnce() -> io::Result<Worker>,
+) -> io::Result<&'a Worker> {
+    if let Some(worker) = pool.get() {
+        return Ok(worker);
+    }
+    let _guard = gate
+        .lock()
+        .map_err(|_| io::Error::other("worker initialization panicked"))?;
+    if let Some(worker) = pool.get() {
+        return Ok(worker);
+    }
+    let worker = create()?;
+    Ok(pool.get_or_init(|| worker))
 }
 
 impl Permit {
@@ -122,6 +141,26 @@ impl Drop for Permit {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn failed_pool_initialization_is_retried_and_success_is_shared() {
+        let pool = OnceLock::new();
+        let gate = Mutex::new(());
+        assert!(initialize(&pool, &gate, || Err(io::Error::other("spawn failed"))).is_err());
+        let first = initialize(&pool, &gate, || Worker::new(1, 1)).unwrap();
+        let second = initialize(&pool, &gate, || panic!("initialized twice")).unwrap();
+        assert!(std::ptr::eq(first, second));
+        assert!(
+            first
+                .reserve()
+                .unwrap()
+                .submit(|| Ok(()))
+                .unwrap()
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .is_ok()
+        );
+    }
 
     #[test]
     fn capacity_includes_reserved_and_running_cleanup_and_returns_after_panic() {

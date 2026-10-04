@@ -2,6 +2,7 @@
 //! fsync nor replacement runs on the hub. Failed mutations restore the writer's
 //! indexes before it accepts the next mutation; no-op removals do not write.
 use std::io;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 
@@ -67,7 +68,8 @@ impl Ledger {
                     let result = if undo.is_empty() {
                         Ok(())
                     } else {
-                        write(&sessions)
+                        catch_unwind(AssertUnwindSafe(|| write(&sessions)))
+                            .unwrap_or_else(|_| Err(io::Error::other("ledger writer panicked")))
                     };
                     if result.is_err() {
                         for (token, old) in undo.into_iter().rev() {
@@ -112,6 +114,41 @@ mod tests {
             provider: "codex".into(),
             native: native.into(),
         }
+    }
+
+    #[test]
+    fn a_writer_panic_rolls_back_and_does_not_disable_later_persistence() {
+        let snapshots = Arc::new(Mutex::new(Vec::new()));
+        let copy = snapshots.clone();
+        let mut first = true;
+        let worker = Ledger::with_writer(Sessions::default(), move |sessions| {
+            if first {
+                first = false;
+                panic!("injected writer panic");
+            }
+            copy.lock()
+                .unwrap()
+                .push(serde_json::to_value(sessions).unwrap());
+            Ok(())
+        })
+        .unwrap();
+        let failed = worker
+            .submit(Mutation::Insert("bad".into(), session("a", "bad")))
+            .unwrap();
+        assert!(
+            failed
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .is_err()
+        );
+        let next = worker
+            .submit(Mutation::Insert("good".into(), session("a", "good")))
+            .unwrap();
+        assert!(next.recv_timeout(Duration::from_secs(2)).unwrap().is_ok());
+        let snapshots = snapshots.lock().unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots[0].get("bad").is_none());
+        assert!(snapshots[0].get("good").is_some());
     }
 
     #[test]

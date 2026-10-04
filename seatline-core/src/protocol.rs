@@ -11,6 +11,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::turn::SignInClassification;
 
+/// Failed deletion must remain visible even after cancellation or timeout.
+pub const CLEANUP_FAILED: &str = "CLEANUP_FAILED";
+
 /// What kind of failure an adapter reports. Applications match on this, so the
 /// set can grow: match with a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

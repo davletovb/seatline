@@ -13,9 +13,10 @@ pub const MAX_FRAME: usize = 1024 * 1024;
 macro_rules! reasons {
     ($($name:ident),* $(,)?) => {
         pub mod reason {
+            pub use seatline_core::protocol::CLEANUP_FAILED;
             $(pub const $name: &str = stringify!($name);)*
         }
-        pub const KNOWN_REASONS: &[&str] = &[$(reason::$name),*];
+        pub const KNOWN_REASONS: &[&str] = &[reason::CLEANUP_FAILED, $(reason::$name),*];
     };
 }
 
@@ -63,7 +64,6 @@ reasons!(
     PROVIDER_FAILED,
     SESSION_STORE_FAILED,
     SESSION_LIMIT_REACHED,
-    CLEANUP_FAILED,
     CLEANUP_BACKLOG_FULL,
     // Raised by clients of the broker.
     COMPANION_DISCONNECTED,
