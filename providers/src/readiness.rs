@@ -7,7 +7,7 @@ use seatline_core::discovery::FileStamp;
 use seatline_core::protocol::{
     Authentication, Availability, Capabilities, ErrorCode, Failure, ProviderState,
 };
-use seatline_core::readiness::{Freshness, MAX_AGE, Readiness, Source};
+use seatline_core::readiness::{Freshness, MAX_AGE, Readiness, SignInPolicy, Source};
 use seatline_core::telemetry::Span;
 use seatline_core::turn::Turn;
 use std::cell::{Cell, RefCell};
@@ -241,7 +241,36 @@ impl Provider for Ready {
     fn send(&self, turn: Turn) -> Box<dyn Exchange> {
         self.track(self.provider.send(turn))
     }
-    fn send_with_readiness(&self, mut turn: Turn, freshness: Freshness) -> Box<dyn Exchange> {
+    fn send_with_readiness(&self, turn: Turn, freshness: Freshness) -> Box<dyn Exchange> {
+        self.checked_send(turn, freshness, None)
+    }
+    fn send_with_readiness_policy(
+        &self,
+        turn: Turn,
+        freshness: Freshness,
+        policy: SignInPolicy,
+    ) -> Box<dyn Exchange> {
+        self.checked_send(turn, freshness, Some(policy))
+    }
+    fn invalidate_readiness(&self) {
+        invalidate(&self.state);
+        self.provider.invalidate_readiness();
+    }
+    fn cleanup_sessions(&self, sessions: &[String]) -> Cleanup {
+        self.provider.cleanup_sessions(sessions)
+    }
+    fn cleanup_group(&self, group: &str) -> Cleanup {
+        self.provider.cleanup_group(group)
+    }
+}
+
+impl Ready {
+    fn checked_send(
+        &self,
+        mut turn: Turn,
+        freshness: Freshness,
+        policy: Option<SignInPolicy>,
+    ) -> Box<dyn Exchange> {
         if turn.validate().is_err() {
             return Box::new(Scripted::failed(crate::INVALID_TURN));
         }
@@ -259,19 +288,10 @@ impl Provider for Ready {
             turn: Some(turn),
             running: None,
             status: None,
+            policy,
             span: None,
             stopped: false,
         }))
-    }
-    fn invalidate_readiness(&self) {
-        invalidate(&self.state);
-        self.provider.invalidate_readiness();
-    }
-    fn cleanup_sessions(&self, sessions: &[String]) -> Cleanup {
-        self.provider.cleanup_sessions(sessions)
-    }
-    fn cleanup_group(&self, group: &str) -> Cleanup {
-        self.provider.cleanup_group(group)
     }
 }
 
@@ -593,6 +613,7 @@ struct PreparedSend {
     turn: Option<Turn>,
     running: Option<Box<dyn Exchange>>,
     status: Option<ProviderState>,
+    policy: Option<SignInPolicy>,
     span: Option<Span>,
     stopped: bool,
 }
@@ -620,7 +641,15 @@ impl Exchange for PreparedSend {
                 self.check.take();
                 let status = self.status.take();
                 let error = match status.as_ref().map(|s| (s.availability, s.authentication)) {
-                    Some((Availability::Available, Authentication::Authenticated)) => None,
+                    Some((Availability::Available, Authentication::Authenticated)) => {
+                        if self.policy.as_ref().is_some_and(|policy| {
+                            !policy.allows(status.as_ref().and_then(|s| s.sign_in))
+                        }) {
+                            Some((ErrorCode::ProviderNotAuthenticated, "SIGN_IN_POLICY_DENIED"))
+                        } else {
+                            None
+                        }
+                    }
                     Some((Availability::NotFound, _)) => {
                         Some((ErrorCode::ProviderNotFound, "EXECUTABLE_NOT_FOUND"))
                     }
@@ -687,6 +716,7 @@ mod tests {
         availability: Cell<Availability>,
         fail_send: Cell<bool>,
         supported: Cell<bool>,
+        sign_in: Cell<Option<seatline_core::turn::SignInClassification>>,
     }
     #[derive(Clone)]
     struct Fixture(Rc<Control>);
@@ -722,7 +752,7 @@ mod tests {
                             authentication: self.0.authentication.get(),
                             capabilities: self.capabilities(),
                             models: Cow::Borrowed(&[]),
-                            sign_in: None,
+                            sign_in: self.0.sign_in.get(),
                             readiness: None,
                         },
                     },
@@ -771,6 +801,7 @@ mod tests {
             availability: Cell::new(Availability::Available),
             fail_send: Cell::new(false),
             supported: Cell::new(true),
+            sign_in: Cell::new(None),
         });
         (Ready::new(Fixture(control.clone())), control)
     }
@@ -812,6 +843,74 @@ mod tests {
             cleanup_group: None,
             check_sign_in,
         }
+    }
+
+    #[test]
+    fn refreshed_readiness_enforces_sign_in_policy_before_send_without_client_event_delivery() {
+        use seatline_core::turn::SignInClassification::{ApiKey, Cloud, Subscription, Unknown};
+        let subscription = SignInPolicy::try_from(vec![Subscription]).unwrap();
+        for mode in [Some(ApiKey), Some(Cloud), Some(Unknown), None] {
+            let (ready, control) = setup();
+            control.sign_in.set(Some(Subscription));
+            assert_eq!(
+                drain(ready.readiness(CACHED)).last(),
+                Some(&Update::Completed)
+            );
+            // The app approved this evidence. Account change forces a fresh
+            // check; collecting updates emulates delayed client delivery.
+            control.key.set(1);
+            control.sign_in.set(mode);
+            let updates =
+                drain(ready.send_with_readiness_policy(turn(false), CACHED, subscription.clone()));
+            assert!(
+                matches!(updates.last(), Some(Update::Failed(f)) if f.reason == "SIGN_IN_POLICY_DENIED" && !f.retryable),
+                "{updates:?}"
+            );
+            assert_eq!(control.probes.get(), 2);
+            assert_eq!(
+                control.sends.get(),
+                0,
+                "rejected account launched a generation"
+            );
+        }
+        let (ready, control) = setup();
+        control.sign_in.set(Some(Subscription));
+        drain(ready.prepare(CACHED));
+        assert_eq!(
+            drain(ready.send_with_readiness_policy(turn(false), CACHED, subscription)).last(),
+            Some(&Update::Completed)
+        );
+        assert_eq!((control.probes.get(), control.sends.get()), (1, 1));
+        control.sign_in.set(Some(Cloud));
+        control.key.set(1);
+        let google = SignInPolicy::try_from(vec![Subscription, Cloud]).unwrap();
+        assert_eq!(
+            drain(ready.send_with_readiness_policy(turn(false), CACHED, google)).last(),
+            Some(&Update::Completed)
+        );
+        assert_eq!(control.sends.get(), 2);
+    }
+
+    #[test]
+    fn policy_does_not_bypass_the_final_fingerprint_validation() {
+        use seatline_core::turn::SignInClassification::{ApiKey, Subscription};
+        let (ready, control) = setup();
+        control.sign_in.set(Some(Subscription));
+        let mut send = ready.send_with_readiness_policy(
+            turn(true),
+            CACHED,
+            SignInPolicy::try_from(vec![Subscription]).unwrap(),
+        );
+        assert!(matches!(
+            send.next(Instant::now()),
+            Some(Update::Status { .. })
+        ));
+        control.sign_in.set(Some(ApiKey));
+        control.key.set(1);
+        assert!(
+            matches!(send.next(Instant::now()), Some(Update::Failed(f)) if f.reason == "READINESS_CHANGED")
+        );
+        assert_eq!(control.sends.get(), 0);
     }
 
     #[test]
@@ -1005,6 +1104,7 @@ mod tests {
             turn: Some(turn(false)),
             running: None,
             status: Some(status),
+            policy: None,
             span: None,
             stopped: false,
         };

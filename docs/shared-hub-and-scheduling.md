@@ -56,6 +56,8 @@ The global ceiling covers **all** classes. App/provider limits apply **within ea
 
 This changes the old aggregate app/provider caps: a provider can now run two generation processes plus two readiness processes concurrently, for four processes, subject to the global ceiling. Cleanup has its own allowance but existing conflict rules still exclude it from generation on the same app/provider.
 
+A queued `cleanup` or `forget` establishes a drain barrier for its app/provider. Existing conflicting generations and earlier queued generations may finish, but newer generations for that pair cannot refill a freed slot before cleanup runs. Readiness and other apps/providers remain eligible. Cancellation or queue expiry removes the queued barrier; an admitted cleanup remains exclusive through filesystem and ledger acknowledgement. This prevents staggered generations from starving cleanup behind continually arriving work. The queue deadline still bounds the wait if existing work itself runs too long.
+
 An optional top-level request field carries bounded hints:
 
 ```json

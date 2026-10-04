@@ -4,6 +4,41 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use crate::turn::SignInClassification;
+
+/// Sign-in modes an application permits for a checked generation. Enforced
+/// before provider send, including after readiness refresh. Missing sign-in
+/// classification is never accepted; Unknown must be explicitly listed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    try_from = "Vec<SignInClassification>",
+    into = "Vec<SignInClassification>"
+)]
+pub struct SignInPolicy(Vec<SignInClassification>);
+
+impl SignInPolicy {
+    pub fn allows(&self, sign_in: Option<SignInClassification>) -> bool {
+        sign_in.is_some_and(|mode| self.0.contains(&mode))
+    }
+}
+
+impl TryFrom<Vec<SignInClassification>> for SignInPolicy {
+    type Error = &'static str;
+
+    fn try_from(modes: Vec<SignInClassification>) -> Result<Self, Self::Error> {
+        if modes.is_empty() || modes.len() > 4 {
+            return Err("expected one to four allowed sign-in modes");
+        }
+        Ok(Self(modes))
+    }
+}
+
+impl From<SignInPolicy> for Vec<SignInClassification> {
+    fn from(policy: SignInPolicy) -> Self {
+        policy.0
+    }
+}
+
 /// Maximum lifetime of verified readiness, including credentials held in an
 /// OS keyring whose changes cannot be observed through file metadata.
 pub const MAX_AGE: Duration = Duration::from_secs(30);

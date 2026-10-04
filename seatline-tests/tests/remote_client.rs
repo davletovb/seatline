@@ -19,7 +19,7 @@ use seatline_companion::client::{RemoteProvider, socket_name};
 use seatline_companion::remote::RemoteClient;
 use seatline_companion::telemetry;
 use seatline_core::exchange::{Exchange, Update};
-use seatline_core::readiness::{Freshness, Source};
+use seatline_core::readiness::{Freshness, SignInPolicy, Source};
 use seatline_core::turn::{Message, Role, SessionPolicy, ToolPolicy, Turn};
 use seatline_providers::Provider;
 use serde_json::Value;
@@ -387,7 +387,14 @@ fn prepare_readiness_and_checked_sends_travel_through_the_shared_client() {
     // and no second probe is run.
     let cached_send = drain(
         provider
-            .send_with_readiness(ask("Say hello"), CACHED)
+            .send_with_readiness_policy(
+                ask("Say hello"),
+                CACHED,
+                SignInPolicy::try_from(vec![
+                    seatline_core::turn::SignInClassification::Subscription,
+                ])
+                .unwrap(),
+            )
             .as_mut(),
     );
     assert_eq!(
@@ -443,7 +450,7 @@ fn prepare_readiness_and_checked_sends_travel_through_the_shared_client() {
             "prepare",
             "prepare",
             "readiness",
-            "send_ready",
+            "send_ready_with_policy",
             "send_ready"
         ]
     );
