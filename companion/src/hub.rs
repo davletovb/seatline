@@ -1358,7 +1358,7 @@ mod tests {
         request(&mut hub, 1, "a", "prepare", cached.clone());
         request(&mut hub, 1, "b", "prepare", cached.clone());
         request(&mut hub, 2, "c", "prepare", cached.clone());
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         assert_eq!((counts[0].get(), counts[1].get()), (1, 1));
         let events = drain(&mut output[0]);
         for id in ["a", "b"] {
@@ -1378,7 +1378,7 @@ mod tests {
             "send_ready",
             json!({"turn":ask,"freshness":cached}),
         );
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         let events = drain(&mut output[0]);
         assert_eq!(
             events[0]["event"]["status"]["readiness"]["source"],
@@ -1394,7 +1394,7 @@ mod tests {
             "send_ready",
             json!({"turn":ask,"freshness":cached}),
         );
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         let events = drain(&mut output[0]);
         assert_eq!(events[0]["event"]["status"]["readiness"]["source"], "fresh");
         assert_eq!(counts[0].get(), 2);
@@ -1443,7 +1443,7 @@ mod tests {
             "prepare",
             json!({"mode":"cached","max_age_ms":30000}),
         );
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         assert!(
             drain(&mut output[1])
                 .iter()
@@ -1476,13 +1476,13 @@ mod tests {
         );
         let cached = json!({"mode":"cached","max_age_ms":30000});
         request(&mut hub, 1, "warm", "prepare", cached.clone());
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         assert_eq!(failure_reason(&drain(&mut output[0])), None);
         hub.command(Command::Close(1));
         let grant = config::load_grant(&hub.root, "first").unwrap();
         let mut reopened = reconnect(&mut hub, grant);
         request(&mut hub, 3, "reuse", "prepare", cached);
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         let events = drain(&mut reopened);
         assert_eq!(
             events[0]["event"]["status"]["readiness"]["source"],
@@ -1510,7 +1510,7 @@ mod tests {
                 counters.push(counter);
                 request(&mut hub, connection, "warm", "prepare", cached.clone());
             }
-            ticks(&mut hub, 8);
+            settle(&mut hub);
             for receive in &mut output {
                 assert_eq!(failure_reason(&drain(receive)), None);
             }
@@ -1537,7 +1537,7 @@ mod tests {
             // Invalid turn data exercises admission/rebuilding without ever
             // probing an installed real CLI or launching a model turn.
             request(&mut hub, 3, "admit", "send", Value::Null);
-            ticks(&mut hub, 8);
+            settle(&mut hub);
             assert_eq!(
                 failure_reason(&drain(&mut reopened)).as_deref(),
                 Some("INVALID_REQUEST")
@@ -1549,7 +1549,7 @@ mod tests {
                 "{change}"
             );
             request(&mut hub, 2, "healthy", "prepare", cached);
-            ticks(&mut hub, 8);
+            settle(&mut hub);
             let events = drain(&mut output[1]);
             assert_eq!(
                 events[0]["event"]["status"]["readiness"]["source"], "cached",
@@ -1572,7 +1572,7 @@ mod tests {
         );
         let cached = json!({"mode":"cached","max_age_ms":30000});
         request(&mut hub, 1, "warm", "prepare", cached.clone());
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         assert_eq!(failure_reason(&drain(&mut output[0])), None);
         hub.command(Command::Close(1));
         let mut grant = config::load_grant(&hub.root, "first").unwrap();
@@ -1584,7 +1584,7 @@ mod tests {
         .unwrap();
         let mut reopened = reconnect(&mut hub, grant);
         request(&mut hub, 3, "changed", "prepare", cached);
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         assert_eq!(
             failure_reason(&drain(&mut reopened)).as_deref(),
             Some("INVALID_REQUEST")
@@ -1615,7 +1615,7 @@ mod tests {
             connection: 1,
             value: json!({"id":"cancel","method":"cancel","target":"a"}),
         });
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         let events = drain(&mut output[0]);
         assert_eq!(
             events
@@ -1633,7 +1633,7 @@ mod tests {
         );
         assert!(hub.active.is_empty());
         request(&mut hub, 1, "after", "prepare", cached);
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         let events = drain(&mut output[0]);
         assert_eq!(
             events[0]["event"]["status"]["readiness"]["source"],
@@ -1726,7 +1726,7 @@ mod tests {
         let (mut hub, mut output) = setup();
         request(&mut hub, 1, "a", "send", turn(None));
         request(&mut hub, 2, "b", "send", turn(None));
-        ticks(&mut hub, 5);
+        settle(&mut hub);
         let first = drain(&mut output[0]);
         let second = drain(&mut output[1]);
         let token = |events: &[Value]| {
@@ -1754,7 +1754,7 @@ mod tests {
             "forget",
             json!({"sessions":[a]}),
         );
-        ticks(&mut hub, 5);
+        settle(&mut hub);
         let failures = drain(&mut output[1]);
         assert_eq!(failures.len(), 2);
         assert!(
@@ -1782,7 +1782,7 @@ mod tests {
         hub.tick();
         assert!(!hub.connections.contains_key(&1));
         assert!(hub.connections.contains_key(&2));
-        ticks(&mut hub, 5);
+        settle(&mut hub);
         assert!(
             drain(&mut output[1])
                 .iter()
@@ -1814,7 +1814,7 @@ mod tests {
             "send",
             turn_with_tools("provider_default"),
         );
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         let events = drain(&mut output[0]);
         let outcome = |id: &str| -> Vec<Value> {
             events
@@ -1864,7 +1864,7 @@ mod tests {
             "send",
             turn_with_tools("provider_default"),
         );
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         let events = drain(&mut reopened);
         assert_eq!(failure_reason(&events), None);
         assert!(
@@ -1905,7 +1905,7 @@ mod tests {
             let mut other_turn = turn(None);
             other_turn["session"] = json!("ephemeral");
             request(&mut hub, 2, "unrelated", "send", other_turn);
-            ticks(&mut hub, 8);
+            settle(&mut hub);
             let failed = drain(&mut output[0]);
             assert_eq!(failed.len(), 1, "output leaked after {reason}: {failed:?}");
             assert_eq!(failed[0]["event"]["type"], "failed");
@@ -1982,7 +1982,7 @@ mod tests {
                     gate: Rc::new(Cell::new(true)),
                 },
             );
-            ticks(&mut hub, 8);
+            wait_until(&mut hub, |_| cancelled.get());
             assert!(cancelled.get());
             assert!(hub.active[&turn_id].terminal_sent);
             assert!(!hub.supervisor.is_empty());
@@ -1997,7 +1997,9 @@ mod tests {
             request(&mut hub, 1, "failing", "send", retry);
             assert!(hub.connections.contains_key(&1));
             assert_eq!(hub.queue.len(), 1);
-            ticks(&mut hub, 8);
+            wait_until(&mut hub, |hub| {
+                hub.active.len() == 1 && hub.queue.is_empty() && hub.ledger_jobs.is_empty()
+            });
             let retried = drain(&mut output[0]);
             assert!(retried.iter().all(|event| event["id"] == "failing"));
             assert!(retried.iter().any(|v| v["event"]["type"] == "delta"));
@@ -2039,7 +2041,7 @@ mod tests {
             request(&mut hub, 1, "duplicate", "send", turn(None));
             assert!(!hub.connections.contains_key(&1));
             assert!(hub.queue.is_empty());
-            ticks(&mut hub, 8);
+            settle(&mut hub);
             assert!(hub.active.is_empty());
             assert!(hub.supervisor.is_empty());
             std::fs::remove_dir_all(&hub.root).unwrap();
@@ -2065,7 +2067,7 @@ mod tests {
                 .unwrap_or_else(|_| panic!("second app was locked out"))
                 .is_none()
         );
-        ticks(&mut hub, 4);
+        settle(&mut hub);
         let token = hub.sessions.token("second", "codex", "another").unwrap();
         assert_eq!(hub.sessions[token].app, "second");
         // The global cap still applies.
@@ -2092,7 +2094,7 @@ mod tests {
         hub.prune_revoked_sessions();
         assert_eq!(hub.sessions.len(), 5, "one sweep is not enough");
         hub.prune_revoked_sessions();
-        ticks(&mut hub, 4);
+        settle(&mut hub);
         assert_eq!(hub.sessions.len(), 2);
         assert!(hub.sessions.values().all(|session| session.app == "second"));
         let saved: BTreeMap<String, Session> =
@@ -2113,7 +2115,7 @@ mod tests {
         std::fs::write(&path, grant).unwrap();
         hub.prune_revoked_sessions();
         hub.prune_revoked_sessions();
-        ticks(&mut hub, 4);
+        settle(&mut hub);
         assert_eq!(hub.sessions.len(), 2);
         std::fs::remove_dir_all(&hub.root).unwrap();
     }
@@ -2143,15 +2145,41 @@ mod tests {
         for _ in 0..count {
             hub.tick();
             std::thread::sleep(Duration::from_millis(1));
-            hub.poll_ledger();
         }
+    }
+
+    /// Filesystem completion is asynchronous and has no fixed tick count,
+    /// especially on Windows. Wait for the state being asserted, with a bound.
+    fn wait_until(hub: &mut Hub, mut ready: impl FnMut(&Hub) -> bool) {
+        let until = Instant::now() + Duration::from_secs(5);
+        while !ready(hub) {
+            assert!(
+                Instant::now() < until,
+                "hub did not reach expected state: queue={}, active={}, ledger={}, cleanup={}",
+                hub.queue.len(),
+                hub.active.len(),
+                hub.ledger_jobs.len(),
+                hub.cleanup.len()
+            );
+            hub.tick();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn settle(hub: &mut Hub) {
+        wait_until(hub, |hub| {
+            hub.queue.is_empty()
+                && hub.active.is_empty()
+                && hub.ledger_jobs.is_empty()
+                && hub.cleanup.is_empty()
+        });
     }
 
     #[test]
     fn a_send_leaves_one_record_whose_marks_are_in_order_and_whose_phases_tile() {
         let (mut hub, mut output, memory) = telemetry_setup();
         request(&mut hub, 1, "a", "send", turn(None));
-        ticks(&mut hub, 6);
+        settle(&mut hub);
         let events = drain(&mut output[0]);
         let records = requests(&memory);
         assert_eq!(records.len(), 1, "{records:?}");
@@ -2218,7 +2246,7 @@ mod tests {
         assert!(records[0].phases_us.queue_wait.is_some());
         assert_eq!(records[0].phases_us.provider_init, None);
         assert_eq!(records[0].phases_us.sum(), records[0].total_us);
-        ticks(&mut hub, 4);
+        settle(&mut hub);
         assert_eq!(requests(&memory).len(), 2, "the other two ran");
         assert_eq!(hub.telemetry.in_flight(), 0);
         std::fs::remove_dir_all(&hub.root).unwrap();
@@ -2246,7 +2274,7 @@ mod tests {
         }
         hub.tick();
         hub.command(Command::Close(1));
-        ticks(&mut hub, 4);
+        settle(&mut hub);
         let mut records = requests(&memory);
         records.sort_by(|a, b| a.request.cmp(&b.request));
         assert_eq!(
@@ -2295,7 +2323,7 @@ mod tests {
         for (connection, id) in [(1, "a"), (1, "b"), (2, "a"), (2, "b"), (2, "c")] {
             request(&mut hub, connection, id, "send", turn(None));
         }
-        ticks(&mut hub, 12);
+        settle(&mut hub);
         let mut seen: Vec<(u64, String)> = requests(&memory)
             .into_iter()
             .map(|record| (record.connection, record.request))
@@ -2313,7 +2341,7 @@ mod tests {
     fn a_method_nobody_serves_is_a_failed_record_that_does_not_echo_it() {
         let (mut hub, _output, memory) = telemetry_setup();
         request(&mut hub, 1, "odd", "shell-me-a-secret", Value::Null);
-        ticks(&mut hub, 4);
+        settle(&mut hub);
         let records = requests(&memory);
         assert_eq!(records.len(), 1, "{records:?}");
         assert_eq!(records[0].method, "unknown");
@@ -2329,7 +2357,7 @@ mod tests {
         fill_ledger(&mut hub, "first", MAX_APP_SESSIONS);
         // The turn is persistent, so its session handle needs a ledger slot.
         request(&mut hub, 1, "full", "send", turn(None));
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         let told = drain(&mut output[0]);
         assert_eq!(told.len(), 1, "{told:?}");
         assert_eq!(told[0]["event"]["type"], "failed");
@@ -2350,7 +2378,7 @@ mod tests {
         let (mut hub, mut output) = setup();
         request(&mut hub, 1, "a", "send", turn(None));
         request(&mut hub, 2, "b", "send", turn(None));
-        ticks(&mut hub, 6);
+        settle(&mut hub);
         assert!(!hub.telemetry.enabled());
         assert_eq!(hub.telemetry.in_flight(), 0);
         // The requests still ran.
@@ -2403,7 +2431,7 @@ mod tests {
             "completed"
         );
         release.send(()).unwrap();
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         assert!(
             drain(&mut output[0]).is_empty(),
             "cancelled handle acknowledged late"
@@ -2427,6 +2455,8 @@ mod tests {
         hub.ledger = Ledger::with_writer(hub.sessions.clone(), move |sessions| {
             count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             wait.recv().unwrap();
+            // Even after release, a durable write can outlive several ticks.
+            std::thread::sleep(Duration::from_millis(25));
             config::write_private(&root.join("sessions.json"), &serde_json::to_vec(sessions)?)
         })
         .unwrap();
@@ -2434,7 +2464,7 @@ mod tests {
         ticks(&mut hub, 4);
         assert!(drain(&mut output[0]).is_empty());
         release.send(()).unwrap();
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         let events = drain(&mut output[0]);
         assert_eq!(events[0]["event"]["type"], "session");
         let token = events[0]["event"]["handle"].as_str().unwrap();
@@ -2443,7 +2473,7 @@ mod tests {
                 .unwrap();
         assert_eq!(restarted[token].native, "raw-native-handle");
         request(&mut hub, 1, "b", "send", turn(Some(token)));
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         assert_eq!(
             drain(&mut output[0]).last().unwrap()["event"]["type"],
             "completed"
@@ -2468,7 +2498,7 @@ mod tests {
         assert_eq!(failure_reason(&events).as_deref(), Some("QUEUE_TIMEOUT"));
         assert!(hub.supervisor.is_empty());
         hub.command(Command::Request { connection:1, value:json!({"id":"visible","provider":"codex","method":"status","params":{},"scheduling":{"events":true}}) });
-        ticks(&mut hub, 3);
+        settle(&mut hub);
         let events = drain(&mut output[0]);
         assert_eq!(
             events
@@ -2478,7 +2508,7 @@ mod tests {
             ["queued", "admitted", "completed"]
         );
         request(&mut hub, 1, "legacy", "status", json!({}));
-        ticks(&mut hub, 3);
+        settle(&mut hub);
         assert_eq!(drain(&mut output[0]).len(), 1);
         hub.connections.clear();
         assert_eq!(hub.wait_time(now), Duration::from_secs(60));
@@ -2627,7 +2657,7 @@ mod tests {
         })
         .unwrap();
         request(&mut hub, 1, "forget", "forget", json!({"sessions":[token]}));
-        ticks(&mut hub, 6);
+        wait_until(&mut hub, |hub| !hub.ledger_jobs.is_empty());
         assert!(!hub.ledger_jobs.is_empty());
         assert!(hub.sessions.contains_key(&token));
         assert_eq!(completed.get(), 0);
@@ -2641,7 +2671,7 @@ mod tests {
             "completed"
         );
         release.send(()).unwrap();
-        ticks(&mut hub, 6);
+        settle(&mut hub);
         assert_eq!(
             failure_reason(&drain(&mut output[0])).as_deref(),
             Some("CLEANUP_FAILED")
@@ -2650,7 +2680,7 @@ mod tests {
         assert_eq!(completed.get(), 0);
         hub.ledger = Ledger::new(hub.root.clone(), hub.sessions.clone()).unwrap();
         request(&mut hub, 1, "retry", "forget", json!({"sessions":[token]}));
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         assert_eq!(
             drain(&mut output[0]).last().unwrap()["event"]["type"],
             "completed"
@@ -2697,7 +2727,7 @@ mod tests {
                 .is_none()
         );
         release.send(()).unwrap();
-        ticks(&mut hub, 8);
+        settle(&mut hub);
         assert!(!hub.sessions.contains_key(&token));
         assert!(
             hub.sessions
