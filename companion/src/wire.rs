@@ -13,9 +13,10 @@ pub const MAX_FRAME: usize = 1024 * 1024;
 macro_rules! reasons {
     ($($name:ident),* $(,)?) => {
         pub mod reason {
+            pub use seatline_core::protocol::CLEANUP_FAILED;
             $(pub const $name: &str = stringify!($name);)*
         }
-        pub const KNOWN_REASONS: &[&str] = &[$(reason::$name),*];
+        pub const KNOWN_REASONS: &[&str] = &[reason::CLEANUP_FAILED, $(reason::$name),*];
     };
 }
 
@@ -25,6 +26,7 @@ reasons!(
     EXECUTABLE_NOT_FOUND,
     APP_NOT_AUTHORIZED,
     QUEUE_FULL,
+    QUEUE_TIMEOUT,
     PERSISTENT_SESSION_UNSUPPORTED,
     AUTH_REJECTED,
     PROVIDER_RATE_LIMITED,
@@ -62,7 +64,7 @@ reasons!(
     PROVIDER_FAILED,
     SESSION_STORE_FAILED,
     SESSION_LIMIT_REACHED,
-    CLEANUP_FAILED,
+    CLEANUP_BACKLOG_FULL,
     // Raised by clients of the broker.
     COMPANION_DISCONNECTED,
     REMOTE_PROVIDER_FAILED,
@@ -107,6 +109,10 @@ pub fn failure(code: ErrorCode, reason: &'static str, retryable: bool) -> Failur
 
 pub fn encode_update(update: &Update) -> Value {
     match update {
+        Update::Queued { ahead, timeout_ms } => {
+            json!({"type":"queued","ahead":ahead,"timeout_ms":timeout_ms})
+        }
+        Update::Admitted => json!({"type":"admitted"}),
         Update::Launched => json!({"type":"launched"}),
         Update::Started => json!({"type":"started"}),
         Update::Activity => json!({"type":"activity"}),
@@ -132,6 +138,15 @@ pub fn encode_update(update: &Update) -> Value {
 pub fn decode_update(value: Value) -> io::Result<Update> {
     let invalid = || io::Error::other("invalid companion event");
     Ok(match value["type"].as_str().ok_or_else(invalid)? {
+        "queued" => Update::Queued {
+            ahead: u32::try_from(value["ahead"].as_u64().ok_or_else(invalid)?)
+                .map_err(|_| invalid())?,
+            timeout_ms: value["timeout_ms"]
+                .as_u64()
+                .filter(|n| (1..=900_000).contains(n))
+                .ok_or_else(invalid)?,
+        },
+        "admitted" => Update::Admitted,
         "launched" => Update::Launched,
         "started" => Update::Started,
         "activity" => Update::Activity,

@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Session {
     pub app: String,
@@ -16,7 +16,7 @@ pub(crate) struct Session {
 
 type NativeKey = (String, String, String);
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Sessions {
     entries: BTreeMap<String, Session>,
     native: BTreeMap<NativeKey, BTreeSet<String>>,
@@ -28,6 +28,13 @@ impl Sessions {
         self.native
             .get(&(app.to_owned(), provider.to_owned(), native.to_owned()))?
             .first()
+    }
+
+    pub fn tokens(&self, app: &str, provider: &str, native: &str) -> impl Iterator<Item = &String> {
+        self.native
+            .get(&(app.to_owned(), provider.to_owned(), native.to_owned()))
+            .into_iter()
+            .flat_map(|tokens| tokens.iter())
     }
 
     pub fn app_len(&self, app: &str) -> usize {

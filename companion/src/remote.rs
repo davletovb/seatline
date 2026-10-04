@@ -152,8 +152,24 @@ impl RemoteClient {
     /// `method` for `provider` with `params`, as one request on the shared
     /// connection. The returned exchange ends exactly once.
     pub fn request(&self, method: &str, provider: &str, params: Value) -> Box<dyn Exchange> {
+        self.request_with_scheduling(
+            method,
+            provider,
+            params,
+            crate::scheduling::Hints::default(),
+        )
+    }
+
+    /// A request with bounded scheduling hints and opt-in queued/admitted events.
+    pub fn request_with_scheduling(
+        &self,
+        method: &str,
+        provider: &str,
+        params: Value,
+        scheduling: crate::scheduling::Hints,
+    ) -> Box<dyn Exchange> {
         let id = format!("r{}", self.shared.next_id.fetch_add(1, Ordering::Relaxed));
-        let frame = json!({"id": id, "method": method, "provider": provider, "params": params});
+        let frame = json!({"id": id, "method": method, "provider": provider, "params": params, "scheduling": scheduling});
         // A frame the broker cannot read ends the connection, so one that
         // cannot be sent is refused before it gets near it.
         if serde_json::to_vec(&frame).is_ok_and(|bytes| bytes.len() > wire::MAX_FRAME) {

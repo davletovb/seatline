@@ -64,6 +64,7 @@ pub struct RemoteProvider {
     /// opens a connection of its own.
     client: Option<RemoteClient>,
     preparation: bool,
+    scheduling: crate::scheduling::Hints,
 }
 
 impl RemoteProvider {
@@ -79,9 +80,14 @@ impl RemoteProvider {
             persistent: metadata.supports_persistent_session(),
             client: None,
             preparation: metadata.supports_preparation(),
+            scheduling: crate::scheduling::Hints::default(),
         }
     }
-
+    /// Configure bounded queue hints and opt-in scheduling events.
+    pub fn with_scheduling(mut self, scheduling: crate::scheduling::Hints) -> Self {
+        self.scheduling = scheduling;
+        self
+    }
     /// A provider whose exchanges are requests on `client`, the app's shared
     /// connection, which belongs to the same app the grant names.
     pub fn with_client(app: &str, client: RemoteClient, metadata: &dyn Provider) -> Self {
@@ -96,6 +102,7 @@ impl RemoteProvider {
             app: self.app.clone(),
             provider: self.id.clone(),
             client: self.client.clone(),
+            scheduling: self.scheduling,
         }
     }
 
@@ -160,16 +167,19 @@ struct Requester {
     app: String,
     provider: String,
     client: Option<RemoteClient>,
+    scheduling: crate::scheduling::Hints,
 }
 
 impl Requester {
     fn request(&self, method: &str, params: Value) -> Box<dyn Exchange> {
         match &self.client {
-            Some(client) => client.request(method, &self.provider, params),
+            Some(client) => {
+                client.request_with_scheduling(method, &self.provider, params, self.scheduling)
+            }
             None => RemoteExchange::start(
                 &self.app,
                 json!({"id":"request", "method":method,
-            "provider":self.provider,"params":params}),
+            "provider":self.provider,"params":params,"scheduling":self.scheduling}),
             ),
         }
     }

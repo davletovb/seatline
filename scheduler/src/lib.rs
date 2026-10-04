@@ -358,6 +358,14 @@ impl Scheduler {
 
                 if update.is_terminal() {
                     finished = Some(match (self.running[index].stop, update) {
+                        // Failed deletion remains actionable even if generation
+                        // was cancelled or timed out. Do not report a successful
+                        // stop while the adapter has retained cleanup retry state.
+                        (_, Update::Failed(error))
+                            if error.reason == seatline_core::protocol::CLEANUP_FAILED =>
+                        {
+                            EndReason::Failed(error)
+                        }
                         (Some(StopReason::Timeout(kind)), _) => EndReason::Timeout(kind),
                         (Some(StopReason::Cancelled), _) => EndReason::Cancelled,
                         (None, Update::Completed) => EndReason::Completed,
@@ -1030,5 +1038,39 @@ mod tests {
             "{timed_out:?}"
         );
         assert!(!scheduler.cancel(id));
+    }
+
+    #[test]
+    fn cleanup_failure_remains_visible_after_cancellation_or_timeout() {
+        struct FailedCleanup;
+        impl Exchange for FailedCleanup {
+            fn next(&mut self, _: Instant) -> Option<Update> {
+                Some(Update::Failed(seatline_core::protocol::Failure {
+                    code: seatline_core::protocol::ErrorCode::InternalError,
+                    reason: "CLEANUP_FAILED",
+                    retryable: true,
+                }))
+            }
+            fn cancel(&mut self, _: Duration) {}
+        }
+        for timeout in [false, true] {
+            let mut supervisor = Supervisor::new();
+            let limits = timeout.then_some(Timeouts {
+                start: Duration::ZERO,
+                idle: Duration::ZERO,
+                max_turn: Duration::ZERO,
+                stop_grace: Duration::ZERO,
+            });
+            let id = supervisor.start(Box::new(FailedCleanup), limits, Duration::ZERO);
+            if !timeout {
+                assert!(supervisor.cancel(id));
+            }
+            let events = supervisor.poll(Duration::from_millis(1));
+            assert!(matches!(events.as_slice(), [Event::Ended {
+                turn_id,
+                reason: EndReason::Failed(error),
+            }] if *turn_id == id && error.reason == "CLEANUP_FAILED" && error.retryable));
+            assert!(supervisor.is_empty());
+        }
     }
 }
