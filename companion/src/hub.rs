@@ -900,22 +900,8 @@ impl Hub {
             }))
     }
 
-    fn eligible(&self, index: usize, request: &Request) -> bool {
+    fn has_capacity(&self, request: &Request, running: &[&Request]) -> bool {
         let class = Class::of(&request.method);
-        // A queued cleanup drains its app/provider's existing conflicting
-        // work before newer generations refill freed slots. Earlier requests,
-        // other apps/providers and readiness remain eligible. Removing the
-        // cleanup through cancellation or expiry releases the barrier.
-        if class == Class::Generation
-            && self.queue.iter().take(index).any(|earlier| {
-                Class::of(&earlier.method) == Class::Cleanup
-                    && earlier.app == request.app
-                    && earlier.provider == request.provider
-            })
-        {
-            return false;
-        }
-        let running: Vec<_> = self.running_requests().collect();
         let class_count = running
             .iter()
             .filter(|r| Class::of(&r.method) == class)
@@ -940,6 +926,30 @@ impl Hub {
                 .filter(|r| same_class(r) && r.provider == request.provider)
                 .count()
                 >= self.policy.max_provider_running
+        {
+            return false;
+        }
+        true
+    }
+
+    fn eligible(&self, index: usize, request: &Request) -> bool {
+        let class = Class::of(&request.method);
+        let running: Vec<_> = self.running_requests().collect();
+        if !self.has_capacity(request, &running) {
+            return false;
+        }
+        // Drain this pair once cleanup has an admission slot. A cleanup
+        // waiting for another app to release the cleanup lane must not
+        // unnecessarily hold back this app's generations. Keep the barrier
+        // through the last generation's completion so interactive work
+        // cannot overtake cleanup. Cancellation/expiry removes the barrier.
+        if class == Class::Generation
+            && self.queue.iter().take(index).any(|earlier| {
+                Class::of(&earlier.method) == Class::Cleanup
+                    && earlier.app == request.app
+                    && earlier.provider == request.provider
+                    && self.has_capacity(earlier, &running)
+            })
         {
             return false;
         }
@@ -2804,6 +2814,7 @@ mod tests {
                 },
             );
             request(&mut hub, 1, "newer", "send", ask("newer"));
+            hub.queue.back_mut().unwrap().hints.interactive = true;
             gates.borrow()["first"].set(true);
             wait_until(&mut hub, |hub| hub.active.len() == 1);
             assert_eq!(&*started.borrow(), &["first", "second"]);
@@ -2840,6 +2851,73 @@ mod tests {
             gates.borrow()["newer"].set(true);
             settle(&mut hub);
             assert_eq!(hub.queue.len(), 0);
+            std::fs::remove_dir_all(&hub.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn another_apps_full_cleanup_lane_does_not_hold_back_generations() {
+        for method in ["cleanup", "forget"] {
+            let (mut hub, mut output) = setup();
+            hub.policy.max_cleanup_running = 1;
+            struct Held(Rc<Cell<bool>>);
+            impl Exchange for Held {
+                fn next(&mut self, _: Instant) -> Option<Update> {
+                    self.0.replace(false).then_some(Update::Completed)
+                }
+                fn cancel(&mut self, _: Duration) {
+                    self.0.set(true);
+                }
+            }
+            let released = Rc::new(Cell::new(false));
+            let id = hub
+                .supervisor
+                .start(Box::new(Held(released.clone())), None, Duration::ZERO);
+            hub.active.insert(
+                id,
+                Active {
+                    request: Request {
+                        connection: 2,
+                        id: "other-cleanup".into(),
+                        app: "second".into(),
+                        provider: "codex".into(),
+                        method: "cleanup".into(),
+                        params: json!({"group":"other"}),
+                        hints: Hints::default(),
+                        expires: Instant::now() + Duration::from_secs(30),
+                    },
+                    persistent: false,
+                    terminal_sent: false,
+                    gate: Rc::new(Cell::new(true)),
+                },
+            );
+            request(
+                &mut hub,
+                1,
+                "waiting-cleanup",
+                method,
+                if method == "cleanup" {
+                    json!({"group":"run"})
+                } else {
+                    json!({"sessions":[]})
+                },
+            );
+            let mut ask = turn_with_tools("none");
+            ask["session"] = json!("ephemeral");
+            request(&mut hub, 1, "generation", "send", ask);
+            wait_until(&mut hub, |hub| {
+                hub.queue.len() == 1 && hub.active.len() == 1
+            });
+            assert_eq!(hub.queue[0].id, "waiting-cleanup");
+            let events = drain(&mut output[0]);
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e["id"] == "generation" && e["event"]["type"] == "completed"),
+                "{events:?}"
+            );
+            released.set(true);
+            settle(&mut hub);
             std::fs::remove_dir_all(&hub.root).unwrap();
         }
     }

@@ -591,7 +591,9 @@ impl Exchange for Tracked {
         // Changed/expired readiness belongs to this exchange's evidence.
         // Its consumption checks already reject it; treating that consequence
         // as a new revocation could cancel a peer's current fresh check.
-        if matches!(&update, Some(Update::Failed(error)) if matches!(error.code, ErrorCode::ProviderNotAuthenticated | ErrorCode::ProviderNotFound) || matches!(error.reason, "AUTH_REJECTED" | "LOGIN_REQUIRED" | "PROVIDER_UNAVAILABLE"))
+        // A caller's policy refusal likewise leaves valid account evidence
+        // available to peers that permit that sign-in mode.
+        if matches!(&update, Some(Update::Failed(error)) if error.reason != "SIGN_IN_POLICY_DENIED" && (matches!(error.code, ErrorCode::ProviderNotAuthenticated | ErrorCode::ProviderNotFound) || matches!(error.reason, "AUTH_REJECTED" | "LOGIN_REQUIRED" | "PROVIDER_UNAVAILABLE")))
         {
             if let Some(state) = self.state.upgrade() {
                 invalidate(&state);
@@ -889,6 +891,48 @@ mod tests {
             Some(&Update::Completed)
         );
         assert_eq!(control.sends.get(), 2);
+    }
+
+    #[test]
+    fn a_policy_denial_keeps_shared_and_cached_evidence_for_permitted_peers() {
+        use seatline_core::turn::SignInClassification::{ApiKey, Subscription};
+        for cached in [false, true] {
+            let (ready, control) = setup();
+            control.sign_in.set(Some(ApiKey));
+            if cached {
+                drain(ready.prepare(CACHED));
+            }
+            let allowed = SignInPolicy::try_from(vec![Subscription, ApiKey]).unwrap();
+            let mut peer = ready.send_with_readiness_policy(turn(false), CACHED, allowed.clone());
+            assert!(matches!(
+                peer.next(Instant::now()),
+                Some(Update::Status { .. })
+            ));
+            let denied = drain(ready.send_with_readiness_policy(
+                turn(false),
+                CACHED,
+                SignInPolicy::try_from(vec![Subscription]).unwrap(),
+            ));
+            assert!(
+                matches!(denied.last(), Some(Update::Failed(f)) if f.reason == "SIGN_IN_POLICY_DENIED")
+            );
+            assert_eq!(control.sends.get(), 0);
+            let permitted = drain(peer);
+            assert_eq!(permitted.last(), Some(&Update::Completed), "{permitted:?}");
+            assert_eq!((control.probes.get(), control.sends.get()), (1, 1));
+            let later =
+                drain(ready.send_with_readiness_policy(turn(false), CACHED, allowed.clone()));
+            assert_eq!(later.last(), Some(&Update::Completed), "{later:?}");
+            assert_eq!((control.probes.get(), control.sends.get()), (1, 2));
+            // Actual authentication failures still revoke this shared evidence.
+            control.fail_send.set(true);
+            let failed = drain(ready.send_with_readiness_policy(turn(false), CACHED, allowed));
+            assert!(
+                matches!(failed.last(), Some(Update::Failed(f)) if f.reason == "AUTH_REJECTED")
+            );
+            drain(ready.readiness(CACHED));
+            assert_eq!(control.probes.get(), 2);
+        }
     }
 
     #[test]
