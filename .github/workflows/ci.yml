@@ -76,9 +76,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Could not fetch baseline' }
           git worktree add --detach $baseline $env:BASELINE_SHA
           if ($LASTEXITCODE -ne 0) { throw 'Could not check out baseline' }
-          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target'
           $failures = @()
           foreach ($source in @($env:GITHUB_WORKSPACE, $baseline)) {
+            # Keep path-dependency artifacts from the two checkouts separate.
+            $env:CARGO_TARGET_DIR = Join-Path $source 'target'
             Push-Location $source
             try {
               Write-Host "Remote stress source: $(git rev-parse HEAD)"
