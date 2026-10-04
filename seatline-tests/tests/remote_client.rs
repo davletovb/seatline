@@ -2,7 +2,9 @@
 //! requests share one connection and are served concurrently, a cancel stops
 //! one of them and reaps only its provider process, and a broker that goes
 //! away ends what was in flight without replaying it, while the next request
-//! reconnects to the broker that replaced it.
+//! reconnects to the broker that replaced it. Preparation, readiness and an
+//! explicit checked send go through the same shared client, as the readiness
+//! slice (C-01 to C-04) and this one were agreed to be tested together.
 //!
 //! The provider is the fake Codex. Nothing here asserts a time threshold.
 
@@ -13,17 +15,31 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use seatline_companion::client::socket_name;
+use seatline_companion::client::{RemoteProvider, socket_name};
 use seatline_companion::remote::RemoteClient;
 use seatline_companion::telemetry;
 use seatline_core::exchange::{Exchange, Update};
+use seatline_core::readiness::{Freshness, Source};
 use seatline_core::turn::{Message, Role, SessionPolicy, ToolPolicy, Turn};
+use seatline_providers::Provider;
 use serde_json::Value;
 use support::{FIXTURES, FakeCodex};
 
 const FAKE: &str = env!("CARGO_BIN_EXE_seatline-fake-provider");
 const SCRATCH: &str = env!("CARGO_TARGET_TMPDIR");
 const APP: &str = "test_app";
+
+/// Held for a world's whole life. The fake Codex is a hard link of one binary,
+/// so another test's install changes its change time, which readiness caching
+/// rightly takes for a replaced executable: tests that share the file run one
+/// at a time, and each has an executable of its own.
+static FIXTURE_LIFETIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn independent_executable(dir: &Path, name: &str) {
+    let executable = dir.join(name);
+    std::fs::remove_file(&executable).unwrap();
+    std::fs::copy(FIXTURES.provider(), executable).unwrap();
+}
 
 /// The companion, built into the same directory as the fake provider. A plain
 /// `cargo test --workspace` builds it for the companion's own tests; a run of
@@ -70,11 +86,16 @@ struct World {
     fake: FakeCodex,
     telemetry: PathBuf,
     broker: Option<Broker>,
+    /// Last, so the broker is gone before the next world starts.
+    _lifetime: std::sync::MutexGuard<'static, ()>,
 }
 
 impl World {
     #[allow(clippy::disallowed_methods)] // Runs the companion this package builds; never a request-supplied program.
     fn new(exec: &str) -> Self {
+        let lifetime = FIXTURE_LIFETIME
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         // Short: a socket path has a small limit.
         let base = Path::new(SCRATCH).join(format!(
@@ -89,12 +110,15 @@ impl World {
             .output()
             .unwrap();
         assert!(authorized.status.success());
+        let fake = FakeCodex::install(FIXTURES, exec, "signed-in");
+        independent_executable(&fake.dir, FakeCodex::file_name());
         let mut world = Self {
             home: base.join("h"),
             telemetry: base.join("t.jsonl"),
             root,
-            fake: FakeCodex::install(FIXTURES, exec, "signed-in"),
+            fake,
             broker: None,
+            _lifetime: lifetime,
         };
         world.start_broker();
         world
@@ -321,5 +345,106 @@ fn a_broker_that_goes_away_ends_the_turn_without_a_replay_and_the_next_request_r
             .filter(|line| line.starts_with("exec "))
             .count(),
         1
+    );
+}
+
+#[test]
+fn prepare_readiness_and_checked_sends_travel_through_the_shared_client() {
+    // Preparation, readiness and an explicit checked send, made through
+    // `RemoteProvider::with_client`, are requests on the app's one connection,
+    // and the broker's retained readiness serves them: one probe covers the
+    // preparations, the readiness and the cached send, and a send that asks for
+    // a fresh check adds exactly one.
+    const CACHED: Freshness = Freshness::Cached { max_age_ms: 30_000 };
+    let world = World::new("answers");
+    let provider = RemoteProvider::with_client(APP, world.client(), &world.fake.adapter());
+    assert!(provider.supports_preparation());
+
+    let source = |updates: &[Update]| {
+        updates.iter().find_map(|update| match update {
+            Update::Status { status, .. } => status.readiness.map(|readiness| readiness.source),
+            _ => None,
+        })
+    };
+    let not_a_generation = |updates: &[Update]| {
+        !updates
+            .iter()
+            .any(|u| matches!(u, Update::Launched | Update::Delta(_) | Update::Session(_)))
+    };
+
+    let first = drain(provider.prepare(CACHED).as_mut());
+    assert_eq!(first.last(), Some(&Update::Completed), "{first:?}");
+    assert_eq!(source(&first), Some(Source::Fresh));
+    assert!(not_a_generation(&first), "preparation ran a generation");
+    let second = drain(provider.prepare(CACHED).as_mut());
+    assert_eq!(second.last(), Some(&Update::Completed), "{second:?}");
+    assert_eq!(source(&second), Some(Source::Cached));
+    let readiness = drain(provider.readiness(CACHED).as_mut());
+    assert_eq!(readiness.last(), Some(&Update::Completed), "{readiness:?}");
+    assert_eq!(source(&readiness), Some(Source::Cached));
+
+    // A checked send reuses the verified readiness: its status comes first,
+    // and no second probe is run.
+    let cached_send = drain(
+        provider
+            .send_with_readiness(ask("Say hello"), CACHED)
+            .as_mut(),
+    );
+    assert_eq!(
+        cached_send.last(),
+        Some(&Update::Completed),
+        "{cached_send:?}"
+    );
+    assert_eq!(text(&cached_send), "You asked: Say hello");
+    assert_eq!(source(&cached_send), Some(Source::Cached));
+    let status_at = cached_send
+        .iter()
+        .position(|u| matches!(u, Update::Status { .. }))
+        .unwrap();
+    let launched_at = cached_send
+        .iter()
+        .position(|u| *u == Update::Launched)
+        .unwrap();
+    assert!(status_at < launched_at, "status must precede the launch");
+
+    // One that requires a fresh sign-in check overrides the cache.
+    let fresh = Turn {
+        check_sign_in: true,
+        ..ask("Say hello again")
+    };
+    let fresh_send = drain(provider.send_with_readiness(fresh, CACHED).as_mut());
+    assert_eq!(
+        fresh_send.last(),
+        Some(&Update::Completed),
+        "{fresh_send:?}"
+    );
+    assert_eq!(source(&fresh_send), Some(Source::Fresh));
+
+    // What the fake saw: two probes (the first preparation and the fresh
+    // send) and two turns, whatever the number of requests.
+    let invocations = world.fake.invocations();
+    let count = |prefix: &str| invocations.iter().filter(|l| l.starts_with(prefix)).count();
+    assert_eq!(count("login "), 2, "{invocations:?}");
+    assert_eq!(count("exec "), 2, "{invocations:?}");
+
+    // And what the broker saw: five requests on one connection.
+    wait_until("the broker's records", || {
+        world.records("request").len() == 5
+    });
+    assert_eq!(world.records("connection").len(), 1);
+    let methods: Vec<String> = world
+        .records("request")
+        .iter()
+        .map(|record| record["method"].as_str().unwrap_or("").to_owned())
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            "prepare",
+            "prepare",
+            "readiness",
+            "send_ready",
+            "send_ready"
+        ]
     );
 }
