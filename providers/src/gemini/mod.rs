@@ -17,7 +17,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::{Cleanup, Exchange, Provider, Scripted, Timeouts, Update};
-use seatline_core::discovery::SearchPath;
+use seatline_core::discovery::{CachedSearchPath, SearchPath};
 use seatline_core::process::{Event, Exit, Process, ProcessSpec};
 use seatline_core::prompt;
 use seatline_core::protocol::Failure as ErrorBody;
@@ -227,12 +227,13 @@ impl Launch {
 }
 
 pub struct Gemini {
-    search: SearchPath,
+    search: CachedSearchPath,
     launch: Rc<Launch>,
     namespace: Namespace,
     /// The application's cleanup records, kept across restarts.
     cleanup_dir: Option<PathBuf>,
     timeouts: Timeouts,
+    probe_timeout: Duration,
     pending_cleanups: PendingCleanups,
 }
 
@@ -253,11 +254,12 @@ impl Gemini {
     pub fn new(namespace: &Namespace, search: SearchPath, work_dir: PathBuf) -> Self {
         let cleanup_dir = Some(work_dir.with_extension("cleanups"));
         Self {
-            search,
+            search: CachedSearchPath::new(search),
             launch: Rc::new(Launch::new(work_dir, std::env::vars_os().collect())),
             namespace: namespace.clone(),
             cleanup_dir,
             timeouts: TIMEOUTS,
+            probe_timeout: STATUS_PROBE,
             pending_cleanups: Rc::new(RefCell::new(HashMap::new())),
         }
     }
@@ -280,6 +282,13 @@ impl Gemini {
         self
     }
 
+    /// Bounds readiness/model-catalog checks without changing turn limits.
+    #[must_use]
+    pub fn with_probe_timeout(mut self, timeout: Duration) -> Self {
+        self.probe_timeout = timeout;
+        self
+    }
+
     /// Overrides the durable cleanup-record directory (used by isolated tests).
     #[must_use]
     pub fn with_cleanup_dir(mut self, cleanup_dir: PathBuf) -> Self {
@@ -293,12 +302,32 @@ impl Gemini {
 }
 
 impl Provider for Gemini {
+    fn readiness_key(&self) -> Option<crate::readiness::Key> {
+        self.launch.base_workspace().ok()?;
+        let files = self.launch.home.clone().into_iter().flat_map(|home| {
+            [
+                home.join(".gemini/oauth_creds.json"),
+                home.join(".gemini/settings.json"),
+                home.join(".gemini/antigravity-cli/auth.json"),
+                home.join(".gemini/antigravity-cli/config.json"),
+            ]
+        });
+        crate::readiness::Key::watch(&self.executable()?, files, self.capabilities())
+    }
     fn id(&self) -> &str {
         ID
     }
 
     fn timeouts(&self) -> Timeouts {
         self.timeouts
+    }
+
+    fn supports_preparation(&self) -> bool {
+        true
+    }
+
+    fn invalidate_readiness(&self) {
+        self.search.invalidate();
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -336,7 +365,7 @@ impl Provider for Gemini {
                 process.close_stdin();
                 StatusCheck::Probing {
                     process,
-                    give_up: private_fs::after(STATUS_PROBE),
+                    give_up: private_fs::after(self.probe_timeout),
                     stdout: Vec::new(),
                     stderr_tail: Vec::new(),
                 }
@@ -495,6 +524,7 @@ fn status_update(
             capabilities: CAPABILITIES,
             models: Cow::Owned(models),
             sign_in,
+            readiness: None,
         },
     }
 }

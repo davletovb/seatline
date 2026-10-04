@@ -15,7 +15,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::{Cleanup, Exchange, Provider, Scripted, Timeouts, Update};
-use seatline_core::discovery::SearchPath;
+use seatline_core::discovery::{CachedSearchPath, SearchPath};
 use seatline_core::exchange::SessionLoss;
 use seatline_core::process::{Event, Exit, Process, ProcessSpec};
 use seatline_core::prompt;
@@ -36,6 +36,7 @@ use seatline_platform::layout::Layout;
 use seatline_platform::workspace;
 
 pub mod output;
+mod readiness;
 
 use output::Line;
 
@@ -195,9 +196,10 @@ impl Launch {
 }
 
 pub struct Claude {
-    search: SearchPath,
+    search: CachedSearchPath,
     launch: Rc<Launch>,
     limits: Limits,
+    account_file: readiness::AccountFile,
 }
 
 impl Claude {
@@ -211,9 +213,10 @@ impl Claude {
 
     pub fn new(search: SearchPath, work_dir: PathBuf) -> Self {
         Self {
-            search,
+            search: CachedSearchPath::new(search),
             launch: Rc::new(Launch::new(work_dir, std::env::vars_os().collect())),
             limits: LIMITS,
+            account_file: readiness::AccountFile::default(),
         }
     }
 
@@ -241,6 +244,31 @@ impl Claude {
 }
 
 impl Provider for Claude {
+    fn readiness_key(&self) -> Option<crate::readiness::Key> {
+        self.launch.workspace().ok()?;
+        let files: Vec<_> = claude_config_dir(&self.launch)
+            .into_iter()
+            .flat_map(|dir| {
+                [
+                    dir.join(".credentials.json"),
+                    dir.join("settings.json"),
+                    dir.join("settings.local.json"),
+                    dir,
+                ]
+            })
+            .collect();
+        let key = crate::readiness::Key::watch(&self.executable()?, files, self.capabilities())?;
+        let account_path = environment::lookup(&self.launch.inherited, "CLAUDE_CONFIG_DIR")
+            .map(|dir| PathBuf::from(dir).join(".claude.json"))
+            .or_else(|| {
+                environment::home_dir(&self.launch.inherited).map(|home| home.join(".claude.json"))
+            });
+        if let Some(path) = account_path {
+            self.account_file.watch(key, path)
+        } else {
+            Some(key)
+        }
+    }
     fn id(&self) -> &str {
         ID
     }
@@ -251,6 +279,15 @@ impl Provider for Claude {
 
     fn supports_persistent_session(&self) -> bool {
         true
+    }
+
+    fn supports_preparation(&self) -> bool {
+        true
+    }
+
+    fn invalidate_readiness(&self) {
+        self.search.invalidate();
+        self.account_file.invalidate();
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -268,6 +305,7 @@ impl Provider for Claude {
             Ok(process) => StatusCheck::Probing {
                 process,
                 give_up: after(self.limits.probe),
+                output: Vec::new(),
             },
             Err(_) => StatusCheck::Done(VecDeque::from([
                 status_update(Availability::Unavailable, Authentication::Unknown),
@@ -355,6 +393,7 @@ fn status_update(availability: Availability, authentication: Authentication) -> 
             models: Cow::Borrowed(MODELS),
             sign_in: (authentication == Authentication::Authenticated)
                 .then_some(seatline_core::turn::SignInClassification::Unknown),
+            readiness: None,
         },
     }
 }
@@ -443,7 +482,11 @@ fn transcript_written_for_workspace(transcript: &Path, session: &str, workspace:
 }
 
 enum StatusCheck {
-    Probing { process: Process, give_up: Instant },
+    Probing {
+        process: Process,
+        give_up: Instant,
+        output: Vec<u8>,
+    },
     Done(VecDeque<Update>),
 }
 
@@ -453,33 +496,63 @@ impl Exchange for StatusCheck {
         loop {
             let authentication = match self {
                 Self::Done(updates) => return updates.pop_front(),
-                Self::Probing { process, give_up } if Instant::now() >= *give_up => {
+                Self::Probing {
+                    process, give_up, ..
+                } if Instant::now() >= *give_up => {
                     process.kill();
                     Authentication::Unknown
                 }
-                Self::Probing { process, give_up } => {
-                    match process.next_event(deadline.min(*give_up)) {
-                        Some(Event::Exited(exit)) => signed_in(&exit),
-                        Some(Event::Stdout(_) | Event::Stderr(_)) => {
-                            if Instant::now() >= busy_until {
-                                return None;
-                            }
-                            continue;
+                Self::Probing {
+                    process,
+                    give_up,
+                    output,
+                } => match process.next_event(deadline.min(*give_up)) {
+                    Some(Event::Exited(exit)) => signed_in(&exit),
+                    Some(Event::Stdout(bytes)) => {
+                        crate::keep_bounded_output(output, &bytes, 4096);
+                        if Instant::now() >= busy_until {
+                            return None;
                         }
-                        None if Instant::now() >= *give_up => continue,
-                        None => return None,
+                        continue;
                     }
-                }
+                    Some(Event::Stderr(_)) => {
+                        if Instant::now() >= busy_until {
+                            return None;
+                        }
+                        continue;
+                    }
+                    None if Instant::now() >= *give_up => continue,
+                    None => return None,
+                },
             };
-            *self = Self::Done(VecDeque::from([
-                status_update(Availability::Available, authentication),
-                Update::Completed,
-            ]));
+            let mut update = status_update(Availability::Available, authentication);
+            if let (Self::Probing { output, .. }, Update::Status { status, .. }) =
+                (&self, &mut update)
+            {
+                if authentication == Authentication::Authenticated {
+                    status.sign_in = Some(classify_sign_in(output));
+                }
+            }
+            *self = Self::Done(VecDeque::from([update, Update::Completed]));
         }
     }
 
     fn cancel(&mut self, _grace: Duration) {
         *self = Self::Done(VecDeque::from([Update::Stopped]));
+    }
+}
+
+fn classify_sign_in(output: &[u8]) -> seatline_core::turn::SignInClassification {
+    use seatline_core::turn::SignInClassification;
+    let parsed = serde_json::from_slice::<serde_json::Value>(output).ok();
+    match parsed
+        .as_ref()
+        .and_then(|value| value["authMethod"].as_str())
+    {
+        Some("claude.ai") => SignInClassification::Subscription,
+        Some("api_key" | "api_key_helper") => SignInClassification::ApiKey,
+        Some("third_party") => SignInClassification::Cloud,
+        _ => SignInClassification::Unknown,
     }
 }
 

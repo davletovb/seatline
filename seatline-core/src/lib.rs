@@ -9,6 +9,7 @@ pub mod exchange;
 pub mod process;
 pub mod prompt;
 pub mod protocol;
+pub mod readiness;
 pub mod search;
 pub mod stream;
 pub mod telemetry;

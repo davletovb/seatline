@@ -95,12 +95,10 @@ pub struct Turn {
     /// group, so the application can retry a group's failed deletions
     /// together (one conversation, say). Opaque to the runtime.
     pub cleanup_group: Option<String>,
-    /// Whether the caller requires a fresh sign-in classification before the
-    /// provider process starts. No adapter keeps a classification from one turn
-    /// to the next, so every turn that asks starts a probe first; an
-    /// application that wants fewer probes decides for itself which turns need
-    /// one (an application that rebuilds a lost session, for one, leaves it
-    /// off for the rebuilt turn, whose request has just passed the check).
+    /// Legacy send-time probe: Codex/Claude check freshly without emitting a
+    /// Status update; Gemini/Grok do not implement an inline check. On the
+    /// explicit `send_with_readiness` API, true requires Fresh for every
+    /// provider, emits Status before launch, and overrides cached freshness.
     pub check_sign_in: bool,
 }
 

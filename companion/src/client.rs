@@ -63,6 +63,7 @@ pub struct RemoteProvider {
     /// The app's shared connection, when it has one; without it each exchange
     /// opens a connection of its own.
     client: Option<RemoteClient>,
+    preparation: bool,
 }
 
 impl RemoteProvider {
@@ -77,6 +78,7 @@ impl RemoteProvider {
             timeouts: metadata.timeouts(),
             persistent: metadata.supports_persistent_session(),
             client: None,
+            preparation: metadata.supports_preparation(),
         }
     }
 
@@ -117,6 +119,22 @@ impl Provider for RemoteProvider {
     }
     fn status(&self) -> Box<dyn Exchange> {
         self.request("status", Value::Null)
+    }
+    fn supports_preparation(&self) -> bool {
+        self.preparation
+    }
+    fn readiness(&self, freshness: seatline_core::readiness::Freshness) -> Box<dyn Exchange> {
+        self.request("readiness", json!(freshness))
+    }
+    fn prepare(&self, freshness: seatline_core::readiness::Freshness) -> Box<dyn Exchange> {
+        self.request("prepare", json!(freshness))
+    }
+    fn send_with_readiness(
+        &self,
+        turn: Turn,
+        freshness: seatline_core::readiness::Freshness,
+    ) -> Box<dyn Exchange> {
+        self.request("send_ready", json!({"turn":turn,"freshness":freshness}))
     }
     fn send(&self, turn: Turn) -> Box<dyn Exchange> {
         self.request("send", json!(turn))

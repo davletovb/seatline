@@ -11,6 +11,7 @@ publish.workspace = true
 seatline-core = { path = "../seatline-core" }
 seatline-platform = { path = "../platform" }
 serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 
 [lints]
 workspace = true

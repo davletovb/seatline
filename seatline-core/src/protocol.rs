@@ -130,6 +130,9 @@ pub struct ProviderState {
     /// How the provider is signed in, when the adapter can tell. Applications
     /// decide whether to accept it, and whether to show account or billing mode.
     pub sign_in: Option<SignInClassification>,
+    /// Present on the explicit readiness API; legacy status remains compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<crate::readiness::Readiness>,
 }
 
 impl<'de> Deserialize<'de> for Capability {

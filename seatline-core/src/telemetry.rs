@@ -74,7 +74,7 @@ impl Kind {
     /// before it runs, and its record says so.
     pub fn of_method(method: &str) -> Self {
         match method {
-            "status" => Self::Status,
+            "status" | "readiness" | "prepare" => Self::Status,
             "forget" | "cleanup" => Self::Cleanup,
             _ => Self::Send,
         }
@@ -118,6 +118,7 @@ pub struct Timeline {
     launched: Option<Instant>,
     started: Option<Instant>,
     status: Option<Instant>,
+    status_probed: bool,
     first_text: Option<Instant>,
     stop_requested: Option<Instant>,
     terminal: Option<Instant>,
@@ -136,6 +137,7 @@ impl Timeline {
             launched: None,
             started: None,
             status: None,
+            status_probed: false,
             first_text: None,
             stop_requested: None,
             terminal: None,
@@ -191,7 +193,12 @@ impl Timeline {
             Update::Delta(text) if !text.is_empty() => {
                 self.first_text.get_or_insert(at);
             }
-            Update::Status { .. } => {
+            Update::Status { status, .. } => {
+                if self.status.is_none() {
+                    self.status_probed = status
+                        .readiness
+                        .is_none_or(|r| r.source == crate::readiness::Source::Fresh);
+                }
                 self.status.get_or_insert(at);
             }
             Update::Completed | Update::Failed(_) | Update::Stopped => {
@@ -232,7 +239,7 @@ impl Timeline {
     pub fn probes(&self) -> u8 {
         match self.kind {
             Kind::Send => u8::from(self.probe.is_some()),
-            Kind::Status => u8::from(self.status.is_some()),
+            Kind::Status => u8::from(self.status_probed || self.probe.is_some()),
             Kind::Cleanup => 0,
         }
     }
@@ -270,7 +277,11 @@ impl Timeline {
     /// [`Timeline::total_us`] exactly, because both come from the same
     /// truncated marks.
     pub fn phases(&self) -> Phases {
-        self.marks().phases(self.kind)
+        let mut phases = self.marks().phases(self.kind);
+        if self.kind == Kind::Status && self.status.is_some() && !self.status_probed {
+            phases.provider_init = phases.sign_in_probe.take();
+        }
+        phases
     }
 }
 
@@ -747,7 +758,31 @@ mod tests {
                 },
                 models: std::borrow::Cow::Borrowed(&[]),
                 sign_in: None,
+                readiness: None,
             },
+        }
+    }
+
+    #[test]
+    fn cached_and_shared_readiness_count_no_probe_and_tile_local_work() {
+        let clock = Clock::new();
+        for source in [
+            crate::readiness::Source::Cached,
+            crate::readiness::Source::Shared,
+        ] {
+            let mut update = status_update();
+            if let Update::Status { status, .. } = &mut update {
+                status.readiness = Some(crate::readiness::Readiness { source, age_ms: 0 });
+            }
+            let mut timeline = Timeline::new(Kind::Status, clock.at(0));
+            timeline.admitted(clock.at(2));
+            timeline.observe(&update, clock.at(10));
+            timeline.terminal(clock.at(12));
+            timeline.released(clock.at(15));
+            assert_eq!(timeline.probes(), 0);
+            assert_eq!(timeline.phases().sign_in_probe, None);
+            assert_eq!(timeline.phases().provider_init, Some(8));
+            assert_eq!(timeline.phases().sum(), timeline.total_us());
         }
     }
 
