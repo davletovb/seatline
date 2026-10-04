@@ -10,12 +10,14 @@
 //! seatline-bench report FILE.json
 //! seatline-bench compare BEFORE.json AFTER.json
 //! seatline-bench overhead [--turns N] [--updates N] [--rounds N]
+//! seatline-bench hub [--idle-ms N] [--samples N] [--label TEXT] [--output FILE.json]
 //! ```
 //!
 //! `app` is internal: the harness runs itself as each simulated application.
 
 mod app;
 mod environment;
+mod hub_overhead;
 mod lab;
 mod overhead;
 mod report;
@@ -41,6 +43,7 @@ const USAGE: &str = "usage:
   seatline-bench report FILE.json
   seatline-bench compare BEFORE.json AFTER.json
   seatline-bench overhead [--turns N] [--updates N] [--rounds N]
+  seatline-bench hub [--idle-ms N] [--samples N] [--label TEXT] [--output FILE.json]
 
 scenarios: cold-broker warm-send warm-send-probe warm-status resumed-context
            reused-process short-isolated-paced three-app-short short-contended
@@ -71,6 +74,8 @@ fn run() -> io::Result<()> {
         // How a client starts the companion: see `Lab::count_companion_starts`.
         Some("serve") if args.len() == 1 => lab::shim_serve(),
         Some("overhead") => overhead::command(&args[1..]),
+        Some("hub") => hub_overhead::command(&args[1..]),
+        Some("hub-child") => hub_overhead::child(&args[1..]),
         Some("report") if args.len() == 2 => {
             print!("{}", report::markdown(&read_report(&args[1])?));
             Ok(())

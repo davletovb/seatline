@@ -206,7 +206,7 @@ async fn serve(
     telemetry: Option<Arc<dyn Sink>>,
 ) -> io::Result<()> {
     if let Some(sink) = &telemetry {
-        let mut limits = hub::limits();
+        let mut limits = hub::limits_for(&root)?;
         limits.insert("listener_max_connections", MAX_CONNECTIONS as u64);
         limits.insert(
             "idle_exit_ms",

@@ -195,6 +195,10 @@ fn cancellation_before_init_scans_the_unique_workspace_and_cleans_transcript() {
     };
     let give_up = Instant::now() + Duration::from_secs(2);
     while Instant::now() < give_up && !transcript_ready() {
+        assert!(matches!(
+            exchange.next(Instant::now()),
+            None | Some(Update::Launched)
+        ));
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
@@ -388,4 +392,430 @@ fn a_cleanup_group_names_the_transcripts_a_restarted_adapter_removes() {
         (cleanup.work)().expect("nothing to remove");
         (cleanup.completed)();
     }
+}
+
+#[test]
+fn slow_cleanup_keeps_the_terminal_pending_without_stalling_another_app() {
+    use seatline_core::work::Worker;
+    use std::sync::{Arc, mpsc};
+    let pool = Arc::new(Worker::new(1, 2).unwrap());
+    let fake = FakeGemini::install(FIXTURES);
+    let mut exchange = fake
+        .adapter()
+        .with_cleanup_worker(pool.clone())
+        .send(ask("hello"));
+    support::run_until_started(exchange.as_mut());
+    let (release, wait) = mpsc::channel();
+    let (entered, started) = mpsc::channel();
+    let blocked = pool
+        .reserve()
+        .unwrap()
+        .submit(move || {
+            entered.send(()).unwrap();
+            wait.recv().unwrap();
+            Ok(())
+        })
+        .unwrap();
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    let until = Instant::now() + Duration::from_secs(2);
+    let mut saw_text = false;
+    while Instant::now() < until {
+        match exchange.next(Instant::now() + Duration::from_millis(1)) {
+            Some(Update::Delta(_)) => {
+                saw_text = true;
+            }
+            Some(update) => assert!(
+                !update.is_terminal(),
+                "cleanup acknowledged early: {update:?}"
+            ),
+            None if saw_text => break,
+            None => {}
+        }
+    }
+    assert!(saw_text);
+    assert!(fake.kept() > 0);
+    let other = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(other.adapter().send(ask("hello")).as_mut());
+    assert_eq!(updates.last(), Some(&Update::Completed));
+    assert_eq!(other.kept(), 0);
+    // Cancelling during filesystem work still waits for deletion and emits
+    // exactly one terminal event. Capacity was reserved before generation.
+    exchange.cancel(Duration::ZERO);
+    assert!(exchange.next(Instant::now()).is_none());
+    assert!(pool.reserve().is_err());
+    release.send(()).unwrap();
+    assert!(
+        blocked
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .is_ok()
+    );
+    let updates = run_to_end(exchange.as_mut());
+    assert_eq!(updates.last(), Some(&Update::Stopped));
+    assert_eq!(fake.kept(), 0);
+}
+
+#[test]
+fn a_cleanup_failure_is_explicit_and_a_restart_retries_the_scoped_workspace_marker() {
+    let fake = FakeGemini::install(FIXTURES);
+    let dir = fake.dir.join("durable-cleanups");
+    let adapter = fake.adapter().with_cleanup_dir(dir.clone());
+    let mut exchange = adapter.send(ask("hello"));
+    support::run_until_started(exchange.as_mut());
+    let group = dir.join("ungrouped");
+    let saved = dir.join("saved");
+    std::fs::rename(&group, &saved).unwrap();
+    std::fs::write(&group, b"injected non-directory").unwrap();
+    let updates = run_to_end(exchange.as_mut());
+    assert_eq!(
+        failure(&updates),
+        (ErrorCode::InternalError, "CLEANUP_FAILED")
+    );
+    assert!(fake.kept() > 0);
+    std::fs::remove_file(&group).unwrap();
+    std::fs::rename(&saved, &group).unwrap();
+    let restarted = fake.adapter().with_cleanup_dir(dir);
+    let cleanup = restarted.cleanup_group("ungrouped");
+    (cleanup.work)().unwrap();
+    (cleanup.completed)();
+    assert_eq!(fake.kept(), 0);
+}
+
+#[test]
+fn cancelling_a_supervised_turn_still_reports_cleanup_failure_for_retry() {
+    use seatline_core::work::Worker;
+    use seatline_scheduler::{EndReason, Event, Supervisor};
+    use std::sync::{Arc, mpsc};
+    let pool = Arc::new(Worker::new(1, 2).unwrap());
+    let fake = FakeGemini::install(FIXTURES);
+    let dir = fake.dir.join("durable-cleanups");
+    let adapter = fake
+        .adapter()
+        .with_cleanup_dir(dir.clone())
+        .with_cleanup_worker(pool.clone());
+    let mut exchange = adapter.send(ask("hello"));
+    support::run_until_started(exchange.as_mut());
+    let (release, wait) = mpsc::channel();
+    let (entered, started) = mpsc::channel();
+    let blocked = pool
+        .reserve()
+        .unwrap()
+        .submit(move || {
+            entered.send(()).unwrap();
+            wait.recv().unwrap();
+            Ok(())
+        })
+        .unwrap();
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    let group = dir.join("ungrouped");
+    let saved = dir.join("saved");
+    std::fs::rename(&group, &saved).unwrap();
+    std::fs::write(&group, b"injected non-directory").unwrap();
+    let mut supervisor = Supervisor::new();
+    let id = supervisor.start(exchange, None, Duration::ZERO);
+    assert!(supervisor.cancel(id));
+    release.send(()).unwrap();
+    blocked
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    let until = Instant::now() + Duration::from_secs(2);
+    let mut terminal = Vec::new();
+    while !supervisor.is_empty() && Instant::now() < until {
+        terminal.extend(supervisor.poll(Duration::from_millis(1)));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(matches!(terminal.as_slice(), [Event::Ended {
+        turn_id,
+        reason: EndReason::Failed(error),
+    }] if *turn_id == id && error.reason == "CLEANUP_FAILED" && error.retryable));
+    assert!(fake.kept() > 0);
+    std::fs::remove_file(&group).unwrap();
+    std::fs::rename(&saved, &group).unwrap();
+    let cleanup = adapter.cleanup_group("ungrouped");
+    (cleanup.work)().unwrap();
+    (cleanup.completed)();
+    assert_eq!(fake.kept(), 0);
+}
+
+#[test]
+fn a_full_cleanup_pool_refuses_generation_before_starting_a_child() {
+    use seatline_core::work::Worker;
+    use std::sync::Arc;
+    let pool = Arc::new(Worker::new(1, 1).unwrap());
+    let _reserved = pool.reserve().unwrap();
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(
+        fake.adapter()
+            .with_cleanup_worker(pool)
+            .send(ask("hello"))
+            .as_mut(),
+    );
+    assert_eq!(
+        failure(&updates),
+        (ErrorCode::ProviderFailed, "CLEANUP_BACKLOG_FULL")
+    );
+    assert_eq!(fake.kept(), 0);
+    assert!(fake.invocations().is_empty());
+}
+
+#[test]
+fn failed_spawns_remove_markers_and_workspaces_before_reporting_failure() {
+    let fake = FakeGemini::install(FIXTURES);
+    let executable = fake.dir.join(if cfg!(windows) { "agy.exe" } else { "agy" });
+    // The fixture executable may be hard-linked to the shared test binary.
+    std::fs::remove_file(&executable).unwrap();
+    std::fs::write(&executable, b"#!/seatline-missing-interpreter\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let dir = fake.dir.join("durable-cleanups");
+    let adapter = fake.adapter().with_cleanup_dir(dir.clone());
+    for _ in 0..3 {
+        let updates = run_to_end(adapter.send(ask("hello")).as_mut());
+        assert_eq!(
+            failure(&updates),
+            (ErrorCode::ProviderFailed, "PROVIDER_UNAVAILABLE")
+        );
+        assert!(!updates.contains(&Update::Launched));
+        assert_eq!(std::fs::read_dir(dir.join("ungrouped")).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(fake.dir.join("workspace"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+    assert_eq!(fake.kept(), 0);
+}
+
+fn stalled_marker_turn(drop_turn: bool) {
+    use seatline_core::work::Worker;
+    use std::sync::{Arc, mpsc};
+    let pool = Arc::new(Worker::new(1, 3).unwrap());
+    let (release, wait) = mpsc::channel();
+    let (entered, started) = mpsc::channel();
+    let blocked = pool
+        .reserve()
+        .unwrap()
+        .submit(move || {
+            entered.send(()).unwrap();
+            wait.recv().unwrap();
+            Ok(())
+        })
+        .unwrap();
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    let fake = FakeGemini::install(FIXTURES);
+    let dir = fake.dir.join("durable-cleanups");
+    let mut exchange = fake
+        .adapter()
+        .with_cleanup_dir(dir.clone())
+        .with_cleanup_worker(pool.clone())
+        .send(ask("hello"));
+    assert!(exchange.next(Instant::now()).is_none());
+    assert!(
+        fake.invocations().is_empty(),
+        "launched before marker persistence"
+    );
+    assert!(
+        !dir.join("ungrouped").exists(),
+        "marker write did not use the stalled worker"
+    );
+    assert!(pool.reserve().is_err());
+    let other = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(other.adapter().send(ask("hello")).as_mut());
+    assert_eq!(updates.last(), Some(&Update::Completed));
+    if drop_turn {
+        drop(exchange);
+        release.send(()).unwrap();
+        blocked
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        // FIFO worker barrier: both marker persistence and dropped-turn cleanup
+        // must have finished before these filesystem assertions.
+        pool.reserve()
+            .unwrap()
+            .submit(|| Ok(()))
+            .unwrap()
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+    } else {
+        exchange.cancel(Duration::ZERO);
+        assert!(exchange.next(Instant::now()).is_none());
+        release.send(()).unwrap();
+        blocked
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(run_to_end(exchange.as_mut()), vec![Update::Stopped]);
+    }
+    assert!(fake.invocations().is_empty());
+    assert_eq!(fake.kept(), 0);
+    assert_eq!(std::fs::read_dir(dir.join("ungrouped")).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read_dir(fake.dir.join("workspace"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn stalled_marker_persistence_does_not_block_another_app_or_pre_launch_cancellation() {
+    stalled_marker_turn(false);
+}
+
+#[test]
+fn dropping_a_turn_before_marker_persistence_still_cleans_up_without_launching() {
+    stalled_marker_turn(true);
+}
+
+fn restart_marker(dir: &std::path::Path, name: &str, workspace: &std::path::Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join(format!("workspace-{name}.json")),
+        serde_json::to_vec(workspace).unwrap(),
+    )
+    .unwrap();
+}
+
+fn workspace_transcript(fake: &FakeGemini, id: &str, workspace: &std::path::Path) {
+    let dir = fake.brain().join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("transcript.jsonl"),
+        serde_json::to_vec(workspace).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn invalid_markers_are_quarantined_without_blocking_valid_group_cleanup() {
+    let fake = FakeGemini::install(FIXTURES);
+    let dir = fake.dir.join("durable-cleanups");
+    let group = dir.join("ungrouped");
+    let base = seatline_platform::workspace::prepare(&fake.dir.join("workspace")).unwrap();
+    let valid = base.join("turn-valid");
+    std::fs::create_dir(&valid).unwrap();
+    let foreign = fake.dir.join("foreign/turn-other-app");
+    std::fs::create_dir_all(&foreign).unwrap();
+    restart_marker(&group, "0-foreign", &foreign);
+    std::fs::write(group.join("workspace-1-malformed.json"), b"invalid JSON").unwrap();
+    restart_marker(&group, "2-valid", &valid);
+    workspace_transcript(&fake, "agy-valid", &valid);
+    workspace_transcript(&fake, "agy-foreign", &foreign);
+    let adapter = fake.adapter().with_cleanup_dir(dir.clone());
+    assert!((adapter.cleanup_group("ungrouped").work)().is_err());
+    assert!(!valid.exists());
+    assert!(!fake.brain().join("agy-valid").exists());
+    assert!(foreign.exists());
+    assert!(fake.brain().join("agy-foreign").exists());
+    assert_eq!(
+        std::fs::read_dir(dir.join(".quarantine/ungrouped"))
+            .unwrap()
+            .count(),
+        2
+    );
+    let cleanup = adapter.cleanup_group("ungrouped");
+    (cleanup.work)().unwrap();
+    (cleanup.completed)();
+    assert!(!group.exists());
+    assert!(
+        dir.join(".quarantine/ungrouped/workspace-0-foreign.json")
+            .exists()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn restart_cleanup_accepts_verbatim_case_and_separator_variants() {
+    let fake = FakeGemini::install(FIXTURES);
+    let dir = fake.dir.join("durable-cleanups");
+    let base = seatline_platform::workspace::prepare(&fake.dir.join("workspace")).unwrap();
+    let canonical = std::fs::canonicalize(&base).unwrap();
+    let alternate =
+        std::path::PathBuf::from(base.to_string_lossy().replace('\\', "/").to_uppercase());
+    for (n, parent) in [canonical, alternate].into_iter().enumerate() {
+        let stored = parent.join(format!("turn-mixed-{n}"));
+        std::fs::create_dir(&stored).unwrap();
+        restart_marker(&dir.join("ungrouped"), &n.to_string(), &stored);
+        workspace_transcript(&fake, &format!("agy-mixed-{n}"), &stored);
+    }
+    let adapter = fake.adapter().with_cleanup_dir(dir.clone());
+    (adapter.cleanup_group("ungrouped").work)().unwrap();
+    assert_eq!(fake.kept(), 0);
+    assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
+    assert!(!dir.join(".quarantine").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_cleanup_accepts_a_trusted_home_symlink_alias() {
+    use seatline_core::discovery::SearchPath;
+    let fake = FakeGemini::install(FIXTURES);
+    let alias = fake.dir.join("home-alias");
+    std::os::unix::fs::symlink(&fake.home, &alias).unwrap();
+    let base = fake.home.join("workspace");
+    seatline_platform::workspace::prepare(&base).unwrap();
+    let stored = alias.join("workspace/turn-alias");
+    std::fs::create_dir(&stored).unwrap();
+    let dir = fake.dir.join("durable-cleanups");
+    restart_marker(&dir.join("ungrouped"), "alias", &stored);
+    workspace_transcript(&fake, "agy-alias", &stored);
+    let adapter = Gemini::new(&FIXTURES.namespace(), SearchPath::new([]), base)
+        .with_environment(fake.environment())
+        .with_cleanup_dir(dir.clone());
+    (adapter.cleanup_group("ungrouped").work)().unwrap();
+    assert_eq!(fake.kept(), 0);
+    assert!(!stored.exists());
+    assert!(!dir.join(".quarantine").exists());
+}
+
+#[test]
+fn pre_init_cleanup_scans_a_large_shared_tree_and_preserves_foreign_transcripts() {
+    let fake = FakeGemini::install(FIXTURES);
+    for n in 0..320 {
+        let dir = fake
+            .brain()
+            .join(format!("00000000-0000-0000-0000-{n:012x}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("transcript.jsonl"),
+            b"another application's private workspace",
+        )
+        .unwrap();
+    }
+    let mut exchange = fake.adapter().send(model("gemini-slow-init"));
+    let until = Instant::now() + Duration::from_secs(2);
+    let ready = || {
+        std::fs::read_dir(fake.brain()).is_ok_and(|entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                entry
+                    .path()
+                    .join(".system_generated/logs/transcript.jsonl")
+                    .metadata()
+                    .is_ok_and(|m| m.len() > 0)
+            })
+        })
+    };
+    while Instant::now() < until && !ready() {
+        assert!(matches!(
+            exchange.next(Instant::now()),
+            None | Some(Update::Launched)
+        ));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(ready());
+    exchange.cancel(Duration::ZERO);
+    let updates = run_to_end(exchange.as_mut());
+    assert_eq!(updates.last(), Some(&Update::Stopped));
+    assert_eq!(
+        fake.kept(),
+        320,
+        "removed foreign data or missed the turn's transcript"
+    );
 }

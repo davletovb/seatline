@@ -310,7 +310,13 @@ fn provider_conformance_covers_signed_out_unknown_unavailable_and_timeout() {
         let grok = FakeGrok::install(FIXTURES);
         std::fs::write(gemini.dir.join("agy-readiness"), scenario).unwrap();
         std::fs::write(grok.dir.join("grok-readiness"), scenario).unwrap();
-        let timeout = Duration::from_millis(100);
+        // Classification must not depend on a cold CLI starting in 100 ms on
+        // a loaded CI runner. Keep the short bound for the injected hang only.
+        let timeout = if scenario == "hangs" {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_secs(2)
+        };
         let providers: [Box<dyn Provider>; 4] = [
             Box::new(codex.adapter_with(seatline_providers::codex::Limits {
                 probe: timeout,
