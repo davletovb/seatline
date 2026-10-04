@@ -26,6 +26,10 @@ pub enum SessionLoss {
 /// (`Completed`, `Failed`, or `Stopped`), the exchange is finished.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Update {
+    /// Opt-in companion scheduling event; not provider activity.
+    Queued { ahead: u32, timeout_ms: u64 },
+    /// The companion admitted this request to its execution lane.
+    Admitted,
     /// The provider process was successfully spawned.
     Launched,
     /// A resumable provider's opaque native session handle. Persistent turns

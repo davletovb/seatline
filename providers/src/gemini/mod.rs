@@ -6,14 +6,16 @@
 //! instead of depending on Antigravity's native continuation state, and the
 //! adapter removes the Antigravity transcript once the child has exited.
 
+use seatline_core::work::{Permit, Worker};
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use crate::{Cleanup, Exchange, Provider, Scripted, Timeouts, Update};
@@ -189,7 +191,7 @@ fn agent_definition(name: &str, search: bool, system: Option<&str>) -> String {
     definition
 }
 
-type PendingCleanups = Rc<RefCell<HashMap<String, Vec<String>>>>;
+type PendingCleanups = Rc<std::cell::RefCell<HashMap<String, Vec<String>>>>;
 
 #[derive(Debug, Clone)]
 struct Launch {
@@ -235,6 +237,7 @@ pub struct Gemini {
     timeouts: Timeouts,
     probe_timeout: Duration,
     pending_cleanups: PendingCleanups,
+    cleanup_worker: Option<Arc<Worker>>,
 }
 
 impl Gemini {
@@ -260,8 +263,17 @@ impl Gemini {
             cleanup_dir,
             timeouts: TIMEOUTS,
             probe_timeout: STATUS_PROBE,
-            pending_cleanups: Rc::new(RefCell::new(HashMap::new())),
+            pending_cleanups: Rc::new(std::cell::RefCell::new(HashMap::new())),
+            cleanup_worker: None,
         }
+    }
+
+    /// Override the shared bounded filesystem pool, for isolated runtimes or
+    /// fault-injection tests. A turn reserves its cleanup before launch.
+    #[must_use]
+    pub fn with_cleanup_worker(mut self, worker: Arc<Worker>) -> Self {
+        self.cleanup_worker = Some(worker);
+        self
     }
 
     #[must_use]
@@ -404,6 +416,13 @@ impl Provider for Gemini {
             return Box::new(Scripted::failed(NO_WORKSPACE));
         };
         let agent = agent_name(&self.namespace, native_search);
+        let cleanup_permit = match self.cleanup_worker.as_deref().map_or_else(
+            || Worker::cleanup().and_then(Worker::reserve),
+            Worker::reserve,
+        ) {
+            Ok(permit) => permit,
+            Err(_) => return Box::new(Scripted::failed(CLEANUP_BACKLOG_FULL)),
+        };
         let workspace =
             match TurnWorkspace::create(&base, &agent, native_search, request.system.as_deref()) {
                 Ok(workspace) => workspace,
@@ -414,6 +433,16 @@ impl Provider for Gemini {
             .cleanup_group
             .clone()
             .unwrap_or_else(|| UNGROUPED.to_owned());
+        // A restart can retry even a cancelled run whose init was never read.
+        let marker = match self
+            .cleanup_dir
+            .as_deref()
+            .map(|dir| record_workspace(dir, &cleanup_group, workspace.path()))
+            .transpose()
+        {
+            Ok(marker) => marker,
+            Err(_) => return Box::new(Scripted::failed(CLEANUP_FAILED)),
+        };
         // The system prompt is in the agent, not in the prompt.
         let prompt = prompt::render(None, &request.messages, request.tools);
         let input = serde_json::json!({
@@ -436,7 +465,13 @@ impl Provider for Gemini {
         process.close_stdin();
 
         Box::new(Turn {
-            stream: LineStream::new(process, MAX_LINE_BYTES).keeping_stderr_tail(STDERR_TAIL_BYTES),
+            stream: Some(
+                LineStream::new(process, MAX_LINE_BYTES).keeping_stderr_tail(STDERR_TAIL_BYTES),
+            ),
+            cleanup_permit: Some(cleanup_permit),
+            cleanup_result: None,
+            terminal: None,
+            marker,
             workspace: Some(workspace),
             home: self.launch.home.clone(),
             cleanup_dir: self.cleanup_dir.clone(),
@@ -477,10 +512,53 @@ impl Provider for Gemini {
         let home = self.launch.home.clone();
         let cleanup_dir = self.cleanup_dir.clone();
         let pending = Rc::clone(&self.pending_cleanups);
+        let workspace_base = self.launch.work_dir.clone();
         let group = group.to_owned();
         let work_group = group.clone();
         Cleanup::new(
             move || {
+                if let Some(dir) = cleanup_dir.as_deref() {
+                    let group_dir = cleanup_conversation_dir(dir, &work_group)?;
+                    match fs::read_dir(&group_dir) {
+                        Ok(entries) => {
+                            for entry in entries {
+                                let entry = entry?;
+                                if !entry.file_type()?.is_file()
+                                    || !entry
+                                        .file_name()
+                                        .to_string_lossy()
+                                        .starts_with("workspace-")
+                                {
+                                    continue;
+                                }
+                                let bytes = fs::read(entry.path())?;
+                                let workspace: PathBuf =
+                                    serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                                if workspace.parent()
+                                    != Some(fs::canonicalize(&workspace_base)?.as_path())
+                                    || !workspace
+                                        .file_name()
+                                        .is_some_and(|s| s.to_string_lossy().starts_with("turn-"))
+                                {
+                                    return Err(io::Error::other(
+                                        "cleanup workspace outside app scope",
+                                    ));
+                                }
+                                clean_runtime(
+                                    home.as_deref(),
+                                    Some(dir),
+                                    &work_group,
+                                    &workspace,
+                                    None,
+                                )?;
+                                forget::remove(&workspace)?;
+                                forget::remove(&entry.path())?;
+                            }
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(e),
+                    }
+                }
                 let mut ids = memory_ids;
                 if let Some(dir) = cleanup_dir.as_deref() {
                     ids.extend(read_pending_cleanup_ids(dir, &work_group)?);
@@ -678,7 +756,11 @@ impl Drop for TurnWorkspace {
 struct Turn {
     // Keep the process before the workspace so dropping a live turn stops the
     // child before its cwd is removed.
-    stream: LineStream,
+    stream: Option<LineStream>,
+    cleanup_permit: Option<Permit>,
+    cleanup_result: Option<Receiver<io::Result<()>>>,
+    terminal: Option<Update>,
+    marker: Option<PathBuf>,
     workspace: Option<TurnWorkspace>,
     home: Option<PathBuf>,
     cleanup_dir: Option<PathBuf>,
@@ -731,29 +813,14 @@ impl Turn {
         }
     }
 
-    fn clear_cleanup_ids(&mut self, removed: &HashSet<String>) {
-        if removed.is_empty() {
-            return;
-        }
-        let empty = {
+    fn clear_cleanup_ids(&mut self) {
+        if let Some(id) = &self.antigravity_conversation {
             let mut pending = self.pending_cleanups.borrow_mut();
-            let empty = if let Some(ids) = pending.get_mut(&self.cleanup_group) {
-                ids.retain(|candidate| !removed.contains(candidate));
-                ids.is_empty()
-            } else {
-                true
-            };
-            if empty {
-                pending.remove(&self.cleanup_group);
-            }
-            empty
-        };
-        if let Some(dir) = self.cleanup_dir.as_deref() {
-            for id in removed {
-                let _ = forget_cleanup_id_record(dir, &self.cleanup_group, id);
-            }
-            if empty {
-                let _ = forget_cleanup_record(dir, &self.cleanup_group);
+            if let Some(ids) = pending.get_mut(&self.cleanup_group) {
+                ids.retain(|candidate| candidate != id);
+                if ids.is_empty() {
+                    pending.remove(&self.cleanup_group);
+                }
             }
         }
     }
@@ -942,39 +1009,44 @@ impl Turn {
         self.queue.push_back(Update::Delta(text));
     }
 
-    /// Removes provider transcripts only after the child is gone. When init
-    /// was never consumed (stop/malformed output), identify this application's
-    /// transcripts by the unique private workspace path recorded in them.
+    /// The process is gone before this job can scan or remove its transcript.
+    /// Keep the terminal boundary pending until deletion succeeds or fails.
     fn cleanup_runtime(&mut self) {
-        let mut ids = Vec::new();
-        if let Some(id) = self.antigravity_conversation.clone() {
-            ids.push(id);
-        } else if let (Some(home), Some(workspace)) = (&self.home, &self.workspace) {
-            if let Ok(found) = antigravity_transcripts_for_workspace(home, workspace.path()) {
-                ids.extend(found);
-            }
+        self.stream.take();
+        let Some(workspace) = self.workspace.take() else {
+            return;
+        };
+        let home = self.home.clone();
+        let dir = self.cleanup_dir.clone();
+        let group = self.cleanup_group.clone();
+        let id = self.antigravity_conversation.clone();
+        let marker = self.marker.take();
+        if let Some(permit) = self.cleanup_permit.take() {
+            self.cleanup_result = permit
+                .submit(move || {
+                    let result = clean_runtime(
+                        home.as_deref(),
+                        dir.as_deref(),
+                        &group,
+                        workspace.path(),
+                        id.as_deref(),
+                    );
+                    if result.is_ok() {
+                        forget::remove(workspace.path())?;
+                        if let Some(marker) = marker {
+                            forget::remove(&marker)?;
+                        }
+                    }
+                    result
+                })
+                .ok();
         }
-
-        ids.sort();
-        ids.dedup();
-        for id in &ids {
-            self.register_cleanup_id(id.clone());
+        if self.cleanup_result.is_none() {
+            self.terminal = Some(Update::Failed(CLEANUP_FAILED));
         }
-
-        let mut removed = HashSet::new();
-        if let Some(home) = &self.home {
-            for id in &ids {
-                if remove_antigravity_transcript(home, id).is_ok() {
-                    removed.insert(id.clone());
-                }
-            }
-        }
-        self.clear_cleanup_ids(&removed);
-        self.workspace.take();
     }
 
     fn ended(&mut self, exit: &Exit) -> Update {
-        self.cleanup_runtime();
         if self.cancelled {
             return Update::Stopped;
         }
@@ -985,8 +1057,9 @@ impl Turn {
                 Update::Failed(MALFORMED_OUTPUT)
             }
             None => {
-                let failure =
-                    output::provider_failure(&String::from_utf8_lossy(self.stream.stderr_tail()));
+                let failure = output::provider_failure(&String::from_utf8_lossy(
+                    self.stream.as_ref().unwrap().stderr_tail(),
+                ));
                 if failure.reason == "PROVIDER_UNAVAILABLE" {
                     Update::Failed(PROCESS_EXITED)
                 } else {
@@ -1004,6 +1077,32 @@ impl Exchange for Turn {
             if let Some(update) = self.queue.pop_front() {
                 return Some(update);
             }
+            if let Some(result) = &self.cleanup_result {
+                match result.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(result) => {
+                        self.cleanup_result = None;
+                        self.done = true;
+                        if result.is_ok() {
+                            self.clear_cleanup_ids();
+                        }
+                        return Some(if result.is_ok() {
+                            self.terminal.take().unwrap_or(Update::Stopped)
+                        } else {
+                            Update::Failed(CLEANUP_FAILED)
+                        });
+                    }
+                    Err(RecvTimeoutError::Timeout) => return None,
+                    Err(RecvTimeoutError::Disconnected) => {
+                        self.cleanup_result = None;
+                        self.done = true;
+                        return Some(Update::Failed(CLEANUP_FAILED));
+                    }
+                }
+            }
+            if self.terminal.is_some() {
+                self.done = true;
+                return self.terminal.take();
+            }
             if self.done || Instant::now() >= busy_until {
                 return None;
             }
@@ -1012,28 +1111,29 @@ impl Exchange for Turn {
                 .is_some_and(|finish_by| Instant::now() >= finish_by)
             {
                 self.finish_by = None;
-                self.stream.cancel(Duration::ZERO);
+                self.stream.as_mut().unwrap().cancel(Duration::ZERO);
             }
             let wait = self
                 .finish_by
                 .map_or(deadline, |finish_by| deadline.min(finish_by));
-            match self.stream.next(wait) {
+            match self.stream.as_mut().unwrap().next(wait) {
                 Some(Output::Line(line)) => self.on_line(&line),
                 Some(Output::Final(exit) | Output::Stopped(exit)) => {
                     let update = self.ended(&exit);
-                    self.done = true;
-                    return Some(update);
+                    self.terminal = Some(update);
+                    self.cleanup_runtime();
+                    continue;
                 }
                 Some(Output::Error(_)) => {
                     self.outcome = Some(Err(MALFORMED_OUTPUT));
-                    self.cleanup_runtime();
                     let update = if self.cancelled {
                         Update::Stopped
                     } else {
                         Update::Failed(MALFORMED_OUTPUT)
                     };
-                    self.done = true;
-                    return Some(update);
+                    self.terminal = Some(update);
+                    self.cleanup_runtime();
+                    continue;
                 }
                 None if self
                     .finish_by
@@ -1050,8 +1150,76 @@ impl Exchange for Turn {
         self.cancelled = true;
         self.queue.clear();
         self.finish_by = None;
-        self.stream.cancel(grace);
+        if let Some(stream) = &mut self.stream {
+            stream.cancel(grace);
+        }
+        // Cancellation during cleanup must still await its deletion boundary.
+        if self.cleanup_result.is_some() {
+            self.terminal = Some(Update::Stopped);
+        }
     }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        if self.workspace.is_some() {
+            self.cleanup_runtime();
+        }
+    }
+}
+
+const CLEANUP_FAILED: ErrorBody = ErrorBody {
+    code: ErrorCode::InternalError,
+    reason: "CLEANUP_FAILED",
+    retryable: true,
+};
+const CLEANUP_BACKLOG_FULL: ErrorBody = ErrorBody {
+    code: ErrorCode::ProviderFailed,
+    reason: "CLEANUP_BACKLOG_FULL",
+    retryable: true,
+};
+
+fn write_cleanup_record(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    private_fs::write_private_file(path, bytes)?;
+    fs::OpenOptions::new().write(true).open(path)?.sync_all()
+}
+
+fn record_workspace(base: &Path, group: &str, workspace: &Path) -> io::Result<PathBuf> {
+    let name = workspace
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| io::Error::other("invalid workspace"))?;
+    let dir = cleanup_conversation_dir(base, group)?;
+    private_fs::create_private_dir(&dir)?;
+    let marker = dir.join(format!("workspace-{name}.json"));
+    write_cleanup_record(&marker, &serde_json::to_vec(workspace)?)?;
+    Ok(marker)
+}
+
+fn clean_runtime(
+    home: Option<&Path>,
+    dir: Option<&Path>,
+    group: &str,
+    workspace: &Path,
+    known: Option<&str>,
+) -> io::Result<()> {
+    let home = home.ok_or_else(|| io::Error::other("home unavailable for cleanup"))?;
+    let ids = match known {
+        Some(id) => vec![id.to_owned()],
+        None => antigravity_transcripts_for_workspace(home, workspace)?,
+    };
+    let mut first_error = None;
+    for id in ids {
+        if let Some(dir) = dir {
+            record_pending_cleanup_id(dir, group, &id)?;
+        }
+        if let Err(error) = remove_antigravity_transcript(home, &id) {
+            first_error.get_or_insert(error);
+        } else if let Some(dir) = dir {
+            forget_cleanup_id_record(dir, group, &id)?;
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 fn agy_args(agent: &str, model: Option<&str>) -> Vec<OsString> {
@@ -1102,9 +1270,8 @@ fn remove_antigravity_transcript(home: &Path, id: &str) -> io::Result<()> {
 
 /// The cleanup group of turns whose application names none.
 const UNGROUPED: &str = "ungrouped";
-const MAX_PENDING_CLEANUPS: usize = 256;
 const TRANSCRIPT_SCAN_BUDGET: usize = 512;
-const TRANSCRIPT_SCAN_BYTES: u64 = 1024 * 1024;
+const TRANSCRIPT_SCAN_BYTES: usize = 64 * 1024;
 
 fn cleanup_conversation_dir(base: &Path, conversation_id: &str) -> io::Result<PathBuf> {
     if !is_cleanup_group(conversation_id) {
@@ -1125,7 +1292,7 @@ fn record_pending_cleanup_id(base: &Path, conversation_id: &str, id: &str) -> io
     }
     let dir = cleanup_conversation_dir(base, conversation_id)?;
     private_fs::create_private_dir(&dir)?;
-    private_fs::write_private_file(&dir.join(id), b"pending\n")
+    write_cleanup_record(&dir.join(id), b"pending\n")
 }
 
 fn read_pending_cleanup_ids(base: &Path, conversation_id: &str) -> io::Result<Vec<String>> {
@@ -1136,7 +1303,7 @@ fn read_pending_cleanup_ids(base: &Path, conversation_id: &str) -> io::Result<Ve
         Err(error) => return Err(error),
     };
     let mut ids = Vec::new();
-    for entry in entries.take(MAX_PENDING_CLEANUPS) {
+    for entry in entries {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             continue;
@@ -1184,7 +1351,7 @@ fn antigravity_transcripts_for_workspace(home: &Path, workspace: &Path) -> io::R
         .trim_matches('"')
         .to_owned();
     let mut ids = Vec::new();
-    for entry in entries.take(MAX_PENDING_CLEANUPS) {
+    for entry in entries {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
@@ -1210,12 +1377,12 @@ fn transcript_tree_mentions(
     depth: usize,
     budget: &mut usize,
 ) -> io::Result<bool> {
-    if depth == 0 || *budget == 0 {
-        return Ok(false);
+    if depth == 0 {
+        return Err(io::Error::other("transcript scan depth exceeded"));
     }
     for entry in fs::read_dir(dir)? {
         if *budget == 0 {
-            break;
+            return Err(io::Error::other("transcript scan entry budget exceeded"));
         }
         *budget -= 1;
         let entry = entry?;
@@ -1232,16 +1399,39 @@ fn transcript_tree_mentions(
         if !file_type.is_file() {
             continue;
         }
-        let mut bytes = Vec::new();
-        fs::File::open(entry.path())?
-            .take(TRANSCRIPT_SCAN_BYTES)
-            .read_to_end(&mut bytes)?;
-        let text = String::from_utf8_lossy(&bytes);
-        if text.contains(raw) || (!escaped.is_empty() && text.contains(escaped)) {
+        if file_mentions(
+            &mut fs::File::open(entry.path())?,
+            raw.as_bytes(),
+            escaped.as_bytes(),
+        )? {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// Scan arbitrarily long transcript files with a fixed read buffer and a
+/// needle-sized overlap, including a workspace string crossing chunk boundaries.
+fn file_mentions(reader: &mut impl Read, raw: &[u8], escaped: &[u8]) -> io::Result<bool> {
+    let overlap = raw.len().max(escaped.len()).saturating_sub(1);
+    let mut chunk = vec![0; TRANSCRIPT_SCAN_BYTES];
+    let mut bytes = Vec::with_capacity(TRANSCRIPT_SCAN_BYTES + overlap);
+    loop {
+        let n = reader.read(&mut chunk)?;
+        if n == 0 {
+            return Ok(false);
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+        if [raw, escaped]
+            .into_iter()
+            .filter(|needle| !needle.is_empty())
+            .any(|needle| bytes.windows(needle.len()).any(|window| window == needle))
+        {
+            return Ok(true);
+        }
+        let keep = bytes.len().min(overlap);
+        bytes.drain(..bytes.len() - keep);
+    }
 }
 
 #[cfg(test)]
@@ -1344,5 +1534,26 @@ mod tests {
                 .all(|model| model.label.chars().count()
                     <= seatline_core::turn::MAX_MODEL_LABEL_BYTES)
         );
+    }
+    #[test]
+    fn workspace_matching_reads_past_the_old_size_limit_and_across_chunks() {
+        let needle = b"/private/app/turn-012345";
+        let mut bytes = vec![b'x'; 2 * 1024 * 1024 + TRANSCRIPT_SCAN_BYTES - 5];
+        bytes.extend_from_slice(needle);
+        assert!(file_mentions(&mut bytes.as_slice(), needle, b"escaped").unwrap());
+        assert!(!file_mentions(&mut b"other workspace".as_slice(), needle, b"escaped").unwrap());
+    }
+
+    #[test]
+    fn a_scan_that_exhausted_its_budget_reports_failure_instead_of_claiming_deletion() {
+        let root = std::env::temp_dir().join(format!(
+            "seatline-scan-{}",
+            private_fs::unique_child(std::path::Path::new(""), "test").display()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("transcript"), "other app").unwrap();
+        assert!(transcript_tree_mentions(&root, "needle", "escaped", 6, &mut 0).is_err());
+        assert!(transcript_tree_mentions(&root, "needle", "escaped", 0, &mut 10).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

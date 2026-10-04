@@ -769,6 +769,56 @@ fn the_compatibility_adapter_shares_a_clients_connection_or_opens_its_own() {
 }
 
 #[test]
+fn scheduling_hints_and_queue_events_route_through_the_shared_client_and_adapter() {
+    use seatline_companion::scheduling::Hints;
+    let broker = FakeBroker::start(
+        &["app"],
+        Arc::new(|ctx, frame| {
+            let id = id_of(frame);
+            if frame["scheduling"]["events"] == true {
+                let _ = ctx.out.send(event(
+                    &id,
+                    json!({"type":"queued","ahead":2,"timeout_ms":1000}),
+                ));
+                let _ = ctx.out.send(event(&id, json!({"type":"admitted"})));
+            }
+            let _ = ctx.out.send(completed(&id));
+        }),
+    );
+    let client = broker.client("app");
+    let hints = Hints {
+        interactive: true,
+        queue_timeout_ms: Some(1000),
+        events: true,
+    };
+    let expected = [
+        Update::Queued {
+            ahead: 2,
+            timeout_ms: 1000,
+        },
+        Update::Admitted,
+        Update::Completed,
+    ];
+    let mut direct = client.request_with_scheduling("status", "codex", Value::Null, hints);
+    assert_eq!(drain(direct.as_mut()), expected);
+    let metadata = Codex::new(SearchPath::new([]), broker.root.join("work"));
+    let provider =
+        RemoteProvider::with_client("app", client.clone(), &metadata).with_scheduling(hints);
+    let mut status = provider.status();
+    assert_eq!(drain(status.as_mut()), expected);
+    (provider.cleanup_group("group-1").work)().unwrap();
+    let mut legacy = client.status("codex");
+    assert_eq!(drain(legacy.as_mut()), [Update::Completed]);
+    assert_eq!(broker.connections(), 1);
+    let status = broker.frames("status");
+    assert_eq!(status.len(), 3);
+    assert_eq!(status[0]["scheduling"], json!(hints));
+    assert_eq!(status[1]["scheduling"], json!(hints));
+    assert_eq!(broker.frames("cleanup")[0]["scheduling"], json!(hints));
+    assert_eq!(status[2]["scheduling"]["events"], false);
+}
+
+#[test]
 fn requests_that_wait_for_the_connection_reach_the_broker_in_the_order_they_were_made() {
     let broker = FakeBroker::start(&["app"], by_label());
     // The handshake takes long enough that every request is made before it ends.

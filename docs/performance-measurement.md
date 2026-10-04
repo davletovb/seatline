@@ -167,10 +167,12 @@ Improvement budgets set from that baseline. A budget is what a slice must demons
 
 Slices A-01 to A-03 have no latency budget: their gates are lifecycle bounds.
 
+F-01 through F-04 add [hub-only before/after evidence](performance-baselines/2026-10-04-f-hub-summary.md) on 2026-10-04, including idle CPU/wakeup counters and adaptive 1–5 ms active polling. It measures a different entry point and contention workload, so it does not replace the socket-based percentile budgets above. In particular, an interactive generation cannot interrupt the two provider slots already occupied by long generations: priority changes the next admission opportunity, not their remaining execution time. Check the original IPC scenarios separately before marking their budgets met.
+
 ## What this does not cover
 
 - **No live-provider baseline.** Network and model latency, a real provider's start-up and the real cost of resuming a context are unmeasured. The live mode exists and is untested against a real provider here; the budgets that depend on it (E-02 to E-04) are left open.
 - **One machine.** A virtualized 4-CPU Linux container. macOS and Windows (named pipes, different process start costs) are measured by the CI matrix only for correctness, not speed.
 - **Long requests are fake and fixed.** The 300 ms `slow` behavior is the only long request; contention results scale with it.
-- **Idle cost** (CPU, wakeups) and **memory** are not measured.
+- **Idle cost** (CPU, wakeups) and **memory** were not measured in the original B baseline. The F follow-up above measures idle cost; memory remains unmeasured.
 - **A genuinely cold machine** (empty page cache, first start after installation) is not reproduced: `cold-broker` is a cold *broker* on a warm machine.

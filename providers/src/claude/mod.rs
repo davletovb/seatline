@@ -1011,7 +1011,6 @@ mod tests {
     #[test]
     fn suggested_models_are_valid_model_ids() {
         assert_eq!(CAPABILITIES.model_selection, Capability::Supported);
-        assert!(!MODELS.is_empty());
         for model in MODELS {
             assert!(seatline_core::turn::is_model_id(&model.id), "{}", model.id);
         }

@@ -1,9 +1,11 @@
 //! One owner of all provider adapters and exchanges. IO threads can submit
 //! bounded commands but cannot choose namespaces, executables or environments.
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
@@ -20,6 +22,8 @@ use serde_json::{Value, json};
 use crate::{
     PROTOCOL_VERSION,
     config::{self, Grant},
+    ledger::{Ledger, Mutation},
+    scheduling::{Class, Hints, Policy},
     sessions::{Session, Sessions},
     telemetry::Telemetry,
     wire,
@@ -50,6 +54,14 @@ pub fn limits() -> BTreeMap<&'static str, u64> {
         ("max_app_sessions", MAX_APP_SESSIONS as u64),
         ("prune_interval_ms", PRUNE_INTERVAL.as_millis() as u64),
     ])
+}
+
+/// Effective startup policy for phase reports. Configuration changes take
+/// effect on the next broker start.
+pub fn limits_for(root: &std::path::Path) -> io::Result<BTreeMap<&'static str, u64>> {
+    let mut limits = limits();
+    limits.extend(Policy::load(root)?.limits());
+    Ok(limits)
 }
 
 pub enum Command {
@@ -83,6 +95,8 @@ struct Request {
     provider: String,
     method: String,
     params: Value,
+    hints: Hints,
+    expires: Instant,
 }
 impl Request {
     fn continuation(&self) -> &Value {
@@ -101,12 +115,57 @@ struct Active {
     /// Ended, but release its request ID and never forward more output after
     /// this boundary.
     terminal_sent: bool,
+    gate: Rc<Cell<bool>>,
 }
 struct PendingCleanup {
     request: Request,
     result: Receiver<io::Result<()>>,
     completed: Box<dyn FnOnce()>,
     sessions: Vec<String>,
+}
+
+enum LedgerAction {
+    Insert {
+        token: String,
+        waiters: Vec<TurnId>,
+    },
+    Remove {
+        tokens: Vec<String>,
+        cleanup: Option<Box<PendingCleanup>>,
+    },
+}
+struct PendingLedger {
+    result: Receiver<io::Result<()>>,
+    action: LedgerAction,
+}
+
+/// Stop reading provider output at a new native session until its token is
+/// durably stored. Backpressure stays in the process's bounded pipes instead
+/// of collecting answer text on the hub. Cancellation always bypasses the gate.
+struct SessionGate {
+    exchange: Box<dyn seatline_core::exchange::Exchange>,
+    open: Rc<Cell<bool>>,
+    cancelled: bool,
+}
+impl seatline_core::exchange::Exchange for SessionGate {
+    fn next(&mut self, deadline: Instant) -> Option<Update> {
+        if !self.open.get() && !self.cancelled {
+            return None;
+        }
+        let update = self.exchange.next(deadline)?;
+        if matches!(update, Update::Session(_)) && !self.cancelled {
+            self.open.set(false);
+        }
+        Some(update)
+    }
+    fn cancel(&mut self, grace: Duration) {
+        self.cancelled = true;
+        self.open.set(true);
+        self.exchange.cancel(grace);
+    }
+    fn probe_span(&self) -> Option<seatline_core::telemetry::Span> {
+        self.exchange.probe_span()
+    }
 }
 
 pub fn start(root: PathBuf) -> io::Result<SyncSender<Command>> {
@@ -124,6 +183,8 @@ pub fn start_with(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Sessions::default(),
         Err(error) => return Err(error),
     };
+    let policy = Policy::load(&root)?;
+    let ledger = Ledger::new(root.clone(), sessions.clone())?;
     let (send, receive) = mpsc::sync_channel(128);
     std::thread::spawn(move || {
         Hub {
@@ -134,6 +195,12 @@ pub fn start_with(
             supervisor: Supervisor::new(),
             active: BTreeMap::new(),
             sessions,
+            ledger,
+            ledger_jobs: Vec::new(),
+            policy,
+            last_app: None,
+            interactive_streak: 0,
+            quiet_ticks: 0,
             cleanup: Vec::new(),
             next_check: Instant::now(),
             next_prune: Instant::now() + PRUNE_INTERVAL,
@@ -153,6 +220,13 @@ struct Hub {
     supervisor: Supervisor,
     active: BTreeMap<TurnId, Active>,
     sessions: Sessions,
+    ledger: Ledger,
+    ledger_jobs: Vec<PendingLedger>,
+    policy: Policy,
+    last_app: Option<String>,
+    interactive_streak: usize,
+    /// Short bursts follow progress; quiet active work backs off to 5 ms.
+    quiet_ticks: u64,
     cleanup: Vec<PendingCleanup>,
     next_check: Instant,
     next_prune: Instant,
@@ -171,7 +245,7 @@ enum LedgerError {
 impl Hub {
     fn run(mut self, input: Receiver<Command>) {
         loop {
-            match input.recv_timeout(Duration::from_millis(5)) {
+            match input.recv_timeout(self.wait_time(Instant::now())) {
                 Ok(command) => self.command(command),
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -184,10 +258,18 @@ impl Hub {
             }
             self.tick();
         }
+        for connection in self.connections.keys().copied().collect::<Vec<_>>() {
+            self.close(connection);
+        }
         self.supervisor.shutdown(Duration::from_secs(2));
         let until = Instant::now() + Duration::from_secs(4);
-        while !self.supervisor.is_empty() && Instant::now() < until {
-            self.supervisor.poll(Duration::from_millis(2));
+        while (!self.supervisor.is_empty()
+            || !self.ledger_jobs.is_empty()
+            || !self.cleanup.is_empty())
+            && Instant::now() < until
+        {
+            self.tick();
+            std::thread::sleep(Duration::from_millis(2));
         }
     }
 
@@ -199,6 +281,7 @@ impl Hub {
     }
 
     fn command(&mut self, command: Command) {
+        self.quiet_ticks = 0;
         match command {
             Command::Open {
                 connection,
@@ -268,6 +351,22 @@ impl Hub {
                     self.emit(connection, json!({"id":id,"event":wire::encode_update(&Update::Failed(wire::failure(ErrorCode::InvalidRequest,wire::reason::APP_NOT_AUTHORIZED,false)))}));
                     return;
                 };
+                let hints = match value
+                    .get("scheduling")
+                    .cloned()
+                    .map(serde_json::from_value::<Hints>)
+                    .transpose()
+                {
+                    Ok(hints) => hints.unwrap_or_default(),
+                    Err(_) => {
+                        self.emit(connection, json!({"id":id,"event":wire::encode_update(&Update::Failed(wire::failure(ErrorCode::InvalidRequest, wire::reason::INVALID_REQUEST, false)))}));
+                        return;
+                    }
+                };
+                let queue_timeout_ms = hints
+                    .queue_timeout_ms
+                    .unwrap_or(self.policy.queue_timeout_ms)
+                    .clamp(1, self.policy.queue_timeout_ms);
                 let request = Request {
                     connection,
                     id,
@@ -275,6 +374,8 @@ impl Hub {
                     provider: provider.to_owned(),
                     method: value["method"].as_str().unwrap_or("").to_owned(),
                     params: value["params"].clone(),
+                    hints,
+                    expires: Instant::now() + Duration::from_millis(queue_timeout_ms),
                 };
                 if self
                     .queue
@@ -286,6 +387,12 @@ impl Hub {
                             .map(|active| &active.request),
                     )
                     .chain(self.cleanup.iter().map(|p| &p.request))
+                    .chain(self.ledger_jobs.iter().filter_map(|p| match &p.action {
+                        LedgerAction::Remove {
+                            cleanup: Some(c), ..
+                        } => Some(&c.request),
+                        _ => None,
+                    }))
                     .any(|other| other.connection == connection && other.id == request.id)
                 {
                     self.close(connection);
@@ -315,6 +422,15 @@ impl Hub {
                         )),
                     );
                 } else {
+                    if request.hints.events {
+                        self.event(
+                            &request,
+                            Update::Queued {
+                                ahead: self.queue.len() as u32,
+                                timeout_ms: queue_timeout_ms,
+                            },
+                        );
+                    }
                     self.queue.push_back(request);
                 }
             }
@@ -391,80 +507,202 @@ impl Hub {
         }
     }
 
-    /// The broker token for a provider-native session, creating it on first use.
-    /// A session that already has a token costs nothing: no cap check, no write.
+    /// Returns an already durable token, or submits one ordered mutation and
+    /// pauses this exchange. Peers reporting the same native session join it.
     fn session_token(
         &mut self,
+        turn: TurnId,
         app: &str,
         provider: &str,
         native: String,
-    ) -> Result<String, LedgerError> {
-        if let Some(token) = self.sessions.token(app, provider, &native) {
-            return Ok(token.clone());
+    ) -> Result<Option<String>, LedgerError> {
+        let token = match self.sessions.token(app, provider, &native) {
+            Some(token) if !self.removing(token) => Some(token.clone()),
+            Some(_) => self
+                .sessions
+                .tokens(app, provider, &native)
+                .find(|token| !self.removing(token))
+                .cloned(),
+            None => None,
+        };
+        if let Some(token) = token {
+            if let Some(job) = self.ledger_jobs.iter_mut().find(|job| matches!(&job.action, LedgerAction::Insert { token: pending, .. } if pending == &token)) {
+                if let LedgerAction::Insert { waiters, .. } = &mut job.action { waiters.push(turn); }
+                return Ok(None);
+            }
+            return Ok(Some(token));
         }
-        let app_sessions = self.sessions.app_len(app);
-        if self.sessions.len() >= MAX_SESSIONS || app_sessions >= MAX_APP_SESSIONS {
+        if self.sessions.len() >= MAX_SESSIONS || self.sessions.app_len(app) >= MAX_APP_SESSIONS {
             return Err(LedgerError::Full);
         }
         let token = config::random_token().map_err(|_| LedgerError::Storage)?;
-        self.sessions.insert(
-            token.clone(),
-            Session {
-                app: app.to_owned(),
-                provider: provider.to_owned(),
-                native,
-            },
-        );
-        if self.save_sessions().is_err() {
-            self.sessions.remove(&token);
+        let session = Session {
+            app: app.into(),
+            provider: provider.into(),
+            native,
+        };
+        if self.ledger_jobs.len() >= crate::ledger::CAPACITY {
             return Err(LedgerError::Storage);
         }
-        Ok(token)
+        let result = self
+            .ledger
+            .submit(Mutation::Insert(token.clone(), session.clone()))
+            .map_err(|_| LedgerError::Storage)?;
+        self.sessions.insert(token.clone(), session);
+        self.ledger_jobs.push(PendingLedger {
+            result,
+            action: LedgerAction::Insert {
+                token,
+                waiters: vec![turn],
+            },
+        });
+        Ok(None)
     }
 
-    /// Drops the sessions of apps whose grant no longer exists, so revoking an
-    /// app also frees its share of the ledger and its tokens stop being usable.
-    fn prune_revoked_sessions(&mut self) {
-        let apps: BTreeSet<String> = self.sessions.values().map(|s| s.app.clone()).collect();
-        let missing: BTreeSet<String> = apps
-            .into_iter()
-            .filter(|app| {
-                config::app_path(&self.root, app).is_ok_and(|path| {
-                    matches!(std::fs::symlink_metadata(path),
-                        Err(error) if error.kind() == io::ErrorKind::NotFound)
-                })
-            })
-            .collect();
-        let revoked: Vec<String> = missing
-            .iter()
-            .filter(|app| self.missing_grants.contains(*app))
-            .cloned()
-            .collect();
-        self.missing_grants = missing;
-        if revoked.is_empty() {
+    fn removing(&self, token: &str) -> bool {
+        self.ledger_jobs.iter().any(|job| matches!(&job.action, LedgerAction::Remove { tokens, .. } if tokens.iter().any(|pending| pending == token)))
+    }
+
+    fn remove_sessions(&mut self, tokens: Vec<String>, cleanup: Option<PendingCleanup>) {
+        if tokens.is_empty() {
+            if let Some(cleanup) = cleanup {
+                (cleanup.completed)();
+                self.event(&cleanup.request, Update::Completed);
+            }
             return;
         }
-        let removed: Vec<_> = self
-            .sessions
-            .iter()
-            .filter(|(_, session)| revoked.contains(&session.app))
-            .map(|(token, _)| token.clone())
-            .collect();
-        let removed: Vec<_> = removed
-            .into_iter()
-            .filter_map(|token| self.sessions.remove(&token).map(|session| (token, session)))
-            .collect();
-        if self.save_sessions().is_err() {
-            // Keep them in memory too, and try again at the next sweep.
-            self.sessions.extend(removed);
+        if self.ledger_jobs.len() < crate::ledger::CAPACITY {
+            if let Ok(result) = self.ledger.submit(Mutation::Remove(tokens.clone())) {
+                self.ledger_jobs.push(PendingLedger {
+                    result,
+                    action: LedgerAction::Remove {
+                        tokens,
+                        cleanup: cleanup.map(Box::new),
+                    },
+                });
+                return;
+            }
+        }
+        if let Some(cleanup) = cleanup {
+            self.event(
+                &cleanup.request,
+                Update::Failed(wire::failure(
+                    ErrorCode::InternalError,
+                    wire::reason::CLEANUP_FAILED,
+                    true,
+                )),
+            );
         }
     }
 
-    fn save_sessions(&self) -> io::Result<()> {
-        config::write_private(
-            &self.root.join("sessions.json"),
-            &serde_json::to_vec(&self.sessions)?,
-        )
+    fn poll_ledger(&mut self) -> bool {
+        // Results are committed in submission order even if the hub was busy.
+        let mut progressed = false;
+        while let Some(job) = self.ledger_jobs.first() {
+            let result = match job.result.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Err(io::Error::other("ledger worker stopped"))
+                }
+            };
+            progressed = true;
+            let job = self.ledger_jobs.remove(0);
+            match job.action {
+                LedgerAction::Insert { token, waiters } => {
+                    if result.is_err() {
+                        self.sessions.remove(&token);
+                    }
+                    for turn in waiters {
+                        if let Some(mut active) = self.active.remove(&turn) {
+                            if !active.terminal_sent {
+                                let update = if result.is_ok() {
+                                    Update::Session(token.clone())
+                                } else {
+                                    self.supervisor.cancel(turn);
+                                    Update::Failed(wire::failure(
+                                        ErrorCode::InternalError,
+                                        wire::reason::SESSION_STORE_FAILED,
+                                        false,
+                                    ))
+                                };
+                                active.terminal_sent = update.is_terminal();
+                                if active.terminal_sent {
+                                    self.telemetry.client_saw(turn, &update);
+                                }
+                                self.event(&active.request, update);
+                            }
+                            active.gate.set(true);
+                            self.active.insert(turn, active);
+                        }
+                    }
+                }
+                LedgerAction::Remove { tokens, cleanup } => {
+                    if result.is_ok() {
+                        for token in tokens {
+                            self.sessions.remove(&token);
+                        }
+                    }
+                    if let Some(cleanup) = cleanup {
+                        let update = if result.is_ok() {
+                            (cleanup.completed)();
+                            Update::Completed
+                        } else {
+                            Update::Failed(wire::failure(
+                                ErrorCode::InternalError,
+                                wire::reason::CLEANUP_FAILED,
+                                true,
+                            ))
+                        };
+                        self.event(&cleanup.request, update);
+                    }
+                }
+            }
+        }
+        progressed
+    }
+
+    /// Two missing-grant sweeps are still required. Tokens with a pending
+    /// insert are pruned on the next sweep, after that insert is committed.
+    fn prune_revoked_sessions(&mut self) {
+        let apps: BTreeSet<String> = self.sessions.values().map(|s| s.app.clone()).collect();
+        let missing: BTreeSet<String> = apps.into_iter().filter(|app| {
+            config::app_path(&self.root, app).is_ok_and(|path| matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == io::ErrorKind::NotFound))
+        }).collect();
+        let tokens = self
+            .sessions
+            .iter()
+            .filter(|(token, s)| {
+                missing.contains(&s.app)
+                    && self.missing_grants.contains(&s.app)
+                    && !self.ledger_jobs.iter().any(|job| match &job.action {
+                        LedgerAction::Insert { token: pending, .. } => pending == *token,
+                        LedgerAction::Remove { tokens, .. } => tokens.contains(token),
+                    })
+            })
+            .map(|(token, _)| token.clone())
+            .collect();
+        self.missing_grants = missing;
+        self.remove_sessions(tokens, None);
+    }
+
+    /// With no exchanges or filesystem work to poll, wake only for commands or
+    /// the next authorization/prune/queue timer. Active waits ramp from 1 to
+    /// 5 ms without progress, and commands/results restart the short burst.
+    fn wait_time(&self, now: Instant) -> Duration {
+        let mut until = self.next_prune;
+        if !self.connections.is_empty() {
+            until = until.min(self.next_check);
+        }
+        if let Some(expires) = self.queue.iter().map(|r| r.expires).min() {
+            until = until.min(expires);
+        }
+        let timer = until.saturating_duration_since(now);
+        if !self.active.is_empty() || !self.cleanup.is_empty() || !self.ledger_jobs.is_empty() {
+            timer.min(Duration::from_millis(1 + self.quiet_ticks))
+        } else {
+            timer
+        }
     }
 
     fn tick(&mut self) {
@@ -481,11 +719,14 @@ impl Hub {
             }
             self.next_check = Instant::now() + Duration::from_secs(1);
         }
+        let mut progressed = self.poll_ledger();
         if Instant::now() >= self.next_prune {
             self.prune_revoked_sessions();
             self.next_prune = Instant::now() + PRUNE_INTERVAL;
         }
-        for event in self.supervisor.poll(Duration::from_millis(1)) {
+        let events = self.supervisor.poll(Duration::from_millis(1));
+        progressed |= !events.is_empty();
+        for event in events {
             match event {
                 Event::Update { turn_id, update } => {
                     let Some(mut active) = self.active.remove(&turn_id) else {
@@ -499,8 +740,15 @@ impl Hub {
                         Update::Session(native) if active.persistent => {
                             let app = active.request.app.clone();
                             let provider = active.request.provider.clone();
-                            match self.session_token(&app, &provider, native) {
-                                Ok(token) => Update::Session(token),
+                            match self.session_token(turn_id, &app, &provider, native) {
+                                Ok(Some(token)) => {
+                                    active.gate.set(true);
+                                    Update::Session(token)
+                                }
+                                Ok(None) => {
+                                    self.active.insert(turn_id, active);
+                                    continue;
+                                }
                                 Err(error) => {
                                     self.supervisor.cancel(turn_id);
                                     Update::Failed(wire::failure(
@@ -564,37 +812,24 @@ impl Hub {
         while index < self.cleanup.len() {
             match self.cleanup[index].result.try_recv() {
                 Ok(result) => {
+                    progressed = true;
                     let pending = self.cleanup.swap_remove(index);
-                    let result = result.and_then(|()| {
-                        (pending.completed)();
-                        let removed: Vec<_> = pending
-                            .sessions
-                            .into_iter()
-                            .filter_map(|token| {
-                                self.sessions.remove(&token).map(|session| (token, session))
-                            })
-                            .collect();
-                        let saved = self.save_sessions();
-                        if saved.is_err() {
-                            self.sessions.extend(removed);
-                        }
-                        saved
-                    });
-                    self.event(
-                        &pending.request,
-                        if result.is_ok() {
-                            Update::Completed
-                        } else {
+                    if result.is_ok() {
+                        self.remove_sessions(pending.sessions.clone(), Some(pending));
+                    } else {
+                        self.event(
+                            &pending.request,
                             Update::Failed(wire::failure(
                                 ErrorCode::InternalError,
                                 wire::reason::CLEANUP_FAILED,
                                 true,
-                            ))
-                        },
-                    );
+                            )),
+                        );
+                    }
                 }
                 Err(mpsc::TryRecvError::Empty) => index += 1,
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    progressed = true;
                     let pending = self.cleanup.swap_remove(index);
                     self.event(
                         &pending.request,
@@ -607,55 +842,134 @@ impl Hub {
                 }
             }
         }
-        for _ in 0..self.queue.len() {
-            let Some(request) = self.queue.pop_front() else {
-                break;
-            };
-            let app_count = self
-                .active
-                .values()
-                .filter(|a| a.request.app == request.app)
-                .count()
-                + self
-                    .cleanup
-                    .iter()
-                    .filter(|c| c.request.app == request.app)
-                    .count();
-            let provider_count = self
-                .active
-                .values()
-                .filter(|a| a.request.provider == request.provider)
-                .count()
-                + self
-                    .cleanup
-                    .iter()
-                    .filter(|c| c.request.provider == request.provider)
-                    .count();
-            let cleaning = self
-                .cleanup
-                .iter()
-                .any(|c| c.request.app == request.app && c.request.provider == request.provider);
-            let busy = self
-                .active
-                .values()
-                .any(|a| a.request.app == request.app && a.request.provider == request.provider);
-            if self.active.len() + self.cleanup.len() >= MAX_RUNNING
-                || app_count >= MAX_APP_RUNNING
-                || provider_count >= MAX_PROVIDER_RUNNING
-                || cleaning
-                || (matches!(request.method.as_str(), "forget" | "cleanup") && busy)
-                || (matches!(request.method.as_str(), "send" | "send_ready")
-                    && request.continuation().is_string()
-                    && self.active.values().any(|a| {
-                        a.request.app == request.app
-                            && a.request.continuation() == request.continuation()
-                    }))
-            {
-                self.queue.push_back(request);
+        let now = Instant::now();
+        let mut kept = VecDeque::new();
+        while let Some(request) = self.queue.pop_front() {
+            if request.expires <= now {
+                self.event(
+                    &request,
+                    Update::Failed(wire::failure(
+                        ErrorCode::ProviderFailed,
+                        wire::reason::QUEUE_TIMEOUT,
+                        true,
+                    )),
+                );
             } else {
-                self.admit(request);
+                kept.push_back(request);
             }
         }
+        self.queue = kept;
+        while let Some(index) = self.next_request() {
+            progressed = true;
+            let request = self.queue.remove(index).unwrap();
+            if Self::interactive(&request) {
+                self.interactive_streak = self
+                    .interactive_streak
+                    .saturating_add(1)
+                    .min(self.policy.interactive_burst);
+            } else {
+                self.interactive_streak = 0;
+            }
+            self.last_app = Some(request.app.clone());
+            self.admit(request);
+        }
+        self.quiet_ticks = if progressed {
+            0
+        } else {
+            (self.quiet_ticks + 1).min(4)
+        };
+    }
+
+    fn interactive(request: &Request) -> bool {
+        request.hints.interactive || Class::of(&request.method) == Class::Readiness
+    }
+
+    fn running_requests(&self) -> impl Iterator<Item = &Request> {
+        self.active
+            .values()
+            .map(|a| &a.request)
+            .chain(self.cleanup.iter().map(|c| &c.request))
+            .chain(self.ledger_jobs.iter().filter_map(|j| match &j.action {
+                LedgerAction::Remove {
+                    cleanup: Some(c), ..
+                } => Some(&c.request),
+                _ => None,
+            }))
+    }
+
+    fn eligible(&self, request: &Request) -> bool {
+        let class = Class::of(&request.method);
+        let running: Vec<_> = self.running_requests().collect();
+        let class_count = running
+            .iter()
+            .filter(|r| Class::of(&r.method) == class)
+            .count();
+        // Generation leaves a readiness reserve. Cleanup has its own bounded
+        // lane and uses spare global capacity; all classes obey that ceiling.
+        let class_limit = match class {
+            Class::Generation => self.policy.generation_limit(),
+            Class::Readiness => self.policy.max_readiness_running,
+            Class::Cleanup => self.policy.max_cleanup_running,
+        };
+        let same_class = |r: &&Request| Class::of(&r.method) == class;
+        if running.len() >= self.policy.max_running
+            || class_count >= class_limit
+            || running
+                .iter()
+                .filter(|r| same_class(r) && r.app == request.app)
+                .count()
+                >= self.policy.max_app_running
+            || running
+                .iter()
+                .filter(|r| same_class(r) && r.provider == request.provider)
+                .count()
+                >= self.policy.max_provider_running
+        {
+            return false;
+        }
+        let cleanup_conflict = running.iter().any(|r| {
+            r.app == request.app
+                && r.provider == request.provider
+                && (Class::of(&r.method) == Class::Cleanup || class == Class::Cleanup)
+                && Class::of(&r.method) != Class::Readiness
+                && class != Class::Readiness
+        });
+        if cleanup_conflict {
+            return false;
+        }
+        !(class == Class::Generation
+            && request.continuation().is_string()
+            && running.iter().any(|r| {
+                r.app == request.app
+                    && r.provider == request.provider
+                    && r.continuation() == request.continuation()
+            }))
+    }
+
+    fn next_request(&self) -> Option<usize> {
+        let eligible: Vec<_> = self
+            .queue
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| self.eligible(r))
+            .collect();
+        let preferred = if self.interactive_streak >= self.policy.interactive_burst
+            && eligible.iter().any(|(_, r)| !Self::interactive(r))
+        {
+            false
+        } else {
+            eligible.iter().any(|(_, r)| Self::interactive(r))
+        };
+        // Rotation across eligible apps in this tier, then FIFO within the
+        // chosen app. No application names or provider-specific priorities.
+        eligible
+            .iter()
+            .filter(|(_, r)| Self::interactive(r) == preferred)
+            .min_by_key(|(i, r)| {
+                let wrapped = self.last_app.as_ref().is_some_and(|last| r.app <= *last);
+                (wrapped, &r.app, *i)
+            })
+            .map(|(index, _)| *index)
     }
 
     #[allow(clippy::map_entry)] // Admission errors also need mutable access to the connection table.
@@ -669,8 +983,14 @@ impl Hub {
             return;
         }
         self.telemetry.admitted(request.connection, &request.id);
+        if request.hints.events {
+            self.event(&request, Update::Admitted);
+        }
         let key = (request.app.clone(), request.provider.clone());
-        let grant = self.connections[&request.connection].grant.clone();
+        let Some(connection) = self.connections.get(&request.connection) else {
+            return;
+        };
+        let grant = connection.grant.clone();
         if self.providers.iter().any(|((app, _), retained)| {
             app == &request.app && !retained.grant.same_provider_scope(&grant)
         }) {
@@ -725,6 +1045,16 @@ impl Hub {
         let result = catch_unwind(AssertUnwindSafe(|| self.build(&request, &key)));
         match result {
             Ok(Ok(Built::Exchange(exchange, timeouts, persistent))) => {
+                let gate = Rc::new(Cell::new(true));
+                let exchange: Box<dyn seatline_core::exchange::Exchange> = if persistent {
+                    Box::new(SessionGate {
+                        exchange,
+                        open: gate.clone(),
+                        cancelled: false,
+                    })
+                } else {
+                    exchange
+                };
                 let grace = Duration::from_secs(2);
                 let turn = match self.telemetry.hand_off(request.connection, &request.id) {
                     Some((identity, timeline)) => {
@@ -742,14 +1072,28 @@ impl Hub {
                         request,
                         persistent,
                         terminal_sent: false,
+                        gate,
                     },
                 );
             }
             Ok(Ok(Built::Cleanup(cleanup, sessions))) => {
-                let (send, result) = mpsc::sync_channel(1);
-                std::thread::spawn(move || {
-                    let _ = send.send((cleanup.work)());
-                });
+                let result = match seatline_core::work::Worker::cleanup()
+                    .and_then(|pool| pool.reserve())
+                    .and_then(|permit| permit.submit(cleanup.work))
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        self.event(
+                            &request,
+                            Update::Failed(wire::failure(
+                                ErrorCode::InternalError,
+                                wire::reason::CLEANUP_BACKLOG_FULL,
+                                true,
+                            )),
+                        );
+                        return;
+                    }
+                };
                 self.cleanup.push(PendingCleanup {
                     request,
                     result,
@@ -850,7 +1194,9 @@ impl Hub {
                         .sessions
                         .get(token)
                         .filter(|session| {
-                            session.app == request.app && session.provider == request.provider
+                            session.app == request.app
+                                && session.provider == request.provider
+                                && !self.removing(token)
                         })
                         .ok_or_else(|| {
                             wire::failure(
@@ -1308,8 +1654,15 @@ mod tests {
     fn setup() -> (Hub, Vec<tokio::sync::mpsc::Receiver<Value>>) {
         let root =
             std::env::temp_dir().join(format!("seatline-hub-{}", config::random_token().unwrap()));
+        let ledger = Ledger::new(root.clone(), Sessions::default()).unwrap();
         let mut hub = Hub {
             root,
+            ledger,
+            ledger_jobs: Vec::new(),
+            policy: Policy::default(),
+            last_app: None,
+            interactive_streak: 0,
+            quiet_ticks: 0,
             connections: BTreeMap::new(),
             queue: VecDeque::new(),
             providers: BTreeMap::new(),
@@ -1373,9 +1726,7 @@ mod tests {
         let (mut hub, mut output) = setup();
         request(&mut hub, 1, "a", "send", turn(None));
         request(&mut hub, 2, "b", "send", turn(None));
-        for _ in 0..5 {
-            hub.tick();
-        }
+        ticks(&mut hub, 5);
         let first = drain(&mut output[0]);
         let second = drain(&mut output[1]);
         let token = |events: &[Value]| {
@@ -1403,9 +1754,7 @@ mod tests {
             "forget",
             json!({"sessions":[a]}),
         );
-        for _ in 0..5 {
-            hub.tick();
-        }
+        ticks(&mut hub, 5);
         let failures = drain(&mut output[1]);
         assert_eq!(failures.len(), 2);
         assert!(
@@ -1433,9 +1782,7 @@ mod tests {
         hub.tick();
         assert!(!hub.connections.contains_key(&1));
         assert!(hub.connections.contains_key(&2));
-        for _ in 0..5 {
-            hub.tick();
-        }
+        ticks(&mut hub, 5);
         assert!(
             drain(&mut output[1])
                 .iter()
@@ -1467,9 +1814,7 @@ mod tests {
             "send",
             turn_with_tools("provider_default"),
         );
-        for _ in 0..8 {
-            hub.tick();
-        }
+        ticks(&mut hub, 8);
         let events = drain(&mut output[0]);
         let outcome = |id: &str| -> Vec<Value> {
             events
@@ -1519,9 +1864,7 @@ mod tests {
             "send",
             turn_with_tools("provider_default"),
         );
-        for _ in 0..8 {
-            hub.tick();
-        }
+        ticks(&mut hub, 8);
         let events = drain(&mut reopened);
         assert_eq!(failure_reason(&events), None);
         assert!(
@@ -1543,6 +1886,7 @@ mod tests {
                 },
             );
         }
+        hub.ledger = Ledger::new(hub.root.clone(), hub.sessions.clone()).unwrap();
     }
 
     #[test]
@@ -1561,9 +1905,7 @@ mod tests {
             let mut other_turn = turn(None);
             other_turn["session"] = json!("ephemeral");
             request(&mut hub, 2, "unrelated", "send", other_turn);
-            for _ in 0..8 {
-                hub.tick();
-            }
+            ticks(&mut hub, 8);
             let failed = drain(&mut output[0]);
             assert_eq!(failed.len(), 1, "output leaked after {reason}: {failed:?}");
             assert_eq!(failed[0]["event"]["type"], "failed");
@@ -1632,12 +1974,15 @@ mod tests {
                         provider: "codex".into(),
                         method: "send".into(),
                         params: turn(None),
+                        hints: Hints::default(),
+                        expires: Instant::now() + Duration::from_secs(30),
                     },
                     persistent: true,
                     terminal_sent: false,
+                    gate: Rc::new(Cell::new(true)),
                 },
             );
-            hub.tick();
+            ticks(&mut hub, 8);
             assert!(cancelled.get());
             assert!(hub.active[&turn_id].terminal_sent);
             assert!(!hub.supervisor.is_empty());
@@ -1652,9 +1997,7 @@ mod tests {
             request(&mut hub, 1, "failing", "send", retry);
             assert!(hub.connections.contains_key(&1));
             assert_eq!(hub.queue.len(), 1);
-            for _ in 0..8 {
-                hub.tick();
-            }
+            ticks(&mut hub, 8);
             let retried = drain(&mut output[0]);
             assert!(retried.iter().all(|event| event["id"] == "failing"));
             assert!(retried.iter().any(|v| v["event"]["type"] == "delta"));
@@ -1696,9 +2039,7 @@ mod tests {
             request(&mut hub, 1, "duplicate", "send", turn(None));
             assert!(!hub.connections.contains_key(&1));
             assert!(hub.queue.is_empty());
-            for _ in 0..8 {
-                hub.tick();
-            }
+            ticks(&mut hub, 8);
             assert!(hub.active.is_empty());
             assert!(hub.supervisor.is_empty());
             std::fs::remove_dir_all(&hub.root).unwrap();
@@ -1710,24 +2051,28 @@ mod tests {
         let (mut hub, _output) = setup();
         fill_ledger(&mut hub, "first", MAX_APP_SESSIONS);
         assert!(matches!(
-            hub.session_token("first", "codex", "brand-new".into()),
+            hub.session_token(0, "first", "codex", "brand-new".into()),
             Err(LedgerError::Full)
         ));
         // A session that already has a token keeps working at the cap, without a rewrite.
         assert!(
-            hub.session_token("first", "codex", "native-first-7".into())
+            hub.session_token(0, "first", "codex", "native-first-7".into())
                 .is_ok()
         );
         // Other apps still have room.
-        let token = hub
-            .session_token("second", "codex", "another".into())
-            .unwrap_or_else(|_| panic!("second app was locked out"));
-        assert_eq!(hub.sessions[&token].app, "second");
+        assert!(
+            hub.session_token(0, "second", "codex", "another".into())
+                .unwrap_or_else(|_| panic!("second app was locked out"))
+                .is_none()
+        );
+        ticks(&mut hub, 4);
+        let token = hub.sessions.token("second", "codex", "another").unwrap();
+        assert_eq!(hub.sessions[token].app, "second");
         // The global cap still applies.
         let room = MAX_SESSIONS - hub.sessions.len();
         fill_ledger(&mut hub, "third", room);
         assert!(matches!(
-            hub.session_token("second", "codex", "over-the-cap".into()),
+            hub.session_token(0, "second", "codex", "over-the-cap".into()),
             Err(LedgerError::Full)
         ));
         std::fs::remove_dir_all(&hub.root).unwrap();
@@ -1738,11 +2083,16 @@ mod tests {
         let (mut hub, _output) = setup();
         fill_ledger(&mut hub, "first", 3);
         fill_ledger(&mut hub, "second", 2);
-        hub.save_sessions().unwrap();
+        config::write_private(
+            &hub.root.join("sessions.json"),
+            &serde_json::to_vec(&hub.sessions).unwrap(),
+        )
+        .unwrap();
         std::fs::remove_file(config::app_path(&hub.root, "first").unwrap()).unwrap();
         hub.prune_revoked_sessions();
         assert_eq!(hub.sessions.len(), 5, "one sweep is not enough");
         hub.prune_revoked_sessions();
+        ticks(&mut hub, 4);
         assert_eq!(hub.sessions.len(), 2);
         assert!(hub.sessions.values().all(|session| session.app == "second"));
         let saved: BTreeMap<String, Session> =
@@ -1763,6 +2113,7 @@ mod tests {
         std::fs::write(&path, grant).unwrap();
         hub.prune_revoked_sessions();
         hub.prune_revoked_sessions();
+        ticks(&mut hub, 4);
         assert_eq!(hub.sessions.len(), 2);
         std::fs::remove_dir_all(&hub.root).unwrap();
     }
@@ -1791,6 +2142,8 @@ mod tests {
     fn ticks(hub: &mut Hub, count: usize) {
         for _ in 0..count {
             hub.tick();
+            std::thread::sleep(Duration::from_millis(1));
+            hub.poll_ledger();
         }
     }
 
@@ -2006,6 +2359,356 @@ mod tests {
                 .iter()
                 .any(|v| v["event"]["type"] == "completed")
         );
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+    #[test]
+    fn slow_persistence_gates_the_handle_and_answer_but_other_apps_and_cancel_keep_running() {
+        let (mut hub, mut output) = setup();
+        let (release, wait) = mpsc::channel();
+        let (entered, started) = mpsc::channel();
+        let root = hub.root.clone();
+        hub.ledger = Ledger::with_writer(hub.sessions.clone(), move |sessions| {
+            entered.send(()).unwrap();
+            wait.recv().unwrap();
+            config::write_private(&root.join("sessions.json"), &serde_json::to_vec(sessions)?)
+        })
+        .unwrap();
+        request(&mut hub, 1, "slow", "send", turn(None));
+        let mut ephemeral = turn(None);
+        ephemeral["session"] = json!("ephemeral");
+        request(&mut hub, 2, "other", "send", ephemeral.clone());
+        ticks(&mut hub, 6);
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            drain(&mut output[0]).is_empty(),
+            "undurable handle/answer escaped"
+        );
+        assert_eq!(
+            drain(&mut output[1]).last().unwrap()["event"]["type"],
+            "completed"
+        );
+        hub.command(Command::Request {
+            connection: 1,
+            value: json!({"id":"cancel","method":"cancel","target":"slow"}),
+        });
+        ticks(&mut hub, 4);
+        assert_eq!(
+            drain(&mut output[0]).last().unwrap()["event"]["type"],
+            "stopped"
+        );
+        request(&mut hub, 1, "slow", "send", ephemeral);
+        ticks(&mut hub, 4);
+        assert_eq!(
+            drain(&mut output[0]).last().unwrap()["event"]["type"],
+            "completed"
+        );
+        release.send(()).unwrap();
+        ticks(&mut hub, 8);
+        assert!(
+            drain(&mut output[0]).is_empty(),
+            "cancelled handle acknowledged late"
+        );
+        assert!(hub.active.is_empty());
+        assert!(hub.ledger_jobs.is_empty());
+        let restarted: Sessions =
+            serde_json::from_slice(&std::fs::read(hub.root.join("sessions.json")).unwrap())
+                .unwrap();
+        assert_eq!(restarted.len(), 1);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn a_successful_session_is_announced_only_after_a_durable_write_and_reuse_does_not_rewrite() {
+        let (mut hub, mut output) = setup();
+        let (release, wait) = mpsc::channel();
+        let root = hub.root.clone();
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = writes.clone();
+        hub.ledger = Ledger::with_writer(hub.sessions.clone(), move |sessions| {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            wait.recv().unwrap();
+            config::write_private(&root.join("sessions.json"), &serde_json::to_vec(sessions)?)
+        })
+        .unwrap();
+        request(&mut hub, 1, "a", "send", turn(None));
+        ticks(&mut hub, 4);
+        assert!(drain(&mut output[0]).is_empty());
+        release.send(()).unwrap();
+        ticks(&mut hub, 8);
+        let events = drain(&mut output[0]);
+        assert_eq!(events[0]["event"]["type"], "session");
+        let token = events[0]["event"]["handle"].as_str().unwrap();
+        let restarted: Sessions =
+            serde_json::from_slice(&std::fs::read(hub.root.join("sessions.json")).unwrap())
+                .unwrap();
+        assert_eq!(restarted[token].native, "raw-native-handle");
+        request(&mut hub, 1, "b", "send", turn(Some(token)));
+        ticks(&mut hub, 8);
+        assert_eq!(
+            drain(&mut output[0]).last().unwrap()["event"]["type"],
+            "completed"
+        );
+        assert_eq!(writes.load(std::sync::atomic::Ordering::Relaxed), 1);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn queue_events_deadlines_and_idle_wait_are_bounded_and_legacy_clients_are_unchanged() {
+        let (mut hub, mut output) = setup();
+        let now = Instant::now();
+        hub.next_check = now + Duration::from_secs(1);
+        hub.next_prune = now + Duration::from_secs(60);
+        assert_eq!(hub.wait_time(now), Duration::from_secs(1));
+        hub.command(Command::Request { connection:1, value:json!({"id":"timed","provider":"codex","method":"status","params":{},"scheduling":{"events":true,"queue_timeout_ms":100}}) });
+        assert_eq!(drain(&mut output[0])[0]["event"]["type"], "queued");
+        hub.queue[0].expires = now;
+        hub.tick();
+        let events = drain(&mut output[0]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(failure_reason(&events).as_deref(), Some("QUEUE_TIMEOUT"));
+        assert!(hub.supervisor.is_empty());
+        hub.command(Command::Request { connection:1, value:json!({"id":"visible","provider":"codex","method":"status","params":{},"scheduling":{"events":true}}) });
+        ticks(&mut hub, 3);
+        let events = drain(&mut output[0]);
+        assert_eq!(
+            events
+                .iter()
+                .map(|v| v["event"]["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["queued", "admitted", "completed"]
+        );
+        request(&mut hub, 1, "legacy", "status", json!({}));
+        ticks(&mut hub, 3);
+        assert_eq!(drain(&mut output[0]).len(), 1);
+        hub.connections.clear();
+        assert_eq!(hub.wait_time(now), Duration::from_secs(60));
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn app_rotation_and_bounded_interactive_bursts_do_not_starve_regular_work() {
+        let (mut hub, _output) = setup();
+        // Three apps, repeated interactive work, and a regular request. Test
+        // admission opportunities, independently of provider/network duration.
+        for (i, app, interactive) in [
+            (0, "a", true),
+            (1, "a", true),
+            (2, "b", true),
+            (3, "c", true),
+            (4, "c", false),
+            (5, "b", true),
+            (6, "a", true),
+        ] {
+            hub.queue.push_back(Request {
+                connection: 1,
+                id: i.to_string(),
+                app: app.into(),
+                provider: "codex".into(),
+                method: "send".into(),
+                params: turn(None),
+                hints: Hints {
+                    interactive,
+                    ..Hints::default()
+                },
+                expires: Instant::now() + Duration::from_secs(30),
+            });
+        }
+        let mut chosen = Vec::new();
+        while let Some(index) = hub.next_request() {
+            let request = hub.queue.remove(index).unwrap();
+            if Hub::interactive(&request) {
+                hub.interactive_streak += 1;
+            } else {
+                hub.interactive_streak = 0;
+            }
+            hub.last_app = Some(request.app.clone());
+            chosen.push(request.id);
+        }
+        assert_eq!(&chosen[..4], ["0", "2", "3", "4"]);
+        assert_eq!(chosen.len(), 7);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn readiness_is_admitted_under_generation_contention_without_exceeding_limits() {
+        let (mut hub, mut output) = setup();
+        struct Pending;
+        impl Exchange for Pending {
+            fn next(&mut self, _: Instant) -> Option<Update> {
+                None
+            }
+            fn cancel(&mut self, _: Duration) {}
+        }
+        for (id, connection, app) in [("long1", 1, "first"), ("long2", 2, "second")] {
+            let turn = hub
+                .supervisor
+                .start(Box::new(Pending), None, Duration::ZERO);
+            hub.active.insert(
+                turn,
+                Active {
+                    request: Request {
+                        connection,
+                        id: id.into(),
+                        app: app.into(),
+                        provider: "codex".into(),
+                        method: "send".into(),
+                        params: turn_with_tools("none"),
+                        hints: Hints::default(),
+                        expires: Instant::now() + Duration::from_secs(30),
+                    },
+                    persistent: false,
+                    terminal_sent: false,
+                    gate: Rc::new(Cell::new(true)),
+                },
+            );
+        }
+        request(&mut hub, 1, "blocked", "send", turn_with_tools("none"));
+        request(&mut hub, 2, "ready", "status", json!({}));
+        hub.tick();
+        assert_eq!(hub.queue.len(), 1);
+        assert_eq!(hub.active.len(), 3);
+        assert!(hub.active.len() <= hub.policy.max_running);
+        hub.tick();
+        assert_eq!(
+            drain(&mut output[1]).last().unwrap()["event"]["type"],
+            "completed"
+        );
+        assert_eq!(hub.active.len(), 2);
+        assert!(drain(&mut output[0]).is_empty());
+        assert_eq!(hub.wait_time(Instant::now()), Duration::from_millis(1));
+        for delay in [2, 3, 4, 5, 5] {
+            hub.tick();
+            assert_eq!(hub.wait_time(Instant::now()), Duration::from_millis(delay));
+        }
+        request(&mut hub, 2, "wakeup", "status", json!({}));
+        assert_eq!(hub.wait_time(Instant::now()), Duration::from_millis(1));
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+    #[test]
+    fn cleanup_is_acknowledged_after_durable_removal_and_failure_keeps_retry_state() {
+        let (mut hub, mut output) = setup();
+        let completed = Rc::new(Cell::new(0));
+        struct CleanupFixture(Rc<Cell<usize>>);
+        impl Provider for CleanupFixture {
+            fn id(&self) -> &str {
+                "codex"
+            }
+            fn capabilities(&self) -> Capabilities {
+                Fixture.capabilities()
+            }
+            fn timeouts(&self) -> Timeouts {
+                Fixture.timeouts()
+            }
+            fn supports_persistent_session(&self) -> bool {
+                true
+            }
+            fn status(&self) -> Box<dyn Exchange> {
+                Fixture.status()
+            }
+            fn send(&self, turn: Turn) -> Box<dyn Exchange> {
+                Fixture.send(turn)
+            }
+            fn cleanup_sessions(&self, _: &[String]) -> Cleanup {
+                let completed = self.0.clone();
+                Cleanup::new(|| Ok(()), move || completed.set(completed.get() + 1))
+            }
+        }
+        install_provider(
+            &mut hub,
+            "first",
+            Box::new(CleanupFixture(completed.clone())),
+        );
+        fill_ledger(&mut hub, "first", 1);
+        let token = hub.sessions.keys().next().unwrap().clone();
+        let (release, wait) = mpsc::channel();
+        hub.ledger = Ledger::with_writer(hub.sessions.clone(), move |_| {
+            wait.recv().unwrap();
+            Err(io::Error::other("injected removal failure"))
+        })
+        .unwrap();
+        request(&mut hub, 1, "forget", "forget", json!({"sessions":[token]}));
+        ticks(&mut hub, 6);
+        assert!(!hub.ledger_jobs.is_empty());
+        assert!(hub.sessions.contains_key(&token));
+        assert_eq!(completed.get(), 0);
+        assert!(drain(&mut output[0]).is_empty());
+        let mut ephemeral = turn(None);
+        ephemeral["session"] = json!("ephemeral");
+        request(&mut hub, 2, "other", "send", ephemeral);
+        ticks(&mut hub, 6);
+        assert_eq!(
+            drain(&mut output[1]).last().unwrap()["event"]["type"],
+            "completed"
+        );
+        release.send(()).unwrap();
+        ticks(&mut hub, 6);
+        assert_eq!(
+            failure_reason(&drain(&mut output[0])).as_deref(),
+            Some("CLEANUP_FAILED")
+        );
+        assert!(hub.sessions.contains_key(&token));
+        assert_eq!(completed.get(), 0);
+        hub.ledger = Ledger::new(hub.root.clone(), hub.sessions.clone()).unwrap();
+        request(&mut hub, 1, "retry", "forget", json!({"sessions":[token]}));
+        ticks(&mut hub, 8);
+        assert_eq!(
+            drain(&mut output[0]).last().unwrap()["event"]["type"],
+            "completed"
+        );
+        assert!(!hub.sessions.contains_key(&token));
+        assert_eq!(completed.get(), 1);
+        let restarted: Sessions =
+            serde_json::from_slice(&std::fs::read(hub.root.join("sessions.json")).unwrap())
+                .unwrap();
+        assert!(restarted.is_empty());
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+    #[test]
+    fn a_pending_revocation_removal_cannot_be_resumed_or_reacknowledged_after_reauthorization() {
+        let (mut hub, mut output) = setup();
+        fill_ledger(&mut hub, "first", 1);
+        let token = hub.sessions.keys().next().unwrap().clone();
+        let (release, wait) = mpsc::channel();
+        let root = hub.root.clone();
+        let mut first = true;
+        hub.ledger = Ledger::with_writer(hub.sessions.clone(), move |sessions| {
+            if first {
+                first = false;
+                wait.recv().unwrap();
+            }
+            config::write_private(&root.join("sessions.json"), &serde_json::to_vec(sessions)?)
+        })
+        .unwrap();
+        let grant = config::app_path(&hub.root, "first").unwrap();
+        let saved = std::fs::read(&grant).unwrap();
+        std::fs::remove_file(&grant).unwrap();
+        hub.prune_revoked_sessions();
+        hub.prune_revoked_sessions();
+        std::fs::write(&grant, saved).unwrap();
+        request(&mut hub, 1, "resume", "send", turn(Some(&token)));
+        ticks(&mut hub, 4);
+        assert_eq!(
+            failure_reason(&drain(&mut output[0])).as_deref(),
+            Some("UNKNOWN_SESSION")
+        );
+        assert!(
+            hub.session_token(0, "first", "codex", "native-first-0".into())
+                .unwrap_or_else(|_| panic!("fresh reservation failed"))
+                .is_none()
+        );
+        release.send(()).unwrap();
+        ticks(&mut hub, 8);
+        assert!(!hub.sessions.contains_key(&token));
+        assert!(
+            hub.sessions
+                .token("first", "codex", "native-first-0")
+                .is_some()
+        );
+        assert_eq!(hub.sessions.len(), 1);
+        let restarted: Sessions =
+            serde_json::from_slice(&std::fs::read(hub.root.join("sessions.json")).unwrap())
+                .unwrap();
+        assert_eq!(restarted.len(), 1);
         std::fs::remove_dir_all(&hub.root).unwrap();
     }
 }
