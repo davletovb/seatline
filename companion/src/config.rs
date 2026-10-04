@@ -242,11 +242,39 @@ pub fn endpoint(root: &Path) -> io::Result<String> {
     }
     #[cfg(windows)]
     {
-        let file = root.join("instance-id");
-        if !file.exists() {
-            write_private(&file, random_token()?.as_bytes())?;
+        Ok(format!("seatline-{}", instance_id(root)?))
+    }
+}
+
+/// The Windows endpoint identity is created once. A check followed by a
+/// replacement write can give simultaneous first-time clients different pipe
+/// names. Only cold initialization takes this lock, before any IPC/hub work;
+/// existing identities keep the read-only path.
+#[cfg(any(windows, test))]
+fn instance_id(root: &Path) -> io::Result<String> {
+    let path = root.join("instance-id");
+    match fs::read_to_string(&path) {
+        Ok(id) => return Ok(id.trim().to_owned()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    create_private_dir(root)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join("instance-id.lock"))?;
+    fs2::FileExt::lock_exclusive(&lock)?;
+    // Another initializer may have published while this one acquired the lock.
+    match fs::read_to_string(&path) {
+        Ok(id) => Ok(id.trim().to_owned()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let id = random_token()?;
+            write_private(&path, id.as_bytes())?;
+            Ok(id)
         }
-        Ok(format!("seatline-{}", fs::read_to_string(file)?.trim()))
+        Err(error) => Err(error),
     }
 }
 
@@ -279,6 +307,34 @@ mod tests {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
     const EXTENSION: &str = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/";
+
+    #[test]
+    fn simultaneous_first_time_clients_share_one_stable_complete_endpoint_identity() {
+        let root =
+            std::env::temp_dir().join(format!("seatline-endpoint-{}", random_token().unwrap()));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let (root, barrier) = (root.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    instance_id(&root).unwrap()
+                })
+            })
+            .collect();
+        let ids: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(ids[0].len(), 64);
+        assert!(ids.iter().all(|id| id == &ids[0]), "{ids:?}");
+        assert_eq!(instance_id(&root).unwrap(), ids[0]);
+        assert_eq!(
+            fs::read_to_string(root.join("instance-id")).unwrap(),
+            ids[0]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn https_origins_are_normalized_and_anything_else_is_refused() {
