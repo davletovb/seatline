@@ -534,8 +534,10 @@ impl Provider for Gemini {
                                 let bytes = fs::read(entry.path())?;
                                 let workspace: PathBuf =
                                     serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                                // Use the same platform-specific path form as
+                                // launch (Windows keeps the non-verbatim form).
                                 if workspace.parent()
-                                    != Some(fs::canonicalize(&workspace_base)?.as_path())
+                                    != Some(workspace::prepare(&workspace_base)?.as_path())
                                     || !workspace
                                         .file_name()
                                         .is_some_and(|s| s.to_string_lossy().starts_with("turn-"))
