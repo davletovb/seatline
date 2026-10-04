@@ -24,10 +24,12 @@ pub struct Params {
 }
 
 /// Every scenario, in the order they are run.
-pub const ALL: [&str; 10] = [
+pub const ALL: [&str; 12] = [
     "cold-broker",
+    "cold-three-app",
     "warm-send",
     "warm-send-adapter",
+    "warm-send-shared",
     "warm-send-probe",
     "warm-status",
     "resumed-context",
@@ -39,10 +41,11 @@ pub const ALL: [&str; 10] = [
 
 /// The scenarios a live provider can be asked for. The competing-load ones
 /// need requests of a known length, which only the fake provider has.
-pub const LIVE: [&str; 7] = [
+pub const LIVE: [&str; 8] = [
     "cold-broker",
     "warm-send",
     "warm-send-adapter",
+    "warm-send-shared",
     "warm-send-probe",
     "warm-status",
     "resumed-context",
@@ -64,6 +67,10 @@ fn describe(name: &str) -> Option<Description> {
             state: "cold_broker_fresh_provider",
             text: "No broker is running. The application's client starts one, connects, and sends one request; the provider is a fresh process. Each sample uses a new broker and data directory. Preparation includes starting the broker.",
         },
+        "cold-three-app" => Description {
+            state: "cold_broker_fresh_provider",
+            text: "No broker is running, and three applications start at the same moment, each with one request. Their clients all find no broker and each start one: how many companion processes that takes, and how long each application waits for the broker, is what is measured. Each sample uses a new broker and data directory, and the applications start the companion through the harness, which counts the starts and adds one process hop to each.",
+        },
         "warm-send" => Description {
             state: "warm_broker_fresh_provider",
             text: "A broker is already running. Each request is made on a new connection, as the shipped client does, and runs a fresh provider process. No sign-in probe.",
@@ -71,6 +78,10 @@ fn describe(name: &str) -> Option<Description> {
         "warm-send-adapter" => Description {
             state: "warm_broker_fresh_provider",
             text: "As `warm-send`, but through the shipped `RemoteProvider` the way an application's adapter calls it, which starts a thread, a runtime and a connection for every exchange. Only what shows from outside is timed, from the call that starts the exchange, so connecting and the handshake are not reported apart.",
+        },
+        "warm-send-shared" => Description {
+            state: "warm_broker_fresh_provider",
+            text: "As `warm-send-adapter`, but the application makes one `RemoteClient` and every request is a request on its one runtime and one authenticated connection (D-01). The connection is made by the first request, a warm-up, so measured requests find it open. Compare with `warm-send-adapter` for what a connection per exchange costs.",
         },
         "warm-send-probe" => Description {
             state: "warm_broker_fresh_provider",
@@ -223,6 +234,7 @@ pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
     }
     let plans = match name {
         "cold-broker" => return cold(lab, scenario, params),
+        "cold-three-app" => return cold_together(lab, scenario, params),
         "warm-send" => vec![Plan {
             app: "bench-a",
             role: "single",
@@ -232,6 +244,11 @@ pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
             app: "bench-a",
             role: "single",
             requests: sequence(name, "bench-a", live, params, |req| req.via = Via::Adapter),
+        }],
+        "warm-send-shared" => vec![Plan {
+            app: "bench-a",
+            role: "single",
+            requests: sequence(name, "bench-a", live, params, |req| req.via = Via::Shared),
         }],
         "warm-send-probe" => vec![Plan {
             app: "bench-a",
@@ -403,6 +420,58 @@ fn cold(lab: &mut Lab, mut scenario: Scenario, params: Params) -> io::Result<Sce
     Ok(scenario)
 }
 
+/// A new broker for every sample, as in `cold`, but three applications start
+/// at once and each asks for its first request, so all three find no broker.
+fn cold_together(lab: &mut Lab, mut scenario: Scenario, params: Params) -> io::Result<Scenario> {
+    let live = lab.settings.live.is_some();
+    let apps = ["bench-a", "bench-b", "bench-c"];
+    lab.count_companion_starts();
+    let mut samples: Vec<Vec<Sample>> = apps.iter().map(|_| Vec::new()).collect();
+    for round in 0..params.warmup + params.samples {
+        let instance = lab.instance(&apps)?;
+        let mut children = Vec::new();
+        for app in apps {
+            let mut req = request(format!("cold-three-app-{app}-{round}"), short_prompt(live));
+            req.measured = round >= params.warmup;
+            let spec = Spec {
+                root: instance.root.clone(),
+                app: app.to_owned(),
+                provider: lab.settings.provider().to_owned(),
+                requests: vec![req],
+                stop_file: None,
+            };
+            // A broker that starts leaves by itself a second after it is idle.
+            children.push(lab.spawn_app(&instance, &apps, 1, &spec)?);
+        }
+        // Every application is ready: they find no broker together.
+        for child in &mut children {
+            child.go()?;
+        }
+        let mut round_samples = Vec::new();
+        for child in children {
+            round_samples.push(child.finish()?);
+        }
+        let records = wait_for_records(&instance.telemetry, apps.len());
+        lab.remember_broker(&records);
+        for (kept, mut theirs) in samples.iter_mut().zip(round_samples) {
+            join_for(&mut theirs, &records);
+            kept.append(&mut theirs);
+        }
+        wait_until_stopped(&instance.root)?;
+    }
+    for (app, samples) in apps.iter().zip(&samples) {
+        let result = app_result(app, "cold", samples);
+        ensure_some_completed("cold-three-app", &result)?;
+        scenario.apps.push(result);
+    }
+    scenario.counts = counts(
+        lab,
+        &scenario.apps,
+        (apps.len() * (params.warmup + params.samples)) as u64,
+    );
+    Ok(scenario)
+}
+
 fn counts(lab: &Lab, apps: &[AppResult], requests_total: u64) -> Counts {
     let measured = apps.iter().flat_map(|app| app.samples.iter());
     let (mut probes, mut launches) = (0, 0);
@@ -424,6 +493,7 @@ fn counts(lab: &Lab, apps: &[AppResult], requests_total: u64) -> Counts {
         fake_turns,
         broker_probes: probes,
         broker_launches: launches,
+        companion_starts: lab.companion_starts(),
     }
 }
 
@@ -503,23 +573,56 @@ pub fn join(samples: &mut [Sample], records: &[Value]) {
 /// by position; if the counts differ the order cannot be trusted and nothing is
 /// matched.
 pub fn join_in_order(samples: &mut [Sample], records: &[Value]) {
+    join_by_position(samples, records, |id| id == "request", true);
+}
+
+/// [`join_in_order`] for requests made through a shared `RemoteClient`, which
+/// names its requests `r1`, `r2`... One connection serves them all, so the one
+/// handshake is not any request's: it is left out.
+pub fn join_shared(samples: &mut [Sample], records: &[Value]) {
+    join_by_position(
+        samples,
+        records,
+        |id| {
+            id.strip_prefix('r')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        },
+        false,
+    );
+}
+
+fn join_by_position(
+    samples: &mut [Sample],
+    records: &[Value],
+    ours: impl Fn(&str) -> bool,
+    with_handshake: bool,
+) {
     let handshakes = handshakes(records);
     let theirs: Vec<&Value> = records
         .iter()
-        .filter(|record| record["kind"] == "request" && record["request"] == "request")
+        .filter(|record| {
+            record["kind"] == "request" && record["request"].as_str().is_some_and(&ours)
+        })
         .collect();
     if theirs.len() != samples.len() {
         return;
     }
     for (sample, record) in samples.iter_mut().zip(theirs) {
-        sample.broker = Some(broker_of(record, &handshakes));
+        let mut broker = broker_of(record, &handshakes);
+        if !with_handshake {
+            broker.handshake_us = None;
+        }
+        sample.broker = Some(broker);
     }
 }
 
 /// Joins by whichever means the samples' client allows.
 fn join_for(samples: &mut [Sample], records: &[Value]) {
-    if !samples.is_empty() && samples.iter().all(|sample| sample.via == Via::Adapter) {
+    let all = |via: Via| !samples.is_empty() && samples.iter().all(|sample| sample.via == via);
+    if all(Via::Adapter) {
         join_in_order(samples, records);
+    } else if all(Via::Shared) {
+        join_shared(samples, records);
     } else {
         join(samples, records);
     }
@@ -813,6 +916,31 @@ mod tests {
         }
         join_for(&mut samples, &records);
         assert!(samples.iter().all(|sample| sample.broker.is_none()));
+    }
+
+    #[test]
+    fn requests_through_a_shared_client_are_matched_by_order_without_a_handshake() {
+        let records: Vec<Value> = [
+            r#"{"kind":"connection","connection":1,"handshake_us":50}"#,
+            r#"{"kind":"request","connection":1,"request":"r1","outcome":"completed","probes":0,"launches":1,"total_us":100,"phases_us":{"queue_wait":1}}"#,
+            r#"{"kind":"request","connection":1,"request":"r2","outcome":"failed","probes":0,"launches":0,"total_us":200,"phases_us":{"queue_wait":2}}"#,
+            // Another client's request, or a legacy adapter's, is not ours.
+            r#"{"kind":"request","connection":2,"request":"request","outcome":"completed","probes":0,"launches":1,"total_us":300,"phases_us":{}}"#,
+            r#"{"kind":"request","connection":3,"request":"r","outcome":"completed","probes":0,"launches":1,"total_us":400,"phases_us":{}}"#,
+        ]
+        .iter()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+        let mut samples = vec![sample("a", 0, None), sample("b", 0, None)];
+        for sample in &mut samples {
+            sample.via = Via::Shared;
+        }
+        join_for(&mut samples, &records);
+        let first = samples[0].broker.as_ref().unwrap();
+        assert_eq!(first.total_us, 100);
+        // The one handshake belongs to the connection, not to either request.
+        assert_eq!(first.handshake_us, None);
+        assert_eq!(samples[1].broker.as_ref().unwrap().outcome, "failed");
     }
 
     #[test]

@@ -1125,7 +1125,9 @@ dependencies = [
 name = "seatline-tests"
 version = "0.1.0-dev"
 dependencies = [
+ "interprocess",
  "nix",
+ "seatline-companion",
  "seatline-core",
  "seatline-fake-provider",
  "seatline-platform",
@@ -1133,6 +1135,7 @@ dependencies = [
  "seatline-scheduler",
  "seatline-service",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

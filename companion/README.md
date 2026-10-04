@@ -111,7 +111,15 @@ installation and execution; it does not change warming or provider sign-in.
 
 ## Lifecycle and upgrades
 
-Clients start the broker on demand from the installed binary. It exits after ten
+Clients start the broker on demand from the installed binary. When several
+clients need one at once, exactly one of them, the holder of the start claim (a
+lock on `start.lock` in the data directory, released by the operating system
+when its holder exits), starts the companion; the others keep trying to
+connect, and one takes over a claim whose holder goes away or never starts a
+broker. Clients look for a starting broker every millisecond at first, backing
+off to a hundred, within a five-second budget; no single try may outlast the
+budget, and one that hangs for a second is given up on so the client can go on
+to start the broker itself. It exits after ten
 minutes with no connections (`SEATLINE_BROKER_IDLE_SECS` changes this; `0` keeps
 it running), so after running `install` again the next start uses the new
 version. `install` keeps the new copy and the one registered before it and
@@ -162,7 +170,47 @@ for the exact boundaries, what is missing per provider, and the format.
 
 An app that only talks to the local broker (a native host, for example) can
 depend on `seatline-companion` with `default-features = false` and use
-`client::RemoteProvider`. That build has no pairing command and links none of
+`remote::RemoteClient` (below) or `client::RemoteProvider`. That build has no pairing command and links none of
 the hosted transport's TLS, WebSocket or crypto dependencies; CI checks the
 dependency tree. The `seatline-companion` executable itself needs the default
 `web` feature.
+
+### One client for the whole app
+
+`client::RemoteProvider::new` gives every exchange a thread, a runtime and a
+connection of its own, authenticated for one request: it is the compatibility
+path and is unchanged. An app that makes many requests wants one
+`remote::RemoteClient`, which keeps **one runtime and one authenticated
+connection** for all of them (`RemoteProvider::with_client` routes a provider's
+status, turns and cleanups through it):
+
+```rust
+let client = RemoteClient::new("my_app");          // connects on the first request
+let mut exchange = client.send("codex", &turn);    // a `Box<dyn Exchange>`, as ever
+```
+
+- Requests get IDs no other request on the client has used, are sent in the
+  order they are made, and their events are routed to their own exchange.
+  `exchange.cancel()` stops that request and no other.
+- The client keeps at most 64 requests in flight (`Limits::max_in_flight`); one
+  more fails at once with a retryable `QUEUE_FULL`. A request holds its place
+  until its terminal event is read or its exchange is dropped, so a finished
+  exchange that is kept does not count. A request too big for a
+  frame fails alone with `INVALID_REQUEST`.
+- Each request queues at most 4 MiB of unread events
+  (`Limits::max_unread_bytes`). The connection is shared, so the client never
+  waits for one request's consumer; a consumer that falls further behind has
+  **its own request** cancelled, receives everything queued so far whole and in
+  order, and then one `CONSUMER_TOO_SLOW` failure. Other requests are
+  unaffected. (The in-process service applies the same policy to a turn's
+  handle.)
+- If the connection is lost, every request in flight on it ends as a retryable
+  `COMPANION_DISCONNECTED`. **Nothing is replayed**: the broker may already
+  have started the generation, so repeating it is the app's decision. The next
+  request connects again and reads the grant afresh. A grant that was rotated
+  or revoked makes the broker close the connection at its next request, which
+  ends what was in flight on it; after a revocation new requests fail with
+  `APP_NOT_AUTHORIZED`. Only that app's connection is affected.
+- `client.close()` ends everything in flight as stopped. Dropping every handle,
+  and every exchange, closes the connection. While a client is open its
+  connection keeps the broker running.

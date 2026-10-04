@@ -105,6 +105,8 @@ fn warm_scenarios_count_processes_the_way_the_fake_provider_did() {
         "--scenario",
         "warm-send-adapter",
         "--scenario",
+        "warm-send-shared",
+        "--scenario",
         "warm-send-probe",
         "--scenario",
         "warm-status",
@@ -161,6 +163,20 @@ fn warm_scenarios_count_processes_the_way_the_fake_provider_did() {
     assert!(report["broker"]["limits"]["idle_exit_ms"].is_null());
     assert_eq!(metric(app, "broker_provider_init_us")["n"], 3);
 
+    // Through one shared client: the same work again, on one connection that
+    // the first request, a warm-up, opened. Joined by order too, and with no
+    // handshake of its own to report: the one handshake is not a request's.
+    let shared = scenario(&report, "warm-send-shared");
+    assert_eq!(shared["state"], "warm_broker_fresh_provider");
+    assert_eq!(shared["counts"]["fake_turns"], 4);
+    assert_eq!(shared["counts"]["broker_launches"], 3, "joined by order");
+    let app = &shared["apps"][0];
+    assert_eq!(app["completed"], 3);
+    assert!(metric(app, "client_prepare_us").is_null());
+    assert_eq!(metric(app, "client_start_to_first_text_us")["n"], 3);
+    assert_eq!(metric(app, "broker_provider_init_us")["n"], 3);
+    assert!(metric(app, "broker_handshake_us").is_null());
+
     // With one: the probe is a second process, and the broker says so.
     let probe = scenario(&report, "warm-send-probe");
     assert_eq!(probe["counts"]["fake_probes"], 4);
@@ -182,6 +198,41 @@ fn warm_scenarios_count_processes_the_way_the_fake_provider_did() {
     for private in [SCRATCH, env!("CARGO_MANIFEST_DIR"), "token"] {
         assert!(!text.contains(private), "{private} is in the report");
     }
+}
+
+#[test]
+fn applications_that_start_together_with_no_broker_are_counted_and_all_served() {
+    let (report, _) = report(&[
+        "run",
+        "--scenario",
+        "cold-three-app",
+        "--samples",
+        "2",
+        "--warmup",
+        "1",
+    ]);
+    let cold = scenario(&report, "cold-three-app");
+    assert_eq!(cold["state"], "cold_broker_fresh_provider");
+    assert_eq!(cold["status"], "measured");
+    let apps = cold["apps"].as_array().unwrap();
+    assert_eq!(apps.len(), 3);
+    for app in apps {
+        assert_eq!(
+            (app["completed"].as_u64(), app["failed"].as_u64()),
+            (Some(2), Some(0)),
+            "{app}"
+        );
+        assert_eq!(metric(app, "client_prepare_us")["n"], 2);
+    }
+    // Three rounds (one is warm-up) of three requests, each served by a fresh
+    // provider process, and at least one start of the companion for each round.
+    assert_eq!(cold["counts"]["requests_total"], 9);
+    assert_eq!(cold["counts"]["fake_turns"], 9);
+    let starts = cold["counts"]["companion_starts"].as_u64().unwrap();
+    assert!(
+        (3..=9).contains(&starts),
+        "{starts} starts for 3 cold starts"
+    );
 }
 
 #[test]

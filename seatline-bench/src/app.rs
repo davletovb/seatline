@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use seatline_companion::client::RemoteProvider;
 use seatline_companion::config::{self, Grant};
+use seatline_companion::remote::RemoteClient;
 use seatline_companion::{PROTOCOL_VERSION, client, wire};
 use seatline_core::exchange::{Exchange, Scripted, Timeouts, Update};
 use seatline_core::protocol::{Capabilities, Capability};
@@ -37,6 +38,9 @@ pub fn run(spec: Spec) -> io::Result<()> {
         .enable_all()
         .build()?;
     let mut handle: Option<String> = None;
+    // The application's one client, for the requests that share it: it
+    // connects on the first of them, which is a warm-up in a warm scenario.
+    let shared = RemoteClient::with_root(&spec.app, spec.root.clone());
     for req in &spec.requests {
         if spec.stop_file.as_ref().is_some_and(|stop| stop.exists()) {
             break;
@@ -46,7 +50,8 @@ pub fn run(spec: Spec) -> io::Result<()> {
         }
         let sample = match req.via {
             Via::Wire => runtime.block_on(request(&spec, &grant, req, &mut handle)),
-            Via::Adapter => through_adapter(&spec, req, &mut handle),
+            Via::Adapter => through_adapter(&spec, req, &mut handle, None),
+            Via::Shared => through_adapter(&spec, req, &mut handle, Some(&shared)),
         };
         writeln!(out, "{}", serde_json::to_string(&sample)?)?;
         out.flush()?;
@@ -143,11 +148,22 @@ impl Provider for Metadata {
 }
 
 /// The request as an application's adapter makes it, through `RemoteProvider`.
-/// The exchange it returns starts a thread, a runtime and a connection of its
-/// own, so none of that can be timed apart: only what shows from outside.
-fn through_adapter(spec: &Spec, req: &Req, handle: &mut Option<String>) -> Sample {
+/// Without a `client` the exchange it returns starts a thread, a runtime and a
+/// connection of its own; with one it is a request on the application's shared
+/// connection. Either way none of that can be timed apart: only what shows
+/// from outside.
+fn through_adapter(
+    spec: &Spec,
+    req: &Req,
+    handle: &mut Option<String>,
+    client: Option<&RemoteClient>,
+) -> Sample {
     let mut sample = blank(spec, req);
-    let provider = RemoteProvider::new(&spec.app, &Metadata(spec.provider.clone()));
+    let metadata = Metadata(spec.provider.clone());
+    let provider = match client {
+        Some(client) => RemoteProvider::with_client(&spec.app, client.clone(), &metadata),
+        None => RemoteProvider::new(&spec.app, &metadata),
+    };
     let begun = Instant::now();
     let mut exchange = match req.method {
         Method::Send => provider.send(turn(req, handle)),

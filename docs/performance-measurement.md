@@ -13,8 +13,8 @@ A request's latency depends on what is already warm. The harness measures **stat
 
 | State | What it is | Scenarios |
 | --- | --- | --- |
-| `cold_broker_fresh_provider` | No broker is running. The application's client starts one, connects, and sends one request; the provider is a fresh process. | `cold-broker` |
-| `warm_broker_fresh_provider` | A broker is running. Each request is a new connection, as the shipped client makes it, and runs a fresh provider process. | `warm-send`, `warm-send-adapter`, `warm-send-probe`, `warm-status`, `short-isolated-paced`, `three-app-short`, `short-contended` |
+| `cold_broker_fresh_provider` | No broker is running. The application's client starts one, connects, and sends one request; the provider is a fresh process. | `cold-broker`, and `cold-three-app` (three applications start together) |
+| `warm_broker_fresh_provider` | A broker is running. Each request is a new connection, as the shipped client makes it, and runs a fresh provider process. | `warm-send`, `warm-send-adapter`, `warm-send-shared`, `warm-send-probe`, `warm-status`, `short-isolated-paced`, `three-app-short`, `short-contended` |
 | `resumed_context` | As warm, but each request continues the provider-side conversation the last one started, in a fresh process. | `resumed-context` |
 | `reused_process` | One provider process serving several requests. | `reused-process`: **unsupported** until a persistent-provider adapter exists (tracker E-02). It is reported as unsupported with that reason, never as a number. |
 
@@ -69,7 +69,7 @@ SEATLINE_BENCH_LIVE=1 target/release/seatline-bench run --live codex \
     --samples 10 --warmup 1 --label "codex live" --output codex-live.json
 ```
 
-`--live PROVIDER` (`codex`, `claude`, `gemini` or `grok`) measures the real CLI installed on the machine instead of the fake. It **sends real prompts** ("Reply with the single word: ok", tools off) and uses a little of the account's quota, so it needs the explicit `SEATLINE_BENCH_LIVE=1` as well, and defaults to 5 samples with 1 warm-up. It supports the scenarios that do not need requests of a known length: `cold-broker`, `warm-send`, `warm-send-adapter`, `warm-send-probe`, `warm-status`, `resumed-context` and the unsupported `reused-process`. A scenario a provider's adapter cannot run is reported as **unsupported** with its reason, never dropped, never aborting the run and never measured as something else: `resumed-context` for Gemini and Grok (their one-shot modes keep no session, so the broker refuses a persistent turn) and `warm-send-probe` for Gemini and Grok (they run no sign-in probe on the send path, so it would be an ordinary send under the wrong name). It uses your real home and provider configuration (so that you are signed in) with a scratch broker data directory, and records the provider's `--version`. **No live run was made in this slice**: nothing here claims a live latency.
+`--live PROVIDER` (`codex`, `claude`, `gemini` or `grok`) measures the real CLI installed on the machine instead of the fake. It **sends real prompts** ("Reply with the single word: ok", tools off) and uses a little of the account's quota, so it needs the explicit `SEATLINE_BENCH_LIVE=1` as well, and defaults to 5 samples with 1 warm-up. It supports the scenarios that do not need requests of a known length: `cold-broker`, `warm-send`, `warm-send-adapter`, `warm-send-shared`, `warm-send-probe`, `warm-status`, `resumed-context` and the unsupported `reused-process`. A scenario a provider's adapter cannot run is reported as **unsupported** with its reason, never dropped, never aborting the run and never measured as something else: `resumed-context` for Gemini and Grok (their one-shot modes keep no session, so the broker refuses a persistent turn) and `warm-send-probe` for Gemini and Grok (they run no sign-in probe on the send path, so it would be an ordinary send under the wrong name). It uses your real home and provider configuration (so that you are signed in) with a scratch broker data directory, and records the provider's `--version`. **No live run was made in this slice**: nothing here claims a live latency.
 
 ## Baseline
 
@@ -116,6 +116,33 @@ Every request in every scenario completed. Process counts agree between the brok
 - **Three applications sharing a provider wait for slots.** With three applications each sending back-to-back, the broker admits two per provider: p95 `queue_wait` is about 10.8 ms (two ticks) and p95 `start→text` 17–24 ms against 6.5 ms alone.
 - **A short request behind long ones waits a long time.** While two other applications keep both provider slots busy with 300 ms requests, the short application's first text arrives at p50 106–111 ms against 6.4–6.5 ms alone, about 17 times later, and 99–104 ms of it is `queue_wait`. The long requests are unaffected (their `queue_wait` p50 is 10.4 ms: the short request is admitted first). F-03 targets this.
 
+## Slice D: the shared client and coordinated startup
+
+Measured at `a8dd5af` (clean tree, release builds, fake provider, the same machine as the baseline); the evidence is checked in beside the baseline: [D-02 comparison](performance-baselines/2026-10-03-d02-cold-start-comparison.md) and its four reports, and [D-01 summary](performance-baselines/2026-10-03-d01-shared-client-summary.md) with three reports. Both are against the state after A-01 to A-04, not the baseline above, which predates them.
+
+**D-02: cold start.** Two pairs of runs, p50 / p95 in milliseconds:
+
+| Scenario | Metric | Before (A-04 client) | After (start claim, 1 ms polling) |
+| --- | --- | --- | --- |
+| `cold-broker` | `prepare` | 12.0 / 12.4 (12.0 / 12.2) | 3.1 / 3.3 (3.1 / 3.3) |
+| `cold-broker` | `start→text` | 18.1 / 18.8 (18.2 / 18.5) | 9.1 / 9.7 (9.2 / 10.4) |
+| `cold-three-app` (each app) | `prepare` | 11.8–11.9 / 13.4–14.6 | 5.7–6.0 / 6.1–7.0 |
+| `cold-three-app` | companion starts per cold start | 3.0 (99 for 33) | 1.0 (33 for 33) |
+
+- **A-04 removed the 100 ms sleep but left the polling: 10 of the 12 ms is a backoff step.** A companion listens about 2 ms after it is started (timed by polling its socket from outside every 0.2 ms, which includes the timing script's own process spawn, so an upper bound: p50 1.9 ms), yet the client looked for it after 10, 30, 70 ms, so a 2 ms start was found at 10 ms. Looking every millisecond first finds it at the next step: `prepare` falls from 12.0 to 3.1 ms, which is the spawn, the 2 ms start, at most one step and the 0.5 ms handshake.
+- **An explicit readiness signal was considered and not built.** The tracker asks for one if it improves measured startup over A-04. A signal (a pipe or file the companion writes to once it listens) could save at most the one polling step that remains, under a millisecond, and needs a way for waiting clients to receive it as well; polling at a millisecond reaches the floor within that step without a new protocol, a blocked reader that cannot be cancelled, or a file to clean up. If a later measurement shows the step matters, the claim already is the place to hang one.
+- **Three applications that start together start one companion.** Before, each of the three started its own (99 starts for 33 cold starts), and since the broker's own lock lets only one serve, two of the three processes had nothing to do. Now the client that holds the claim starts it and the others look for the broker without starting one (33 starts for 33). Their `prepare` falls by about 6 ms; it is higher than a single client's 3.1 because three programs and a companion contend for four CPUs, and the harness's stand-in for the companion adds one process hop to every start, before and after. The provider slots are the same two per app and provider, so the p95 `queue_wait` of about 11 ms (two polling ticks) is unchanged.
+
+**D-01: the shared client.** The path through one `RemoteClient`, against a connection per exchange and the bare wire:
+
+| `start→text` p50 / p95 | Bare wire (`warm-send`) | Per-exchange adapter | Shared client |
+| --- | --- | --- | --- |
+| run 1 (30 requests) | 6.3 / 6.7 | 6.5 / 7.0 | 6.1 / 57.7 |
+| run 2 (30) | 6.2 / 6.5 | 6.3 / 9.8 | 6.1 / 6.2 |
+| confirmation (100) | 6.2 / 6.5 | 6.4 / 7.0 | 6.2 / 6.6 |
+
+The shared client meets its budget (p50 within +0.2 ms of the bare wire) and is 0.2 to 0.3 ms below the per-exchange adapter, which is what connection reuse was worth in the baseline and **not the reason for D-01**. Run 1's p95 is two requests that stalled for reasons outside the client (see the summary); three further runs of 100 requests each had a worst case of 11.6 ms.
+
 ## Budgets
 
 Improvement budgets set from that baseline. A budget is what a slice must demonstrate, with before and after reports from the same machine; it can be revised with a stated reason, not quietly. p50 budgets are checked at p50 (noise 0.1 ms; about 5 ms for `short-contended`); p95 budgets in whole polling steps.
@@ -123,6 +150,8 @@ Improvement budgets set from that baseline. A budget is what a slice must demons
 | Slice | Scenario and metric | Baseline p50 (p95) | Budget | Basis |
 | --- | --- | --- | --- | --- |
 | A-04 | `cold-broker` `prepare` | 102.3 (102.6) | p50 ≤ 35, p95 ≤ 80 | 100 of the 102 ms is the fixed wait; the allowance covers a broker that needs one retry step. |
+| D-02 | `cold-three-app` companion starts per cold start | 3.0 (99 starts for 33 cold starts) | exactly 1 (bounded at 2 per client), every application served | One start claim: only the client that holds it starts the companion. **Met**: 1.0 (33 for 33). |
+| D-02 | `cold-broker` `prepare` | 12.0 (12.4) after A-04 | no regression from the A-04 budget (p50 ≤ 35, p95 ≤ 80); the explicit-readiness comparison below | **Met**: 3.1 (3.3). |
 | F-04 | `warm-send` broker `completion` | 5.2 (5.2) | p50 ≤ 2 | One polling tick is the whole baseline; the fake exits within about a millisecond. |
 | F-04 | `warm-send` `submit→text` | 5.9 (6.1) | p50 ≤ 3.5 | The provider process is at most about 1.75 ms and the IPC 0.3 ms; at least 2.4 ms of the polling share goes. |
 | F-04 | `warm-status` broker `sign_in_probe` | 10.7 (10.9) | p50 ≤ 4 | A 1.6 ms process plus one hop. |
@@ -131,7 +160,7 @@ Improvement budgets set from that baseline. A budget is what a slice must demons
 | F-03 | `three-app-short` broker `queue_wait` | 0.0–5.3 (10.9) | no regression: p95 ≤ 12 | Fairness must not slow the case that already works. |
 | C-02 | `warm-send-probe` probes per request | 1.0 (30 of 30; the fake saw 33 probes for 33 requests) | repeats inside the freshness window: 0; concurrent requests: at most 1; a fresh request still probes | Counted, not timed. |
 | C-02 | `warm-send-probe` `start→text` | 16.8–16.9 | cached repeats p50 within +1 of `warm-send` (6.2–6.3) | The probe is the whole difference. |
-| D-01, G-02 | `warm-send-adapter` against `warm-send`, `start→text` | 6.3–6.4 against 6.2–6.3 (+0.1) | the reusable client p50 within +0.2 of the bare wire | Connection reuse is worth at most about 0.3 ms locally: justify D-01 by bounded routing, one runtime and cancellation, not latency. |
+| D-01, G-02 | `warm-send-shared` against `warm-send`, `start→text` | `warm-send-adapter` was 6.3–6.4 against 6.2–6.3 (+0.1); **met by D-01**: `warm-send-shared` 6.1–6.3 against 6.1–6.3 (see [Slice D](#slice-d-the-shared-client-and-coordinated-startup)) | the reusable client p50 within +0.2 of the bare wire | Connection reuse is worth at most about 0.3 ms locally: justify D-01 by bounded routing, one runtime and cancellation, not latency. |
 | B-01 | scheduler cost per update, phase timing off | 105–133 ns; `main`'s scheduler 116–139 | indistinguishable from `main` | See [telemetry cost](telemetry.md#cost). |
 | B-01 | scheduler cost per update, phase timing on | +11 to +15 ns | ≤ +30 ns | |
 | E-02 to E-04 | persistent provider processes | no local baseline | **no budget set** | The fake provider has no start-up time to save, so a local baseline cannot price a reused process. Set it from a `--live` baseline and report `reused-process` as its own state. |

@@ -48,6 +48,10 @@ pub enum Via {
     /// what the application can see from outside is timed, from the call that
     /// starts the exchange.
     Adapter,
+    /// The shipped `RemoteProvider` made with one `RemoteClient` the whole
+    /// application shares: one runtime and one connection for every exchange.
+    /// Only what shows from outside is timed, as for `Adapter`.
+    Shared,
 }
 
 /// One request, which the application makes on a connection of its own, as the

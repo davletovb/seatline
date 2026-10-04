@@ -66,6 +66,7 @@ reasons!(
     // Raised by clients of the broker.
     COMPANION_DISCONNECTED,
     REMOTE_PROVIDER_FAILED,
+    CONSUMER_TOO_SLOW,
 );
 
 pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Value> {
@@ -204,6 +205,18 @@ mod tests {
                 "{reason} was rewritten by the decoder"
             );
         }
+    }
+
+    #[test]
+    fn the_slow_consumer_reason_is_the_one_the_service_and_the_client_end_a_turn_with() {
+        assert_eq!(
+            reason::CONSUMER_TOO_SLOW,
+            seatline_core::backlog::CONSUMER_TOO_SLOW
+        );
+        assert_eq!(
+            seatline_core::backlog::too_slow().reason,
+            reason::CONSUMER_TOO_SLOW
+        );
     }
 
     #[test]

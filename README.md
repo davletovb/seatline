@@ -8,8 +8,8 @@ It provides:
 - `seatline-platform`: environment allowlists, private workspaces/files, cleanup, and layout;
 - `seatline-providers`: adapters for Codex, Claude, Gemini through Antigravity, and Grok;
 - `seatline-scheduler`: bounded concurrent turn scheduling and panic isolation;
-- `seatline-service`: a threaded in-process service API;
-- `seatline-companion`: one shared native installation with app-scoped IPC and encrypted outbound web transport;
+- `seatline-service`: a threaded in-process service API, with a bounded queue per turn for slow consumers;
+- `seatline-companion`: one shared native installation with app-scoped IPC (including a reusable Rust client, `remote::RemoteClient`, with one connection per app) and encrypted outbound web transport;
 - `seatline-fake-provider`, `seatline-tests`, and `seatline-fuzz`: deterministic test and fuzz infrastructure;
 - `seatline-bench`: a reproducible benchmark harness for request overhead (fake providers by default, live providers opt-in).
 

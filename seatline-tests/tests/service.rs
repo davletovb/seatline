@@ -16,7 +16,7 @@ use seatline_providers::Provider;
 use seatline_providers::claude::Claude;
 use seatline_providers::codex::{Codex, Limits as CodexLimits};
 use seatline_scheduler::{EndReason, Event, TimeoutKind};
-use seatline_service::{Runtime, Turn as ServiceTurn, TurnFactory};
+use seatline_service::{CONSUMER_TOO_SLOW, Limits, Runtime, Turn as ServiceTurn, TurnFactory};
 use support::{CLAUDE_TEST_LIMITS, FIXTURES, FakeClaude, FakeCodex, TEST_LIMITS};
 
 /// Serves each turn with one provider.
@@ -40,6 +40,18 @@ where
     Runtime::start(Namespace::fixed("seatline-tests").unwrap(), move || {
         Box::new(Serves(provider()))
     })
+}
+
+/// Like [`service`], with `limits` for slow consumers.
+fn service_with<P>(limits: Limits, provider: impl FnOnce() -> P + Send + 'static) -> Runtime
+where
+    P: Provider + 'static,
+{
+    Runtime::start_with(
+        Namespace::fixed("seatline-tests").unwrap(),
+        limits,
+        move || Box::new(Serves(provider())),
+    )
 }
 
 /// The Codex adapter that `fake` would give, made where it is called.
@@ -208,6 +220,52 @@ fn a_silent_turn_times_out_and_holds_up_no_other() {
 
     let (_, reason) = finish(&mut quiet);
     assert_eq!(reason, EndReason::Timeout(TimeoutKind::Idle));
+    drop(runtime);
+    fake.assert_nothing_left_running();
+}
+
+#[test]
+fn a_consumer_that_does_not_read_gets_a_prefix_of_the_answer_and_a_stop() {
+    // `two-messages` answers in two pieces. A consumer that reads as they come
+    // gets both.
+    let fake = FakeCodex::install(FIXTURES, "two-messages", "signed-in");
+    let runtime = service(codex_of(&fake, TEST_LIMITS));
+    let mut turn = runtime.start_turn(ask("Say two things")).unwrap();
+    let (whole, reason) = finish(&mut turn);
+    assert_eq!(reason, EndReason::Completed);
+    drop(turn);
+    drop(runtime);
+
+    // One that has not read by the time 150 bytes are queued, which the turn's
+    // start and its first piece pass, has its turn stopped before the second:
+    // what it was given is the start of the answer, whole, and it is told
+    // that the rest was not kept. The process is stopped and reaped.
+    let runtime = service_with(
+        Limits {
+            max_unread_bytes: 150,
+        },
+        codex_of(&fake, TEST_LIMITS),
+    );
+    let mut turn = runtime.start_turn(ask("Say two things")).unwrap();
+    wait_until("the second answer never came", || {
+        fake.invocations()
+            .iter()
+            .filter(|line| line.starts_with("exec "))
+            .count()
+            == 2
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    let (given, reason) = finish(&mut turn);
+    assert!(
+        matches!(reason, EndReason::Failed(failure) if failure.reason == CONSUMER_TOO_SLOW),
+        "{reason:?}"
+    );
+    assert!(
+        whole.starts_with(&given),
+        "{given:?} is not the start of {whole:?}"
+    );
+    assert!(given.len() < whole.len(), "nothing was left out: {given:?}");
+    drop(turn);
     drop(runtime);
     fake.assert_nothing_left_running();
 }
