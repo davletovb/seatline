@@ -135,6 +135,7 @@ impl World {
             .env("SEATLINE_BROKER_IDLE_SECS", "120")
             .env(telemetry::FILE_VARIABLE, &self.telemetry)
             .env("HOME", &self.home)
+            .env("CODEX_HOME", self.home.join(".codex"))
             .env("XDG_CACHE_HOME", self.home.join(".cache"))
             .env(layout.search_path_variable(), &self.fake.dir)
             .stdin(Stdio::null())
@@ -357,6 +358,7 @@ fn prepare_readiness_and_checked_sends_travel_through_the_shared_client() {
     // a fresh check adds exactly one.
     const CACHED: Freshness = Freshness::Cached { max_age_ms: 30_000 };
     let world = World::new("answers");
+    world.fake.set("answers", "subscription");
     let provider = RemoteProvider::with_client(APP, world.client(), &world.fake.adapter());
     assert!(provider.supports_preparation());
 
@@ -375,6 +377,9 @@ fn prepare_readiness_and_checked_sends_travel_through_the_shared_client() {
     let first = drain(provider.prepare(CACHED).as_mut());
     assert_eq!(first.last(), Some(&Update::Completed), "{first:?}");
     assert_eq!(source(&first), Some(Source::Fresh));
+    assert!(first.iter().any(|update| matches!(update,
+        Update::Status { status, .. } if status.sign_in == Some(seatline_core::turn::SignInClassification::Subscription)
+    )), "{first:?}");
     assert!(not_a_generation(&first), "preparation ran a generation");
     let second = drain(provider.prepare(CACHED).as_mut());
     assert_eq!(second.last(), Some(&Update::Completed), "{second:?}");
@@ -454,4 +459,58 @@ fn prepare_readiness_and_checked_sends_travel_through_the_shared_client() {
             "send_ready"
         ]
     );
+}
+
+#[test]
+fn changed_sign_in_is_rejected_over_ipc_before_the_client_consumes_status() {
+    const CACHED: Freshness = Freshness::Cached { max_age_ms: 30_000 };
+    let world = World::new("answers");
+    world.fake.set("answers", "subscription");
+    let account = world.home.join(".codex");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(account.join("auth.json"), br#"{"account":"subscription"}"#).unwrap();
+    let provider = RemoteProvider::with_client(APP, world.client(), &world.fake.adapter());
+    let approved = drain(provider.readiness(CACHED).as_mut());
+    assert_eq!(approved.last(), Some(&Update::Completed), "{approved:?}");
+    assert!(approved.iter().any(|update| matches!(update,
+        Update::Status { status, .. } if status.sign_in == Some(seatline_core::turn::SignInClassification::Subscription)
+    )), "{approved:?}");
+
+    world.fake.set("answers", "signed-in"); // The fake reports API-key sign-in.
+    std::fs::write(account.join("auth.json"), br#"{"account":"api-key"}"#).unwrap();
+    let mut rejected = provider.send_with_readiness_policy(
+        ask("This prompt must not launch"),
+        CACHED,
+        SignInPolicy::try_from(vec![
+            seatline_core::turn::SignInClassification::Subscription,
+        ])
+        .unwrap(),
+    );
+    // The broker finishes before the application consumes any status event.
+    // No client callback or cancel can be responsible for preventing launch.
+    wait_until("policy refusal with client delivery delayed", || {
+        world.records("request").len() == 2
+    });
+    assert_eq!(
+        world
+            .fake
+            .invocations()
+            .iter()
+            .filter(|line| line.starts_with("exec "))
+            .count(),
+        0
+    );
+    let updates = drain(rejected.as_mut());
+    assert!(
+        matches!(updates.last(), Some(Update::Failed(f)) if f.reason == "SIGN_IN_POLICY_DENIED" && !f.retryable),
+        "{updates:?}"
+    );
+    assert!(
+        !updates
+            .iter()
+            .any(|u| matches!(u, Update::Launched | Update::Delta(_)))
+    );
+    assert!(updates.iter().any(|update| matches!(update,
+        Update::Status { status, .. } if status.sign_in == Some(seatline_core::turn::SignInClassification::ApiKey)
+    )), "{updates:?}");
 }
