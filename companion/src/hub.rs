@@ -15,12 +15,12 @@ use seatline_core::turn::{Namespace, SessionPolicy, ToolPolicy, Turn, is_cleanup
 use seatline_platform::layout::Layout;
 use seatline_providers::{Cleanup, Provider, claude, codex, gemini, grok};
 use seatline_scheduler::{EndReason, Event, Supervisor, TurnId};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
     PROTOCOL_VERSION,
     config::{self, Grant},
+    sessions::{Session, Sessions},
     telemetry::Telemetry,
     wire,
 };
@@ -69,6 +69,13 @@ struct Connection {
     grant: Grant,
     output: tokio::sync::mpsc::Sender<Value>,
 }
+// Providers outlive connections, including compatibility clients that open
+// one connection per exchange. Keep the originating grant alongside them so
+// a reconnect cannot inherit a previous authorization/workspace's evidence.
+struct RetainedProvider {
+    grant: Grant,
+    provider: Box<dyn Provider>,
+}
 struct Request {
     connection: u64,
     id: String,
@@ -76,6 +83,15 @@ struct Request {
     provider: String,
     method: String,
     params: Value,
+}
+impl Request {
+    fn continuation(&self) -> &Value {
+        if self.method == "send_ready" {
+            &self.params["turn"]["continuation"]
+        } else {
+            &self.params["continuation"]
+        }
+    }
 }
 struct Active {
     request: Request,
@@ -85,13 +101,6 @@ struct Active {
     /// Ended, but release its request ID and never forward more output after
     /// this boundary.
     terminal_sent: bool,
-}
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Session {
-    app: String,
-    provider: String,
-    native: String,
 }
 struct PendingCleanup {
     request: Request,
@@ -112,7 +121,7 @@ pub fn start_with(
     let ledger = root.join("sessions.json");
     let sessions = match std::fs::read(&ledger) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Sessions::default(),
         Err(error) => return Err(error),
     };
     let (send, receive) = mpsc::sync_channel(128);
@@ -140,10 +149,10 @@ struct Hub {
     root: PathBuf,
     connections: BTreeMap<u64, Connection>,
     queue: VecDeque<Request>,
-    providers: BTreeMap<(String, String), Box<dyn Provider>>,
+    providers: BTreeMap<(String, String), RetainedProvider>,
     supervisor: Supervisor,
     active: BTreeMap<TurnId, Active>,
-    sessions: BTreeMap<String, Session>,
+    sessions: Sessions,
     cleanup: Vec<PendingCleanup>,
     next_check: Instant,
     next_prune: Instant,
@@ -184,11 +193,8 @@ impl Hub {
 
     fn authorized(&self, connection: u64) -> bool {
         self.connections.get(&connection).is_some_and(|entry| {
-            config::load_grant(&self.root, &entry.grant.app).is_ok_and(|current| {
-                config::same_token(&current.token, &entry.grant.token)
-                    && current.providers == entry.grant.providers
-                    && current.allow_provider_default == entry.grant.allow_provider_default
-            })
+            config::load_grant(&self.root, &entry.grant.app)
+                .is_ok_and(|current| current.same_provider_scope(&entry.grant))
         })
     }
 
@@ -221,6 +227,7 @@ impl Hub {
             Command::Close(connection) => self.close(connection),
             Command::Request { connection, value } => {
                 if !self.authorized(connection) {
+                    self.invalidate_connection(connection);
                     self.close(connection);
                     return;
                 }
@@ -314,6 +321,22 @@ impl Hub {
         }
     }
 
+    fn invalidate_connection(&mut self, connection: u64) {
+        if let Some(entry) = self.connections.get(&connection) {
+            let app = entry.grant.app.clone();
+            self.invalidate_app(&app);
+        }
+    }
+
+    fn invalidate_app(&mut self, app: &str) {
+        for ((owner, _), retained) in &self.providers {
+            if owner == app {
+                retained.provider.invalidate_readiness();
+            }
+        }
+        self.providers.retain(|(owner, _), _| owner != app);
+    }
+
     fn close(&mut self, connection: u64) {
         self.connections.remove(&connection);
         for request in &self.queue {
@@ -376,12 +399,10 @@ impl Hub {
         provider: &str,
         native: String,
     ) -> Result<String, LedgerError> {
-        if let Some((token, _)) = self.sessions.iter().find(|(_, session)| {
-            session.app == app && session.provider == provider && session.native == native
-        }) {
+        if let Some(token) = self.sessions.token(app, provider, &native) {
             return Ok(token.clone());
         }
-        let app_sessions = self.sessions.values().filter(|s| s.app == app).count();
+        let app_sessions = self.sessions.app_len(app);
         if self.sessions.len() >= MAX_SESSIONS || app_sessions >= MAX_APP_SESSIONS {
             return Err(LedgerError::Full);
         }
@@ -455,6 +476,7 @@ impl Hub {
                 .filter(|id| !self.authorized(*id))
                 .collect();
             for id in revoked {
+                self.invalidate_connection(id);
                 self.close(id);
             }
             self.next_check = Instant::now() + Duration::from_secs(1);
@@ -622,11 +644,11 @@ impl Hub {
                 || provider_count >= MAX_PROVIDER_RUNNING
                 || cleaning
                 || (matches!(request.method.as_str(), "forget" | "cleanup") && busy)
-                || (request.method == "send"
-                    && request.params["continuation"].is_string()
+                || (matches!(request.method.as_str(), "send" | "send_ready")
+                    && request.continuation().is_string()
                     && self.active.values().any(|a| {
                         a.request.app == request.app
-                            && a.request.params["continuation"] == request.params["continuation"]
+                            && a.request.continuation() == request.continuation()
                     }))
             {
                 self.queue.push_back(request);
@@ -638,17 +660,27 @@ impl Hub {
 
     #[allow(clippy::map_entry)] // Admission errors also need mutable access to the connection table.
     fn admit(&mut self, request: Request) {
+        // Recheck queued work at admission, including cache hits, so a grant
+        // change cannot reuse evidence from the previous app/workspace scope.
+        if !self.authorized(request.connection) {
+            self.telemetry.abandoned(request.connection, &request.id);
+            self.invalidate_connection(request.connection);
+            self.close(request.connection);
+            return;
+        }
         self.telemetry.admitted(request.connection, &request.id);
         let key = (request.app.clone(), request.provider.clone());
+        let grant = self.connections[&request.connection].grant.clone();
+        if self.providers.iter().any(|((app, _), retained)| {
+            app == &request.app && !retained.grant.same_provider_scope(&grant)
+        }) {
+            self.invalidate_app(&request.app);
+        }
         if !self.providers.contains_key(&key) {
             let Ok(namespace) = Namespace::fixed(&request.app) else {
                 return;
             };
-            let layout = match self.connections[&request.connection]
-                .grant
-                .cache_title
-                .as_deref()
-            {
+            let layout = match grant.cache_title.as_deref() {
                 Some(title) => match Layout::with_cache_title(namespace, title) {
                     Ok(layout) => layout,
                     Err(_) => {
@@ -682,7 +714,13 @@ impl Hub {
                     return;
                 }
             };
-            self.providers.insert(key.clone(), provider);
+            self.providers.insert(
+                key.clone(),
+                RetainedProvider {
+                    grant,
+                    provider: Box::new(seatline_providers::readiness::Ready::boxed(provider)),
+                },
+            );
         }
         let result = catch_unwind(AssertUnwindSafe(|| self.build(&request, &key)));
         match result {
@@ -743,14 +781,22 @@ impl Hub {
                 false,
             )
         };
-        let provider = self.providers[key].as_ref();
+        let provider = self.providers[key].provider.as_ref();
         let limits = Timeouts {
             max_turn: Duration::from_secs(15 * 60).min(provider.timeouts().max_turn),
             ..provider.timeouts()
         };
         match request.method.as_str() {
-            "status" => Ok(Built::Exchange(
-                provider.status(),
+            "status" | "readiness" | "prepare" => Ok(Built::Exchange(
+                match request.method.as_str() {
+                    "status" => provider.status(),
+                    "prepare" => provider.prepare(
+                        serde_json::from_value(request.params.clone()).map_err(|_| invalid())?,
+                    ),
+                    _ => provider.readiness(
+                        serde_json::from_value(request.params.clone()).map_err(|_| invalid())?,
+                    ),
+                },
                 Timeouts {
                     start: Duration::from_secs(30),
                     idle: Duration::from_secs(30),
@@ -759,9 +805,24 @@ impl Hub {
                 },
                 false,
             )),
-            "send" => {
+            "send" | "send_ready" => {
+                let freshness = if request.method == "send_ready" {
+                    Some(
+                        serde_json::from_value::<seatline_core::readiness::Freshness>(
+                            request.params["freshness"].clone(),
+                        )
+                        .map_err(|_| invalid())?,
+                    )
+                } else {
+                    None
+                };
+                let params = if freshness.is_some() {
+                    &request.params["turn"]
+                } else {
+                    &request.params
+                };
                 let mut turn: Turn =
-                    serde_json::from_value(request.params.clone()).map_err(|_| invalid())?;
+                    serde_json::from_value(params.clone()).map_err(|_| invalid())?;
                 turn.validate().map_err(|_| invalid())?;
                 if turn.tools == ToolPolicy::ProviderDefault
                     && !self.connections[&request.connection]
@@ -801,7 +862,14 @@ impl Hub {
                     turn.continuation = Some(session.native.clone());
                 }
                 let persistent = turn.session == SessionPolicy::Persistent;
-                Ok(Built::Exchange(provider.send(turn), limits, persistent))
+                Ok(Built::Exchange(
+                    match freshness {
+                        Some(freshness) => provider.send_with_readiness(turn, freshness),
+                        None => provider.send(turn),
+                    },
+                    limits,
+                    persistent,
+                ))
             }
             "forget" => {
                 let tokens: Vec<String> =
@@ -875,6 +943,368 @@ mod tests {
             ]))
         }
     }
+    struct ReadyFixture(std::rc::Rc<std::cell::Cell<usize>>);
+    impl Provider for ReadyFixture {
+        fn id(&self) -> &str {
+            "codex"
+        }
+        fn capabilities(&self) -> Capabilities {
+            codex::CAPABILITIES
+        }
+        fn timeouts(&self) -> Timeouts {
+            codex::LIMITS.timeouts
+        }
+        fn supports_preparation(&self) -> bool {
+            true
+        }
+        fn readiness_key(&self) -> Option<seatline_providers::readiness::Key> {
+            seatline_providers::readiness::Key::watch(
+                &std::env::current_exe().unwrap(),
+                [],
+                self.capabilities(),
+            )
+        }
+        fn status(&self) -> Box<dyn Exchange> {
+            self.0.set(self.0.get() + 1);
+            Box::new(Scripted::new([
+                Update::Status {
+                    provider_id: "codex".into(),
+                    status: seatline_core::protocol::ProviderState {
+                        availability: seatline_core::protocol::Availability::Available,
+                        authentication: seatline_core::protocol::Authentication::Authenticated,
+                        capabilities: self.capabilities(),
+                        models: std::borrow::Cow::Borrowed(&[]),
+                        sign_in: None,
+                        readiness: None,
+                    },
+                },
+                Update::Completed,
+            ]))
+        }
+        fn send(&self, _: Turn) -> Box<dyn Exchange> {
+            Box::new(Scripted::new([
+                Update::Launched,
+                Update::Started,
+                Update::Delta("answer".into()),
+                Update::Completed,
+            ]))
+        }
+    }
+
+    #[test]
+    fn prepare_is_single_flight_scoped_and_send_ready_preserves_fresh_requests() {
+        let (mut hub, mut output) = setup();
+        let counts: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|app| {
+                let counter = std::rc::Rc::new(std::cell::Cell::new(0));
+                install_provider(
+                    &mut hub,
+                    app,
+                    Box::new(seatline_providers::readiness::Ready::new(ReadyFixture(
+                        counter.clone(),
+                    ))),
+                );
+                counter
+            })
+            .collect();
+        let cached = json!({"mode":"cached","max_age_ms":30000});
+        request(&mut hub, 1, "a", "prepare", cached.clone());
+        request(&mut hub, 1, "b", "prepare", cached.clone());
+        request(&mut hub, 2, "c", "prepare", cached.clone());
+        ticks(&mut hub, 8);
+        assert_eq!((counts[0].get(), counts[1].get()), (1, 1));
+        let events = drain(&mut output[0]);
+        for id in ["a", "b"] {
+            assert!(
+                events
+                    .iter()
+                    .any(|v| v["id"] == id && v["event"]["type"] == "completed")
+            );
+        }
+        assert!(!events.iter().any(|v| v["event"]["type"] == "launched"));
+        let mut ask = turn_with_tools("none");
+        ask["session"] = json!("ephemeral");
+        request(
+            &mut hub,
+            1,
+            "cached",
+            "send_ready",
+            json!({"turn":ask,"freshness":cached}),
+        );
+        ticks(&mut hub, 8);
+        let events = drain(&mut output[0]);
+        assert_eq!(
+            events[0]["event"]["status"]["readiness"]["source"],
+            "cached"
+        );
+        assert!(events.iter().any(|v| v["event"]["type"] == "completed"));
+        assert_eq!(counts[0].get(), 1);
+        ask["check_sign_in"] = json!(true);
+        request(
+            &mut hub,
+            1,
+            "fresh",
+            "send_ready",
+            json!({"turn":ask,"freshness":cached}),
+        );
+        ticks(&mut hub, 8);
+        let events = drain(&mut output[0]);
+        assert_eq!(events[0]["event"]["status"]["readiness"]["source"], "fresh");
+        assert_eq!(counts[0].get(), 2);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn grant_and_workspace_changes_drop_only_that_apps_readiness() {
+        let (mut hub, mut output) = setup();
+        for app in ["first", "second"] {
+            install_provider(
+                &mut hub,
+                app,
+                Box::new(seatline_providers::readiness::Ready::new(ReadyFixture(
+                    std::rc::Rc::new(std::cell::Cell::new(0)),
+                ))),
+            );
+        }
+        let mut grant = config::load_grant(&hub.root, "first").unwrap();
+        grant.cache_title = Some("Different workspace".into());
+        config::write_private(
+            &config::app_path(&hub.root, "first").unwrap(),
+            &serde_json::to_vec(&grant).unwrap(),
+        )
+        .unwrap();
+        request(
+            &mut hub,
+            1,
+            "revoked",
+            "prepare",
+            json!({"mode":"cached","max_age_ms":30000}),
+        );
+        assert!(!hub.connections.contains_key(&1));
+        assert!(
+            !hub.providers
+                .contains_key(&("first".into(), "codex".into()))
+        );
+        assert!(
+            hub.providers
+                .contains_key(&("second".into(), "codex".into()))
+        );
+        request(
+            &mut hub,
+            2,
+            "healthy",
+            "prepare",
+            json!({"mode":"cached","max_age_ms":30000}),
+        );
+        ticks(&mut hub, 8);
+        assert!(
+            drain(&mut output[1])
+                .iter()
+                .any(|v| v["event"]["type"] == "completed")
+        );
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    fn reconnect(hub: &mut Hub, grant: Grant) -> tokio::sync::mpsc::Receiver<Value> {
+        let (send, mut receive) = tokio::sync::mpsc::channel(64);
+        hub.command(Command::Open {
+            connection: 3,
+            grant: Box::new(grant),
+            output: send,
+        });
+        assert_eq!(receive.try_recv().unwrap()["type"], "ready");
+        receive
+    }
+
+    #[test]
+    fn unchanged_grant_reuses_readiness_after_disconnect_and_reconnect() {
+        let (mut hub, mut output) = setup();
+        let counter = std::rc::Rc::new(std::cell::Cell::new(0));
+        install_provider(
+            &mut hub,
+            "first",
+            Box::new(seatline_providers::readiness::Ready::new(ReadyFixture(
+                counter.clone(),
+            ))),
+        );
+        let cached = json!({"mode":"cached","max_age_ms":30000});
+        request(&mut hub, 1, "warm", "prepare", cached.clone());
+        ticks(&mut hub, 8);
+        assert_eq!(failure_reason(&drain(&mut output[0])), None);
+        hub.command(Command::Close(1));
+        let grant = config::load_grant(&hub.root, "first").unwrap();
+        let mut reopened = reconnect(&mut hub, grant);
+        request(&mut hub, 3, "reuse", "prepare", cached);
+        ticks(&mut hub, 8);
+        let events = drain(&mut reopened);
+        assert_eq!(
+            events[0]["event"]["status"]["readiness"]["source"],
+            "cached"
+        );
+        assert_eq!(counter.get(), 1);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn disconnected_grant_changes_rebuild_only_that_apps_providers() {
+        for change in ["token", "workspace", "providers", "tools", "recreate"] {
+            let (mut hub, mut output) = setup();
+            let mut counters = Vec::new();
+            let cached = json!({"mode":"cached","max_age_ms":30000});
+            for (connection, app) in [(1, "first"), (2, "second")] {
+                let counter = std::rc::Rc::new(std::cell::Cell::new(0));
+                install_provider(
+                    &mut hub,
+                    app,
+                    Box::new(seatline_providers::readiness::Ready::new(ReadyFixture(
+                        counter.clone(),
+                    ))),
+                );
+                counters.push(counter);
+                request(&mut hub, connection, "warm", "prepare", cached.clone());
+            }
+            ticks(&mut hub, 8);
+            for receive in &mut output {
+                assert_eq!(failure_reason(&drain(receive)), None);
+            }
+            // No old connection remains to fail authorized().
+            hub.command(Command::Close(1));
+            let mut grant = config::load_grant(&hub.root, "first").unwrap();
+            match change {
+                "token" => grant.token = config::random_token().unwrap(),
+                "workspace" => grant.cache_title = Some("FIRST".into()),
+                "providers" => grant.providers.push("claude".into()),
+                "tools" => grant.allow_provider_default = true,
+                "recreate" => {
+                    std::fs::remove_file(config::app_path(&hub.root, "first").unwrap()).unwrap();
+                    grant.token = config::random_token().unwrap();
+                }
+                _ => unreachable!(),
+            }
+            config::write_private(
+                &config::app_path(&hub.root, "first").unwrap(),
+                &serde_json::to_vec(&grant).unwrap(),
+            )
+            .unwrap();
+            let mut reopened = reconnect(&mut hub, grant.clone());
+            // Invalid turn data exercises admission/rebuilding without ever
+            // probing an installed real CLI or launching a model turn.
+            request(&mut hub, 3, "admit", "send", Value::Null);
+            ticks(&mut hub, 8);
+            assert_eq!(
+                failure_reason(&drain(&mut reopened)).as_deref(),
+                Some("INVALID_REQUEST")
+            );
+            assert!(
+                hub.providers[&("first".into(), "codex".into())]
+                    .grant
+                    .same_provider_scope(&grant),
+                "{change}"
+            );
+            request(&mut hub, 2, "healthy", "prepare", cached);
+            ticks(&mut hub, 8);
+            let events = drain(&mut output[1]);
+            assert_eq!(
+                events[0]["event"]["status"]["readiness"]["source"], "cached",
+                "{change}"
+            );
+            assert_eq!((counters[0].get(), counters[1].get()), (1, 1));
+            std::fs::remove_dir_all(&hub.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn changed_workspace_is_validated_again_after_reconnecting() {
+        let (mut hub, mut output) = setup();
+        install_provider(
+            &mut hub,
+            "first",
+            Box::new(seatline_providers::readiness::Ready::new(ReadyFixture(
+                std::rc::Rc::new(std::cell::Cell::new(0)),
+            ))),
+        );
+        let cached = json!({"mode":"cached","max_age_ms":30000});
+        request(&mut hub, 1, "warm", "prepare", cached.clone());
+        ticks(&mut hub, 8);
+        assert_eq!(failure_reason(&drain(&mut output[0])), None);
+        hub.command(Command::Close(1));
+        let mut grant = config::load_grant(&hub.root, "first").unwrap();
+        grant.cache_title = Some("Different workspace".into());
+        config::write_private(
+            &config::app_path(&hub.root, "first").unwrap(),
+            &serde_json::to_vec(&grant).unwrap(),
+        )
+        .unwrap();
+        let mut reopened = reconnect(&mut hub, grant);
+        request(&mut hub, 3, "changed", "prepare", cached);
+        ticks(&mut hub, 8);
+        assert_eq!(
+            failure_reason(&drain(&mut reopened)).as_deref(),
+            Some("INVALID_REQUEST")
+        );
+        assert!(
+            !hub.providers
+                .contains_key(&("first".into(), "codex".into()))
+        );
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn cancelling_one_preparation_keeps_its_shared_peer_and_cached_result() {
+        let (mut hub, mut output) = setup();
+        let counter = std::rc::Rc::new(std::cell::Cell::new(0));
+        install_provider(
+            &mut hub,
+            "first",
+            Box::new(seatline_providers::readiness::Ready::new(ReadyFixture(
+                counter.clone(),
+            ))),
+        );
+        let cached = json!({"mode":"cached","max_age_ms":30000});
+        request(&mut hub, 1, "a", "prepare", cached.clone());
+        request(&mut hub, 1, "b", "prepare", cached.clone());
+        hub.tick(); // Both requests admitted, the shared check not yet driven.
+        hub.command(Command::Request {
+            connection: 1,
+            value: json!({"id":"cancel","method":"cancel","target":"a"}),
+        });
+        ticks(&mut hub, 8);
+        let events = drain(&mut output[0]);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|v| v["id"] == "a" && v["event"]["type"] == "stopped")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|v| v["id"] == "b" && v["event"]["type"] == "completed")
+                .count(),
+            1
+        );
+        assert!(hub.active.is_empty());
+        request(&mut hub, 1, "after", "prepare", cached);
+        ticks(&mut hub, 8);
+        let events = drain(&mut output[0]);
+        assert_eq!(
+            events[0]["event"]["status"]["readiness"]["source"],
+            "cached"
+        );
+        assert_eq!(counter.get(), 1);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    fn install_provider(hub: &mut Hub, app: &str, provider: Box<dyn Provider>) {
+        let grant = config::load_grant(&hub.root, app).unwrap();
+        hub.providers.insert(
+            (app.into(), provider.id().into()),
+            RetainedProvider { grant, provider },
+        );
+    }
+
     fn setup() -> (Hub, Vec<tokio::sync::mpsc::Receiver<Value>>) {
         let root =
             std::env::temp_dir().join(format!("seatline-hub-{}", config::random_token().unwrap()));
@@ -885,7 +1315,7 @@ mod tests {
             providers: BTreeMap::new(),
             supervisor: Supervisor::new(),
             active: BTreeMap::new(),
-            sessions: BTreeMap::new(),
+            sessions: Sessions::default(),
             cleanup: Vec::new(),
             next_check: Instant::now() + Duration::from_secs(60),
             next_prune: Instant::now() + Duration::from_secs(3600),
@@ -917,8 +1347,7 @@ mod tests {
                 output,
             });
             assert_eq!(receive.try_recv().unwrap()["type"], "ready");
-            hub.providers
-                .insert((app.into(), "codex".into()), Box::new(Fixture));
+            install_provider(&mut hub, app, Box::new(Fixture));
             outputs.push(receive);
         }
         (hub, outputs)
@@ -1077,6 +1506,12 @@ mod tests {
             output: send,
         });
         assert_eq!(reopened.try_recv().unwrap()["type"], "ready");
+        // Revocation also drops the old adapter and its readiness evidence.
+        assert!(
+            !hub.providers
+                .contains_key(&("first".into(), "codex".into()))
+        );
+        install_provider(&mut hub, "first", Box::new(Fixture));
         request(
             &mut hub,
             3,

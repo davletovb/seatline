@@ -26,6 +26,18 @@ pub struct Grant {
     pub native_adapter: Option<NativeAdapter>,
 }
 
+impl Grant {
+    /// The authorization and workspace that a retained provider was built for.
+    /// Origin/relay settings do not change that provider's effective scope.
+    pub fn same_provider_scope(&self, other: &Self) -> bool {
+        self.app == other.app
+            && same_token(&self.token, &other.token)
+            && self.providers == other.providers
+            && self.allow_provider_default == other.allow_provider_default
+            && self.cache_title == other.cache_title
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeAdapter {

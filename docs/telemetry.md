@@ -58,7 +58,8 @@ The span up to the terminal update belongs to the phase the request was in; late
 | was refused or cancelled in the queue | `queue_wait` only, ending at the refusal or cancel |
 | failed during `provider_init` (executable missing, signed out) | `queue_wait`, `sign_in_probe` if one ran, `provider_init`, `cleanup` |
 | completed with no answer text | up to `first_text`, which absorbs the wait; `completion` is absent |
-| is a `status` request | `queue_wait`, `sign_in_probe` (the whole check), `completion`, `cleanup` |
+| is a fresh `status`, `readiness` or `prepare` request | `queue_wait`, `sign_in_probe` (the whole check), `completion`, `cleanup` |
+| is cached/shared `readiness` or `prepare` | `queue_wait`, `provider_init` (local lookup/shared wait), `completion`, `cleanup`; zero new probes |
 | is a `forget` or `cleanup` request | `queue_wait`, `cleanup` (the work itself, and the drop of its exchange, so `cleanup` ends at `released` and the phases still add up to the total) |
 
 ### Cancellation and other endings
@@ -79,8 +80,8 @@ The outcome is how the **scheduler** ended the turn, with one exception: when th
 
 | Phase or surface | Status |
 | --- | --- |
-| `sign_in_probe` on `send` | **Codex and Claude only.** Gemini and Grok run no sign-in probe on the send path (their turns fail with an authentication error instead), so the phase is absent for them, as it is for any send that does not ask for `check_sign_in`. |
-| `sign_in_probe` on `status` | Every provider: the status check is the probe. `probes` counts a status request as one check even when the provider was not found and nothing was spawned, so it counts readiness checks, not processes. |
+| `sign_in_probe` on `send` | **Legacy sends: Codex and Claude only.** Explicit `send_ready` can run a readiness probe on every adapter and reports its span; cached/shared sends run no new probe. Gemini and Grok run no inline sign-in probe on the legacy send path (their turns fail with an authentication error instead), so the phase is absent for them, as it is for any send that does not ask for `check_sign_in`. |
+| `sign_in_probe` on `status` | Every provider: a fresh status/readiness/preparation check is the probe; cached/shared readiness counts zero new probes. `probes` counts a status request as one check even when the provider was not found and nothing was spawned, so it counts readiness checks, not processes. |
 | `launched` and `provider_init` | Gemini and Grok start their process while the exchange is built, so `launched` is observed right after `built` and the whole synchronous start is inside `provider_init`. Codex and Claude launch after any probe. |
 | `first_text` granularity | Codex reports each agent message whole, so its first text is the first complete message. Claude reports text as it streams; Gemini and Grok report it as their adapters do. |
 | `cleanup` | Only the time to drop the exchange. Per-turn file cleanup an adapter does *before* its terminal update, such as Gemini deleting its transcripts, is inside `completion`, not `cleanup` (slice F-02 moves it). Grok removes its per-turn workspace on a background thread, which is in neither. |

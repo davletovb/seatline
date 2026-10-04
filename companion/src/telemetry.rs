@@ -229,7 +229,9 @@ impl Telemetry {
             return;
         }
         let method = match method {
-            "send" | "status" | "forget" | "cleanup" => method,
+            "send" | "send_ready" | "status" | "readiness" | "prepare" | "forget" | "cleanup" => {
+                method
+            }
             _ => "unknown",
         };
         self.waiting.insert(

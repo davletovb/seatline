@@ -135,10 +135,12 @@ for the exact boundaries, what is missing per provider, and the format.
 * **Apps are isolated from each other, not from local malware.** A process that
   runs as the same user can read `apps/*.json` and speak the IPC protocol.
   Grants keep honest apps apart; they do not sandbox malicious local code.
-* **Account policy belongs to the app.** The broker never looks at a provider's
-  sign-in. `check_sign_in` only asks the adapter to report it, and an app (or a
-  modified client) can send `false`. An app that must refuse API-key sign-ins,
-  as Conclave does, enforces that itself.
+* **Account policy belongs to the app.** Explicit `prepare`/`readiness` and
+  `send_ready` use bounded verified readiness; apps choose freshness and which
+  billing modes to accept. Legacy `send` keeps each adapter's existing
+  `check_sign_in` behavior. An app that must refuse API-key sign-ins, as
+  Conclave does, checks the classification and enforces that itself. See the
+  [readiness and preparation contract](../docs/readiness-and-preparation.md).
 * **A pairing link is a session credential.** Anyone holding the relay id, the
   browser token and the key can take the browser role (displacing the open tab)
   and use the app's grant for as long as the pairing lasts. Keep the link

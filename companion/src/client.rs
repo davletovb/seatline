@@ -83,6 +83,7 @@ pub struct RemoteProvider {
     capabilities: Capabilities,
     timeouts: Timeouts,
     persistent: bool,
+    preparation: bool,
 }
 
 impl RemoteProvider {
@@ -93,6 +94,7 @@ impl RemoteProvider {
             capabilities: metadata.capabilities(),
             timeouts: metadata.timeouts(),
             persistent: metadata.supports_persistent_session(),
+            preparation: metadata.supports_preparation(),
         }
     }
     fn request(&self, method: &str, params: Value) -> Box<dyn Exchange> {
@@ -119,6 +121,22 @@ impl Provider for RemoteProvider {
     }
     fn status(&self) -> Box<dyn Exchange> {
         self.request("status", Value::Null)
+    }
+    fn supports_preparation(&self) -> bool {
+        self.preparation
+    }
+    fn readiness(&self, freshness: seatline_core::readiness::Freshness) -> Box<dyn Exchange> {
+        self.request("readiness", json!(freshness))
+    }
+    fn prepare(&self, freshness: seatline_core::readiness::Freshness) -> Box<dyn Exchange> {
+        self.request("prepare", json!(freshness))
+    }
+    fn send_with_readiness(
+        &self,
+        turn: Turn,
+        freshness: seatline_core::readiness::Freshness,
+    ) -> Box<dyn Exchange> {
+        self.request("send_ready", json!({"turn":turn,"freshness":freshness}))
     }
     fn send(&self, turn: Turn) -> Box<dyn Exchange> {
         self.request("send", json!(turn))

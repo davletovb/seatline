@@ -9,7 +9,8 @@
 //!
 //! Before a request that asks for it, `codex login status` checks the sign-in, because a
 //! signed-out `codex exec` retries the network instead of failing. Only its
-//! exit status is read: its output names the account and a masked key.
+//! exit status decides authentication. A bounded output prefix is examined
+//! for billing-mode classification and is never logged or forwarded.
 //!
 //! Codex runs in a workspace nobody but its user can change ([`workspace`]),
 //! with a minimal environment (SEC-02): the variables every provider gets
@@ -25,7 +26,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::{Cleanup, Exchange, Provider, Scripted, Timeouts, Update};
-use seatline_core::discovery::SearchPath;
+use seatline_core::discovery::{CachedSearchPath, SearchPath};
 use seatline_core::exchange::SessionLoss;
 use seatline_core::process::{Event, Exit, Process, ProcessSpec};
 use seatline_core::prompt;
@@ -195,7 +196,7 @@ impl Launch {
 
 /// The Codex CLI adapter.
 pub struct Codex {
-    search: SearchPath,
+    search: CachedSearchPath,
     launch: Rc<Launch>,
     limits: Limits,
 }
@@ -216,7 +217,7 @@ impl Codex {
     /// variables from the host's environment.
     pub fn new(search: SearchPath, work_dir: PathBuf) -> Self {
         Self {
-            search,
+            search: CachedSearchPath::new(search),
             launch: Rc::new(Launch::new(work_dir, std::env::vars_os().collect())),
             limits: LIMITS,
         }
@@ -263,12 +264,49 @@ impl Codex {
 }
 
 impl Provider for Codex {
+    fn readiness_key(&self) -> Option<crate::readiness::Key> {
+        self.launch.workspace().ok()?;
+        let mut files = Vec::new();
+        if let Some(home) = codex_home(&self.launch) {
+            files.extend([
+                home.join("auth.json"),
+                home.join("config.toml"),
+                home.clone(),
+            ]);
+            if home.exists() {
+                for (count, entry) in std::fs::read_dir(home).ok()?.enumerate() {
+                    if count >= 256 {
+                        return None;
+                    }
+                    let entry = entry.ok()?;
+                    if entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|n| n.ends_with(".config.toml"))
+                    {
+                        files.push(entry.path());
+                    }
+                }
+            }
+        }
+        files.sort();
+        files.dedup();
+        crate::readiness::Key::watch(&self.executable()?, files, self.capabilities())
+    }
     fn id(&self) -> &str {
         ID
     }
 
     fn supports_persistent_session(&self) -> bool {
         true
+    }
+
+    fn supports_preparation(&self) -> bool {
+        true
+    }
+
+    fn invalidate_readiness(&self) {
+        self.search.invalidate();
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -448,6 +486,7 @@ fn status_update(
             capabilities,
             models: Cow::Borrowed(&[]),
             sign_in,
+            readiness: None,
         },
     }
 }
@@ -712,13 +751,21 @@ fn classify_sign_in(
         return None;
     }
     let text = String::from_utf8_lossy(output).to_ascii_lowercase();
-    Some(if text.contains("api key") {
-        seatline_core::turn::SignInClassification::ApiKey
-    } else if text.contains("chatgpt") || text.contains("subscription") {
-        seatline_core::turn::SignInClassification::Subscription
-    } else {
-        seatline_core::turn::SignInClassification::Unknown
-    })
+    Some(
+        if text.lines().any(|line| {
+            line.trim().starts_with("logged in using an api key")
+                || line.trim().starts_with("logged in using api key")
+        }) {
+            seatline_core::turn::SignInClassification::ApiKey
+        } else if text
+            .lines()
+            .any(|line| line.trim().starts_with("logged in using chatgpt"))
+        {
+            seatline_core::turn::SignInClassification::Subscription
+        } else {
+            seatline_core::turn::SignInClassification::Unknown
+        },
+    )
 }
 
 /// One `conversation.send`: the sign-in probe, then the `codex exec` turn.

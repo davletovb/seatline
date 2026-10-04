@@ -39,6 +39,9 @@ impl Fixture {
             .output()
             .unwrap();
         assert!(authorized.status.success());
+        // Match client startup: choose the endpoint before spawning the broker.
+        // On Windows, simultaneous first lookups can create different pipe IDs.
+        client::socket_name(&root).unwrap();
         // No provider can be found, so the request does not depend on one
         // being installed on the machine that runs the test.
         let empty = root.join("no-providers");
@@ -61,6 +64,10 @@ impl Fixture {
 
     /// One connection that asks for a status and reads it to its end.
     async fn status(&self, id: &str) -> Vec<Value> {
+        self.call(id, "status", Value::Null).await
+    }
+
+    async fn call(&self, id: &str, method: &str, params: Value) -> Vec<Value> {
         let give_up = Instant::now() + Duration::from_secs(10);
         let mut stream = loop {
             match Stream::connect(client::socket_name(&self.root).unwrap()).await {
@@ -84,7 +91,7 @@ impl Fixture {
         );
         wire::write_frame(
             &mut stream,
-            &json!({"id":id,"provider":"codex","method":"status","params":null}),
+            &json!({"id":id,"provider":"codex","method":method,"params":params}),
         )
         .await
         .unwrap();
@@ -102,6 +109,30 @@ impl Fixture {
             }
         }
     }
+}
+
+#[test]
+fn preparation_and_readiness_use_the_real_wire_and_preserve_missing_provider_status() {
+    let fixture = Fixture::start(None);
+    runtime().block_on(async {
+        for method in ["prepare", "readiness"] {
+            let events = fixture
+                .call(method, method, json!({"mode":"cached","max_age_ms":30000}))
+                .await;
+            assert_eq!(events[0]["event"]["status"]["availability"], "not_found");
+            assert_eq!(events[0]["event"]["status"]["authentication"], "unknown");
+            assert_eq!(events[0]["event"]["status"]["readiness"]["source"], "fresh");
+            assert_eq!(events.last().unwrap()["event"]["type"], "completed");
+        }
+        let malformed = fixture
+            .call(
+                "bad-freshness",
+                "prepare",
+                json!({"mode":"cached","max_age_ms":-1}),
+            )
+            .await;
+        assert_eq!(malformed[0]["event"]["reason"], "INVALID_REQUEST");
+    });
 }
 
 impl Drop for Fixture {

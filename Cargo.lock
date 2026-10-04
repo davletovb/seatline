@@ -1102,6 +1102,7 @@ version = "0.1.0-dev"
 dependencies = [
  "seatline-core",
  "seatline-platform",
+ "serde",
  "serde_json",
 ]
 

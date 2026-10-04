@@ -30,6 +30,7 @@ pub mod claude;
 pub mod codex;
 pub mod gemini;
 pub mod grok;
+pub mod readiness;
 
 pub(crate) fn keep_bounded_output(output: &mut Vec<u8>, bytes: &[u8], limit: usize) {
     let remaining = limit.saturating_sub(output.len());
@@ -112,6 +113,54 @@ pub trait Provider {
     /// Starts checking availability, authentication, and capabilities. The
     /// exchange reports one `Status` and then `Completed`.
     fn status(&self) -> Box<dyn Exchange>;
+
+    /// Explicit freshness. Wrap a local adapter in [`readiness::Ready`] to
+    /// enable verified caching and concurrent check deduplication.
+    fn readiness(&self, _freshness: seatline_core::readiness::Freshness) -> Box<dyn Exchange> {
+        self.status()
+    }
+
+    /// Whether preparation can resolve the executable, check the workspace,
+    /// and check sign-in without a model prompt. No process reuse is implied.
+    fn supports_preparation(&self) -> bool {
+        false
+    }
+
+    fn prepare(&self, freshness: seatline_core::readiness::Freshness) -> Box<dyn Exchange> {
+        if self.supports_preparation() {
+            self.readiness(freshness)
+        } else {
+            Box::new(Scripted::failed(Failure {
+                code: ErrorCode::InvalidRequest,
+                reason: "PREPARATION_UNSUPPORTED",
+                retryable: false,
+            }))
+        }
+    }
+
+    /// Opt-in readiness before sending, with a Status update before launch.
+    /// `turn.check_sign_in` always overrides cached freshness with Fresh.
+    fn send_with_readiness(
+        &self,
+        turn: Turn,
+        _freshness: seatline_core::readiness::Freshness,
+    ) -> Box<dyn Exchange> {
+        let _ = turn;
+        Box::new(Scripted::failed(Failure {
+            code: ErrorCode::InvalidRequest,
+            reason: "READINESS_UNSUPPORTED",
+            retryable: false,
+        }))
+    }
+
+    /// Opaque configuration/file fingerprint. None disables caching. The
+    /// wrapper itself scopes immutable environment and workspace settings.
+    fn readiness_key(&self) -> Option<readiness::Key> {
+        None
+    }
+
+    /// Drop cached evidence after account/config changes or revocation.
+    fn invalidate_readiness(&self) {}
 
     /// Starts serving `turn`. A persistent turn reports the native session it
     /// runs in, before `Started`, as an opaque handle.
