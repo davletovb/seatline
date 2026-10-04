@@ -24,7 +24,7 @@ seatline-scheduler = { path = "../scheduler" }
 seatline-service = { path = "../service" }
 serde_json = "1.0"
 # To tell when a broker the tests started is listening.
-interprocess = { version = "=2.2.3", features = ["tokio"] }
+interprocess = { version = "=2.4.4", features = ["tokio"] }
 tokio = { version = "1", features = ["rt"] }
 
 [target.'cfg(unix)'.dev-dependencies]

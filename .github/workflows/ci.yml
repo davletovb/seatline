@@ -93,7 +93,8 @@ jobs:
                 cargo test -p seatline-companion --test remote --locked a_broker_with_no_room_is_reported_as_busy_and_asked_again_by_the_next_request -- --exact
                 if ($LASTEXITCODE -ne 0) { $failures += "busy $attempt : $source" }
               }
-              foreach ($attempt in 1..3) {
+              $remoteAttempts = if ($source -eq $baseline) { 3 } else { 10 }
+              foreach ($attempt in 1..$remoteAttempts) {
                 Write-Host "Full remote suite attempt $attempt"
                 cargo test -p seatline-companion --test remote --locked
                 if ($LASTEXITCODE -ne 0) { $failures += "remote $attempt : $source" }
@@ -102,7 +103,12 @@ jobs:
               Pop-Location
             }
           }
-          if ($failures.Count -gt 0) { throw ($failures -join "`n") }
+          $baselineFailures = @($failures | Where-Object { $_.Contains($baseline) })
+          if ($baselineFailures.Count -gt 0) {
+            Write-Warning ("Baseline failures: " + ($baselineFailures -join "`n"))
+          }
+          $headFailures = @($failures | Where-Object { -not $_.Contains($baseline) })
+          if ($headFailures.Count -gt 0) { throw ($headFailures -join "`n") }
       - name: Test release
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --workspace --locked --release

@@ -92,6 +92,8 @@ Commands still wake the hub's bounded inbox immediately. When no exchange or fil
 
 The 1–5 ms values are requested waits, not an operating-system wakeup guarantee. Windows timer resolution can round these waits up; this slice does not change system timer resolution. The measured polling/latency improvements below are Linux evidence only. Tests await state with seconds-scale deadlines instead of assuming millisecond timer precision.
 
+Windows stress validation reproduced the earlier named-pipe lock-poison failure in the pinned `interprocess` 2.2.3 cleanup dispatcher. The dependency is now pinned consistently to 2.4.4: upstream replaced that dispatcher with a runtime-independent linger pool in [2.3.0](https://github.com/kotauskas/interprocess/releases/tag/2.3.0) and fixed the subsequent linger-pool leak in [2.4.0](https://github.com/kotauskas/interprocess/releases/tag/2.4.0). This addresses a matching upstream failure mechanism; repeated Windows IPC CI supplies the product verification. It does not establish that F's wakeup changes had no effect on the old race.
+
 The new Linux hub-only benchmark exercises the same hub and real fake-provider subprocesses without IPC, using an isolated fake home/configuration. It records aggregate thread CPU from `/proc/self/task/*/schedstat`, voluntary context switches, first-text/completion samples, a fresh readiness check while both generation slots are busy, and an interactive request behind six queued long requests. All eight long burst requests must also finish. It excludes initialization from the idle windows. It sends no real-provider prompts and measures no transport/network/model latency.
 
 ```sh
