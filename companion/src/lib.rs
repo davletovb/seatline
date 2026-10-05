@@ -2,6 +2,7 @@
 pub const PROTOCOL_VERSION: u32 = 1;
 pub mod client;
 pub mod config;
+pub mod control;
 pub mod hub;
 mod ledger;
 pub mod remote;

@@ -25,8 +25,9 @@
 //!   goes on, so a hung connection cannot keep a client from starting a broker,
 //!   and one that finishes after the budget is not accepted.
 //! - **Upgrades.** The claim names no version: whichever client holds it starts
-//!   the companion the installation registers now, and a broker that was
-//!   already running keeps serving until it is idle and leaves, as before.
+//!   the companion the installation registers now. A broker that was already
+//!   running keeps serving until it is idle and leaves, or until `install` or
+//!   `seatline-companion stop` ends it ([`crate::control`]).
 //!
 //! The client looks for the broker every millisecond at first, backing off to
 //! a hundred: a companion listens about two milliseconds after it is started,

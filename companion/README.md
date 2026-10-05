@@ -121,9 +121,28 @@ off to a hundred, within a five-second budget; no single try may outlast the
 budget, and one that hangs for a second is given up on so the client can go on
 to start the broker itself. It exits after ten
 minutes with no connections (`SEATLINE_BROKER_IDLE_SECS` changes this; `0` keeps
-it running), so after running `install` again the next start uses the new
-version. `install` keeps the new copy and the one registered before it and
-removes older ones.
+it running), but an app that stays connected, or reconnects within ten minutes,
+keeps it running indefinitely, so an upgrade must not depend on that.
+
+`install` keeps the new copy and the one registered before it and removes older
+ones, then ends the broker that is running, which is an older copy: the next use
+starts the one just installed. `seatline-companion stop` does the same on its own.
+The broker stops taking connections, leaves as soon as nothing is queued or
+running, and otherwise waits up to ten seconds (`SEATLINE_STOP_GRACE_MS` changes
+this) before ending what is still running; providers are stopped and reaped, and
+each app sees a lost connection and reconnects by itself. Run `install` from the
+new build (`target/release/seatline-companion install`): it installs the program
+that runs it. Only a broker that is running can be asked: it publishes a random
+control token in `broker-control` in the data directory, readable by the current
+user only, and accepts a stop request carrying that token in place of the app
+authentication frame, even when every connection slot is taken. An app's own token
+cannot stop it. A broker that has only just started gets a few seconds to publish its
+token and listen before `stop` takes its silence for an older version. A broker started by a
+Seatline before `stop` existed does not understand the request, and `stop` says so
+instead of waiting for it; end that one process by hand once (macOS and Linux:
+`pkill -f "seatline-companion serve"`; Windows: end `seatline-companion.exe` in Task
+Manager). Native-host processes that Chrome started for extensions are separate
+from the broker and keep running until Chrome closes their port.
 
 ## Phase telemetry
 

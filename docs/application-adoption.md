@@ -87,7 +87,7 @@ Persistent provider processes (slice E) were not touched: the decision about Cod
 
 ## Migration notes
 
-**Order.** Install the corrected companion before strict Lineleaf/Conclave builds. Legacy `status` remains readable, but generation requires `send_ready_with_policy`; an unknown protected method shows an update requirement without an ordinary-send fallback. Older generic clients still work against the new companion.
+**Order.** Install the corrected companion before strict Lineleaf/Conclave builds, by running `install` from the new build: it also ends the broker that was running, which would otherwise keep serving the old version for as long as any application stays connected (`seatline-companion stop` does only that). A broker started before `stop` existed must be ended by hand once. Legacy `status` remains readable, but generation requires `send_ready_with_policy`; an unknown protected method shows an update requirement without an ordinary-send fallback. Older generic clients still work against the new companion.
 
 **Pins.** Update an application's Seatline pin deliberately, in the same change as the code the new revision requires, with the application's suites and its real-broker checks passing at the new revision. The one source change slice C forced on Tabbeam is `ProviderState.readiness` (an `Option`, absent on legacy status). Keep every Seatline crate and the companion a CI installs on the same exact revision (Tabbeam's pin check does this); record the oldest companion an application still supports (Lineleaf's `config/seatline-contract.json` has `minimum_revision`; Conclave's CI runs the older revision in `--legacy` mode).
 
