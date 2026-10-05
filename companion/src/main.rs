@@ -304,9 +304,29 @@ async fn serve(
         };
         last_activity.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
         let Ok(permit) = permits.clone().try_acquire_owned() else {
-            // Say why instead of just hanging up, so the client can back off and retry.
+            // Say why instead of just hanging up, so the client can back off and retry. A request to stop
+            // the broker is the one thing that must still get through: a broker whose slots are all taken
+            // is as much in need of stopping as any other. It sends its frame at once, so wait only
+            // briefly for one before saying busy.
+            let stopper = stopper.clone();
             tokio::spawn(async move {
                 let mut stream = stream;
+                let first =
+                    tokio::time::timeout(Duration::from_millis(250), wire::read_frame(&mut stream))
+                        .await;
+                if let Ok(Ok(frame)) = first {
+                    if control::is_stop(&frame, &stopper.token) {
+                        let said = tokio::time::timeout(
+                            Duration::from_secs(1),
+                            wire::write_frame(&mut stream, &json!({"type":"stopping"})),
+                        )
+                        .await;
+                        if said.is_ok_and(|written| written.is_ok()) {
+                            stopper.requested.notify_one();
+                        }
+                        return;
+                    }
+                }
                 let _ = tokio::time::timeout(
                     Duration::from_secs(1),
                     wire::write_frame(&mut stream, &json!({"type":"busy"})),

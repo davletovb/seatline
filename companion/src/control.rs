@@ -36,6 +36,8 @@ pub const GRACE_VARIABLE: &str = "SEATLINE_STOP_GRACE_MS";
 const DEFAULT_GRACE: Duration = Duration::from_secs(10);
 /// How long `stop` waits, beyond the grace period, for the broker to finish leaving.
 const LEAVING: Duration = Duration::from_secs(5);
+/// How long `stop` gives a broker that holds the lock to publish its token and start listening.
+const STARTING: Duration = Duration::from_secs(3);
 
 /// The longest a stopping broker waits for work that is still running before it ends it.
 pub fn grace() -> Duration {
@@ -92,12 +94,32 @@ pub async fn stop(root: &Path) -> io::Result<Outcome> {
     if !running(root)? {
         return Ok(Outcome::NotRunning);
     }
-    // A broker that supports `stop` has published a token for as long as it lives, including while it
-    // is leaving. None is published by one that does not.
-    let Ok(token) = std::fs::read_to_string(root.join(TOKEN_FILE)) else {
-        return Ok(Outcome::Unanswered);
+    // A broker that supports `stop` publishes its token and starts listening a little after it takes the
+    // lock, and keeps the token until it leaves. One that has only just started gets time to do both
+    // before its silence is taken for a Seatline without `stop`.
+    let settled = Instant::now() + STARTING;
+    let mut published = false;
+    let asked = loop {
+        if let Ok(token) = std::fs::read_to_string(root.join(TOKEN_FILE)) {
+            published = true;
+            match ask(root, token.trim()).await {
+                Asked::NotListening => {}
+                answered => break answered,
+            }
+        }
+        if !running(root)? {
+            // It left on its own while we waited.
+            return Ok(Outcome::Stopped);
+        }
+        if Instant::now() >= settled {
+            if !published {
+                return Ok(Outcome::Unanswered);
+            }
+            break Asked::NotListening;
+        }
+        sleep(Duration::from_millis(25)).await;
     };
-    if ask(root, token.trim()).await == Asked::Misunderstood {
+    if asked == Asked::Misunderstood {
         // It may have left on its own while we asked.
         return Ok(if running(root)? {
             Outcome::Unanswered
@@ -105,7 +127,7 @@ pub async fn stop(root: &Path) -> io::Result<Outcome> {
             Outcome::Stopped
         });
     }
-    // Stopping, or not listening any more because it is already stopping: wait for it to leave.
+    // Stopping, or no longer listening because it is already leaving: wait for it to leave.
     let until = Instant::now() + grace() + LEAVING;
     while running(root)? {
         if Instant::now() >= until {

@@ -1,7 +1,10 @@
 //! `seatline-companion stop`, and `install` ending the broker it replaces: the running broker leaves on
 //! request even while apps stay connected, it answers only the control token it published, and a
 //! broker that cannot be asked is reported as such instead of being waited for.
-use interprocess::local_socket::tokio::{Stream, prelude::*};
+use interprocess::local_socket::{
+    ListenerOptions,
+    tokio::{Stream, prelude::*},
+};
 use seatline_companion::{client, config, control, wire};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -247,4 +250,69 @@ fn install_ends_the_broker_it_replaces() {
     assert!(!String::from_utf8_lossy(&again.stdout).contains("Stopped"));
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A broker holds `broker.lock` a little before it publishes its token and starts listening. A stop that
+/// arrives in that gap must wait for it, not take it for a Seatline without `stop` and leave it running.
+#[test]
+fn a_stop_waits_for_a_broker_that_is_still_starting() {
+    let root = root();
+    authorize(&root);
+    let lock = config::lock(&root, "broker.lock").unwrap();
+    let starting = {
+        let root = root.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(700));
+            let token = control::publish(&root).unwrap();
+            runtime().block_on(async {
+                let listener = ListenerOptions::new()
+                    .name(client::socket_name(&root).unwrap())
+                    .create_tokio()
+                    .unwrap();
+                let mut stream = listener.accept().await.unwrap();
+                let frame = wire::read_frame(&mut stream).await.unwrap();
+                assert!(control::is_stop(&frame, &token));
+                wire::write_frame(&mut stream, &json!({"type":"stopping"}))
+                    .await
+                    .unwrap();
+            });
+            control::withdraw(&root);
+            drop(lock); // The stand-in leaves.
+        })
+    };
+    let stopped = companion(&root).arg("stop").output().unwrap();
+    assert!(stopped.status.success(), "{stopped:?}");
+    assert!(
+        String::from_utf8_lossy(&stopped.stdout).contains("Seatline stopped"),
+        "{stopped:?}"
+    );
+    starting.join().unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Unauthenticated connections hold their slots for five seconds, and applications hold theirs for as
+/// long as they stay connected. A broker with every slot taken still has to be reachable to be stopped.
+#[test]
+fn a_stop_reaches_a_broker_that_has_no_connection_to_spare() {
+    let root = root();
+    authorize(&root);
+    let mut broker = start_broker(&root);
+    let runtime = runtime();
+    let held = runtime.block_on(async {
+        let mut held = Vec::new();
+        for _ in 0..32 {
+            held.push(connect(&root).await);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        held
+    });
+    let stopped = companion(&root)
+        .env(control::GRACE_VARIABLE, "1000")
+        .arg("stop")
+        .output()
+        .unwrap();
+    assert!(stopped.status.success(), "{stopped:?}");
+    assert!(exits(&mut broker));
+    drop(held);
+    let _ = std::fs::remove_dir_all(&root);
 }

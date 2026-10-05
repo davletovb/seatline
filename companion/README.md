@@ -135,7 +135,9 @@ new build (`target/release/seatline-companion install`): it installs the program
 that runs it. Only a broker that is running can be asked: it publishes a random
 control token in `broker-control` in the data directory, readable by the current
 user only, and accepts a stop request carrying that token in place of the app
-authentication frame. An app's own token cannot stop it. A broker started by a
+authentication frame, even when every connection slot is taken. An app's own token
+cannot stop it. A broker that has only just started gets a few seconds to publish its
+token and listen before `stop` takes its silence for an older version. A broker started by a
 Seatline before `stop` existed does not understand the request, and `stop` says so
 instead of waiting for it; end that one process by hand once (macOS and Linux:
 `pkill -f "seatline-companion serve"`; Windows: end `seatline-companion.exe` in Task
