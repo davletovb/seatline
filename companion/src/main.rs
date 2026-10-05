@@ -14,6 +14,7 @@ use interprocess::local_socket::{
 use seatline_companion::{
     PROTOCOL_VERSION, client,
     config::{self, Grant, NativeAdapter},
+    control::{self, Outcome},
     hub, telemetry, wire,
 };
 use seatline_core::telemetry::Sink;
@@ -49,11 +50,16 @@ fn run() -> io::Result<()> {
                 std::fs::remove_file(root.join("broker.sock"))?;
             }
             let telemetry = telemetry::from_env();
-            let hub = hub::start_with(root.clone(), telemetry.clone())?;
-            tokio::runtime::Builder::new_current_thread()
+            let (hub, hub_thread) = hub::start_joinable(root.clone(), telemetry.clone())?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
-                .build()?
-                .block_on(serve(root, hub, telemetry))
+                .build()?;
+            let result = runtime.block_on(serve(root, hub, telemetry));
+            // Dropping the runtime drops the connections and with them the last senders; the hub then
+            // ends whatever is still running (providers are stopped and reaped) before this process exits.
+            drop(runtime);
+            let _ = hub_thread.join();
+            result
         }
         Some("pair") if args.len() == 4 || (args.len() == 5 && args[4] == "--open") => {
             tokio::runtime::Builder::new_current_thread()
@@ -133,6 +139,44 @@ fn run() -> io::Result<()> {
                 "Seatline installed at {}",
                 seatline_companion::install::install(&root)?.display()
             );
+            // A broker that is already running is an older copy and would keep serving it for as long
+            // as any app stays connected: end it, so that the next use starts the copy just installed.
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(control::stop(&root))
+            {
+                Ok(Outcome::NotRunning) => {}
+                Ok(Outcome::Stopped) => {
+                    println!(
+                        "Stopped the Seatline that was running; the next use starts this copy."
+                    );
+                }
+                Ok(Outcome::Unanswered) => eprintln!("Seatline: {}", control::UNANSWERED),
+                Ok(Outcome::Lingering) => eprintln!(
+                    "Seatline: the Seatline that was running has not finished stopping; run `seatline-companion stop` to wait for it."
+                ),
+                Err(error) => eprintln!("Seatline: could not stop the running Seatline: {error}"),
+            }
+            Ok(())
+        }
+        Some("stop") if args.len() == 1 => {
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(control::stop(&root))?
+            {
+                Outcome::NotRunning => println!("Seatline is not running."),
+                Outcome::Stopped => {
+                    println!("Seatline stopped. The next use starts the installed copy.")
+                }
+                Outcome::Unanswered => return Err(io::Error::other(control::UNANSWERED)),
+                Outcome::Lingering => {
+                    return Err(io::Error::other(
+                        "Seatline was asked to stop but has not finished; run `seatline-companion stop` again to wait for it",
+                    ));
+                }
+            }
             Ok(())
         }
         Some("manifest") if args.len() == 1 => {
@@ -181,15 +225,16 @@ fn run() -> io::Result<()> {
             }
         }
         _ => Err(io::Error::other(
-            "usage: seatline-companion install | serve | connect APP | pair APP RELAY SITE [--open] | authorize APP PROVIDERS [EXTENSION_ORIGIN...] [SITE_ORIGIN...] [--relay=RELAY_ORIGIN] [--cache-title=TITLE] [--allow-provider-default] | register-native APP EXECUTABLE [ARGS...] | revoke APP | manifest",
+            "usage: seatline-companion install | stop | serve | connect APP | pair APP RELAY SITE [--open] | authorize APP PROVIDERS [EXTENSION_ORIGIN...] [SITE_ORIGIN...] [--relay=RELAY_ORIGIN] [--cache-title=TITLE] [--allow-provider-default] | register-native APP EXECUTABLE [ARGS...] | revoke APP | manifest",
         )),
     }
 }
 
 const MAX_CONNECTIONS: usize = 32;
 /// How long the broker stays up with no connections at all. Exiting when idle
-/// means the next start runs the installed binary, so an upgrade takes effect
-/// without anyone having to stop the old broker. `0` disables the exit.
+/// means the next start runs the installed binary, but a broker that apps keep
+/// connected never gets there: `install` and `stop` end it (see `control`).
+/// `0` disables the exit.
 const DEFAULT_IDLE_SECONDS: u64 = 600;
 
 fn idle_limit() -> Option<Duration> {
@@ -225,6 +270,12 @@ async fn serve(
             std::fs::Permissions::from_mode(0o600),
         )?;
     }
+    // Published while this broker lives, so `seatline-companion stop` (and `install`) can end it.
+    let stopper = Arc::new(Stopper {
+        token: control::publish(&root)?,
+        requested: tokio::sync::Notify::new(),
+    });
+    let _published = Published(root.clone());
     let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     let ids = AtomicU64::new(1);
     // Milliseconds since `started` at which a connection last opened or closed.
@@ -237,6 +288,7 @@ async fn serve(
     loop {
         let stream = tokio::select! {
             accepted = listener.accept() => accepted?,
+            () = stopper.requested.notified() => break,
             () = tokio::time::sleep(check_every) => {
                 let quiet = (started.elapsed().as_millis() as u64)
                     .saturating_sub(last_activity.load(Ordering::Relaxed));
@@ -263,16 +315,18 @@ async fn serve(
             });
             continue;
         };
-        let (root, hub, connection, last_activity, telemetry) = (
+        let (root, hub, connection, last_activity, telemetry, stopper) = (
             root.clone(),
             hub.clone(),
             ids.fetch_add(1, Ordering::Relaxed),
             last_activity.clone(),
             telemetry.clone(),
+            stopper.clone(),
         );
         tokio::spawn(async move {
             let _permit = permit;
-            let _ = connection_loop(stream, root, hub.clone(), connection, telemetry).await;
+            let _ =
+                connection_loop(stream, root, hub.clone(), connection, telemetry, stopper).await;
             // Close must eventually be delivered even when the bounded inbox is full.
             while let Err(std::sync::mpsc::TrySendError::Full(_)) =
                 hub.try_send(hub::Command::Close(connection))
@@ -282,6 +336,61 @@ async fn serve(
             last_activity.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
         });
     }
+    retire(listener, &root, &hub).await;
+    Ok(())
+}
+
+/// What a stop request needs: the token that authorizes it, and the way to tell `serve` to leave.
+struct Stopper {
+    token: String,
+    requested: tokio::sync::Notify,
+}
+
+/// Withdraws the published control token when the broker leaves, however it leaves.
+struct Published(PathBuf);
+impl Drop for Published {
+    fn drop(&mut self) {
+        control::withdraw(&self.0);
+    }
+}
+
+/// Leaves on request: stops taking connections, then waits until the hub has nothing queued or running,
+/// or the grace period is over. What is still running then is ended when the broker exits.
+async fn retire(
+    listener: interprocess::local_socket::tokio::Listener,
+    root: &std::path::Path,
+    hub: &std::sync::mpsc::SyncSender<hub::Command>,
+) {
+    drop(listener);
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(root.join("broker.sock"));
+    #[cfg(not(unix))]
+    let _ = root;
+    let until = tokio::time::Instant::now() + control::grace();
+    while !quiet(hub).await && tokio::time::Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Whether the hub has no work. A hub that is gone has none.
+async fn quiet(hub: &std::sync::mpsc::SyncSender<hub::Command>) -> bool {
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let mut command = hub::Command::Quiet(reply);
+    for _ in 0..200 {
+        match hub.try_send(command) {
+            Ok(()) => {
+                return tokio::time::timeout(Duration::from_secs(1), answer)
+                    .await
+                    .is_ok_and(|answered| answered.unwrap_or(true));
+            }
+            Err(std::sync::mpsc::TrySendError::Full(back)) => {
+                command = back;
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return true,
+        }
+    }
+    false
 }
 
 async fn connection_loop(
@@ -290,9 +399,19 @@ async fn connection_loop(
     hub: std::sync::mpsc::SyncSender<hub::Command>,
     connection: u64,
     telemetry: Option<Arc<dyn Sink>>,
+    stopper: Arc<Stopper>,
 ) -> io::Result<()> {
     let auth =
         tokio::time::timeout(Duration::from_secs(5), wire::read_frame(&mut stream)).await??;
+    // A request to stop the broker takes the place of the app authentication frame.
+    if !auth["control"].is_null() {
+        if !control::is_stop(&auth, &stopper.token) {
+            return Err(io::Error::other("control refused"));
+        }
+        wire::write_frame(&mut stream, &json!({"type":"stopping"})).await?;
+        stopper.requested.notify_one();
+        return Ok(());
+    }
     // The handshake runs from the authentication frame to `ready` on the wire.
     let handshake_began = telemetry.is_some().then(Instant::now);
     if auth["version"] != PROTOCOL_VERSION {

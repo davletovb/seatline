@@ -75,6 +75,10 @@ pub enum Command {
         value: Value,
     },
     Close(u64),
+    /// Asks whether the hub has no work at all: nothing queued, running, being
+    /// written to the ledger or cleaned up. The broker asks while it is being
+    /// stopped, to leave as soon as it can without ending a request.
+    Quiet(tokio::sync::oneshot::Sender<bool>),
 }
 
 struct Connection {
@@ -180,6 +184,17 @@ pub fn start_with(
     root: PathBuf,
     telemetry: Option<Arc<dyn Sink>>,
 ) -> io::Result<SyncSender<Command>> {
+    start_joinable(root, telemetry).map(|(send, _)| send)
+}
+
+/// [`start_with`], also returning the hub's thread. Once every sender is
+/// dropped the hub closes its connections and ends what is running (providers
+/// are stopped and reaped, ledger writes finish); joining the thread waits for
+/// that, which a process that is about to exit should do.
+pub fn start_joinable(
+    root: PathBuf,
+    telemetry: Option<Arc<dyn Sink>>,
+) -> io::Result<(SyncSender<Command>, std::thread::JoinHandle<()>)> {
     let ledger = root.join("sessions.json");
     let sessions = match std::fs::read(&ledger) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
@@ -189,7 +204,7 @@ pub fn start_with(
     let policy = Policy::load(&root)?;
     let ledger = Ledger::new(root.clone(), sessions.clone())?;
     let (send, receive) = mpsc::sync_channel(128);
-    std::thread::spawn(move || {
+    let thread = std::thread::spawn(move || {
         Hub {
             root,
             connections: BTreeMap::new(),
@@ -212,7 +227,7 @@ pub fn start_with(
         }
         .run(receive);
     });
-    Ok(send)
+    Ok((send, thread))
 }
 
 struct Hub {
@@ -283,8 +298,18 @@ impl Hub {
         })
     }
 
+    fn quiet(&self) -> bool {
+        self.queue.is_empty()
+            && self.active.is_empty()
+            && self.ledger_jobs.is_empty()
+            && self.cleanup.is_empty()
+    }
+
     fn command(&mut self, command: Command) {
-        self.quiet_ticks = 0;
+        // A question is not work: it does not restart the 1 ms burst timing.
+        if !matches!(command, Command::Quiet(_)) {
+            self.quiet_ticks = 0;
+        }
         match command {
             Command::Open {
                 connection,
@@ -311,6 +336,9 @@ impl Hub {
                 );
             }
             Command::Close(connection) => self.close(connection),
+            Command::Quiet(reply) => {
+                let _ = reply.send(self.quiet());
+            }
             Command::Request { connection, value } => {
                 if !self.authorized(connection) {
                     self.invalidate_connection(connection);
@@ -2182,6 +2210,29 @@ mod tests {
     }
 
     #[test]
+    fn the_hub_says_whether_it_has_any_work_and_the_question_is_not_work() {
+        let (mut hub, _output) = setup();
+        let ask = |hub: &mut Hub| {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            hub.command(Command::Quiet(reply));
+            answer.blocking_recv().unwrap()
+        };
+        assert!(ask(&mut hub), "a hub with nothing to do is quiet");
+        request(&mut hub, 1, "work", "send", turn(None));
+        assert!(!ask(&mut hub), "a queued request is work");
+        hub.tick();
+        assert_eq!(hub.active.len(), 1);
+        assert!(!ask(&mut hub), "a running request is work");
+        settle(&mut hub);
+        assert!(ask(&mut hub), "quiet again once it has finished");
+        // Asking is not activity: it must not restart the 1 ms burst timing.
+        hub.quiet_ticks = 7;
+        ask(&mut hub);
+        assert_eq!(hub.quiet_ticks, 7);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
     fn duplicate_outstanding_request_ids_still_close_the_connection() {
         for active in [false, true] {
             let (mut hub, _output) = setup();
@@ -2322,12 +2373,7 @@ mod tests {
     }
 
     fn settle(hub: &mut Hub) {
-        wait_until(hub, |hub| {
-            hub.queue.is_empty()
-                && hub.active.is_empty()
-                && hub.ledger_jobs.is_empty()
-                && hub.cleanup.is_empty()
-        });
+        wait_until(hub, |hub| hub.quiet());
     }
 
     #[test]

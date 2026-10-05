@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use seatline_companion::client::{RemoteProvider, socket_name};
+use seatline_companion::control;
 use seatline_companion::remote::RemoteClient;
 use seatline_companion::telemetry;
 use seatline_core::exchange::{Exchange, Update};
@@ -86,6 +87,8 @@ struct World {
     fake: FakeCodex,
     telemetry: PathBuf,
     broker: Option<Broker>,
+    /// How long the current broker waits for running work when it is asked to stop.
+    grace: Duration,
     /// Last, so the broker is gone before the next world starts.
     _lifetime: std::sync::MutexGuard<'static, ()>,
 }
@@ -118,14 +121,22 @@ impl World {
             root,
             fake,
             broker: None,
+            grace: Duration::ZERO,
             _lifetime: lifetime,
         };
         world.start_broker();
         world
     }
 
-    #[allow(clippy::disallowed_methods)] // Runs the companion this package builds; never a request-supplied program.
+    /// A broker that, when asked to stop, waits a long time for running work: a test that does not care
+    /// leaves it, and one that does sets its own.
     fn start_broker(&mut self) {
+        self.start_broker_with(Duration::from_secs(60));
+    }
+
+    #[allow(clippy::disallowed_methods)] // Runs the companion this package builds; never a request-supplied program.
+    fn start_broker_with(&mut self, grace: Duration) {
+        self.grace = grace;
         let layout = seatline_platform::layout::Layout::new(
             seatline_core::turn::Namespace::fixed(APP).unwrap(),
         );
@@ -133,6 +144,7 @@ impl World {
             .arg("serve")
             .env("SEATLINE_DATA_DIR", &self.root)
             .env("SEATLINE_BROKER_IDLE_SECS", "120")
+            .env(control::GRACE_VARIABLE, grace.as_millis().to_string())
             .env(telemetry::FILE_VARIABLE, &self.telemetry)
             .env("HOME", &self.home)
             .env("CODEX_HOME", self.home.join(".codex"))
@@ -166,6 +178,23 @@ impl World {
 
     fn kill_broker(&mut self) {
         drop(self.broker.take());
+    }
+
+    /// `seatline-companion stop` against this world's broker.
+    #[allow(clippy::disallowed_methods)] // Runs the companion this package builds; never a request-supplied program.
+    fn stop_command(&self) -> Command {
+        let mut command = Command::new(companion());
+        command
+            .arg("stop")
+            .env("SEATLINE_DATA_DIR", &self.root)
+            .env(control::GRACE_VARIABLE, self.grace.as_millis().to_string());
+        command
+    }
+
+    fn broker_has_exited(&mut self) -> bool {
+        self.broker
+            .as_mut()
+            .is_none_or(|broker| broker.0.try_wait().unwrap().is_some())
     }
 
     fn client(&self) -> RemoteClient {
@@ -347,6 +376,78 @@ fn a_broker_that_goes_away_ends_the_turn_without_a_replay_and_the_next_request_r
             .count(),
         1
     );
+}
+
+#[test]
+fn a_stop_waits_for_a_running_turn_up_to_the_grace_period_then_ends_it_and_reaps_its_provider() {
+    let mut world = World::new("goes-quiet");
+    world.kill_broker();
+    world.start_broker_with(Duration::from_millis(1500));
+    let client = world.client();
+    let mut running = client.send("codex", &ask("never finishes"));
+    wait_until("the provider to start", || world.fake.pids().len() == 1);
+
+    let stopping = world
+        .stop_command()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The turn never ends by itself and the grace period is longer than this wait: the broker is
+    // still there, and has not ended the turn.
+    let waiting = Instant::now() + Duration::from_millis(300);
+    while let Some(update) = running.next(waiting) {
+        assert!(!update.is_terminal(), "the turn ended early: {update:?}");
+    }
+    assert!(
+        !world.broker_has_exited(),
+        "the broker left with a turn running"
+    );
+    let output = stopping.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    // Past the grace period the turn is ended the way a closing broker ends it: the client is told the
+    // connection was lost (nothing is replayed), and the provider process does not outlive the broker.
+    let updates = drain(running.as_mut());
+    assert!(
+        matches!(updates.last(), Some(Update::Failed(failure))
+            if failure.reason == "COMPANION_DISCONNECTED" && failure.retryable),
+        "{updates:?}"
+    );
+    wait_until("the broker to exit", || world.broker_has_exited());
+    #[cfg(unix)]
+    wait_until("the provider to be reaped", || {
+        world.fake.still_running().is_empty()
+    });
+
+    // The next use finds a broker again, as it does after any exit.
+    world.start_broker();
+    let mut next = client.status("codex");
+    assert_eq!(drain(next.as_mut()).last(), Some(&Update::Completed));
+}
+
+#[test]
+fn a_stop_does_not_wait_for_an_app_that_is_connected_but_has_nothing_running() {
+    // The grace period is a minute, and the app keeps its connection: the broker still leaves as soon
+    // as the hub has nothing to do, which is what lets `install` finish promptly.
+    let mut world = World::new("answers");
+    let client = world.client();
+    let mut first = client.status("codex");
+    assert_eq!(drain(first.as_mut()).last(), Some(&Update::Completed));
+
+    let started = Instant::now();
+    let output = world.stop_command().output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    // Half the grace period is far more than an idle hub needs, and far less than waiting it out.
+    assert!(
+        started.elapsed() < world.grace / 2,
+        "stop waited for the grace period with nothing running"
+    );
+    wait_until("the broker to exit", || world.broker_has_exited());
+
+    world.start_broker();
+    let mut again = client.status("codex");
+    assert_eq!(drain(again.as_mut()).last(), Some(&Update::Completed));
 }
 
 #[test]
