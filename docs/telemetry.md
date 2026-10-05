@@ -80,7 +80,7 @@ The outcome is how the **scheduler** ended the turn, with one exception: when th
 
 | Phase or surface | Status |
 | --- | --- |
-| `sign_in_probe` on `send` | **Legacy sends: Codex and Claude only.** Explicit `send_ready` can run a readiness probe on every adapter and reports its span; cached/shared sends run no new probe. Gemini and Grok run no inline sign-in probe on the legacy send path (their turns fail with an authentication error instead), so the phase is absent for them, as it is for any send that does not ask for `check_sign_in`. |
+| `sign_in_probe` on `send` | **Legacy sends: Codex and Claude only.** Explicit `send_ready`/`send_ready_with_policy` can run a readiness probe on every adapter and reports its span; cached/shared sends run no new probe. Gemini and Grok run no inline sign-in probe on the legacy send path (their turns fail with an authentication error instead), so the phase is absent for them, as it is for any send that does not ask for `check_sign_in`. |
 | `sign_in_probe` on `status` | Every provider: a fresh status/readiness/preparation check is the probe; cached/shared readiness counts zero new probes. `probes` counts a status request as one check even when the provider was not found and nothing was spawned, so it counts readiness checks, not processes. |
 | `launched` and `provider_init` | Gemini and Grok start their process while the exchange is built, so `launched` is observed right after `built` and the whole synchronous start is inside `provider_init`. Codex and Claude launch after any probe. |
 | `first_text` granularity | Codex reports each agent message whole, so its first text is the first complete message. Claude reports text as it streams; Gemini and Grok report it as their adapters do. |

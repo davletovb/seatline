@@ -33,7 +33,7 @@ The exit/auth-mode contract is grounded in the [official Codex CLI reference](ht
 Preparation resolves the executable, validates/creates the private workspace, and checks readiness/catalog support. It runs **no synthetic model prompt**, starts no generation process, allocates no conversation/session handle, and keeps no provider process warm. All four shipped adapters support this level of preparation. Custom adapters default to `PREPARATION_UNSUPPORTED` unless they opt in. The underlying provider initialization for a model turn still occurs on send; reused initialization belongs to E.
 
 ```rust
-use seatline_core::readiness::Freshness;
+use seatline_core::readiness::{Freshness, SignInPolicy};
 use seatline_providers::{Provider, readiness::Ready};
 
 // Keep this wrapper for one app/account/workspace/environment configuration.
@@ -44,12 +44,17 @@ let preparation = provider.prepare(policy);
 
 // An explicit checked send emits Status before Launched on every adapter.
 // Set check_sign_in=false to permit verified reuse; true always requires Fresh.
-let exchange = provider.send_with_readiness(turn, policy);
+let accepted = SignInPolicy::try_from(vec![seatline_core::turn::SignInClassification::Subscription])?;
+let exchange = provider.send_with_readiness_policy(turn, policy, accepted);
 ```
 
 `send_with_readiness` performs readiness first, emits `Status`, and launches only when authentication and availability are verified. It suppresses the second inline Codex/Claude probe. The turn's `check_sign_in = true` overrides a cached policy with a new fresh check, preserving callers that require freshness. Ordinary `send` retains the legacy behavior in the table; a successful unchecked send does not manufacture cached readiness.
 
-An application that restricts billing modes should use `prepare`/`readiness`, inspect `sign_in`, and enforce its policy before submitting. Seatline does not add product-specific account restrictions. A fresh status check is evidence of credentials at that moment; neither fresh nor cached status guarantees that a remote model request will succeed or that credentials will never change afterward.
+An application that restricts account or billing modes must use `send_with_readiness_policy` (wire method `send_ready_with_policy`), supplying its accepted `SignInClassification` values as a `SignInPolicy`. After refreshing and validating readiness, the wrapper enforces that policy immediately before calling the provider's `send`. A missing classification or a mode outside the allowlist fails with non-retryable `SIGN_IN_POLICY_DENIED` and zero generation launches. This prevents a subscription-to-API-key change between an app's earlier check and send from launching under an account the app rejects, even when the scheduler buffers status before the app sees it. The app chooses its policy; Seatline enforces the supplied modes generically. Custom adapters without the policy gate return `READINESS_UNSUPPORTED` and never fall back to send.
+
+`send_with_readiness`/`send_ready` still check authentication and availability without restricting sign-in modes. Checking their status in the client and cancelling is insufficient to prevent launch, because status delivery can lag scheduling. The protected wire method is distinct so an older companion refuses it rather than silently ignoring an unknown policy field. Clients that require a sign-in policy must report an update requirement on `INVALID_REQUEST`/`READINESS_UNSUPPORTED`, and must not fall back to ordinary `send` or `send_ready`.
+
+Local fingerprints and the supplied policy validate the evidence at the launch boundary. They cannot guarantee remote success or observe a credential/keyring change with no local signal; the existing freshness ceiling and authentication-failure invalidation still apply.
 
 The readiness exchange has a 30-second overall check limit; shipped CLI probe limits remain 10 seconds by default. Gemini/Grok expose `with_probe_timeout`, and Codex/Claude use their existing probe limits. Normal filesystem operations still run synchronously, as on the existing adapter path. The companion's queue and scheduler bounds also apply. Cancellation detaches one subscriber; another subscriber may finish the shared check. Cancelling/dropping the last subscriber stops/releases the check. There is one cached result and one weak reference to the joinable check per wrapper, with at most one status and one terminal event retained per check. Evidence expires on access; preparation retains no idle child requiring shutdown.
 
@@ -83,8 +88,9 @@ Protocol version 1 gains additive methods. Update the companion to use them; an 
 | `readiness` | `{"mode":"fresh"}` or `{"mode":"cached","max_age_ms":5000}` |
 | `prepare` | Same freshness object. |
 | `send_ready` | `{"turn":<existing Turn object>,"freshness":<freshness object>}` |
+| `send_ready_with_policy` | `{"turn":<existing Turn object>,"freshness":<freshness object>,"allowed_sign_in":["subscription"]}` |
 
-All methods require the provider in the app's grant and use existing request IDs, limits, cancellation and terminal delivery. Malformed freshness is `INVALID_REQUEST`; unsupported preparation is `PREPARATION_UNSUPPORTED`. Configuration changes while checking or before launch are `READINESS_CHANGED`; expired evidence after Status is `READINESS_EXPIRED` for fresh, shared and cached checks; an unverified explicit send is `READINESS_UNVERIFIED`. None of those failures launches a model turn.
+`allowed_sign_in` is required and must contain one to four known modes (`subscription`, `api_key`, `cloud`, `unknown`). Empty/missing/malformed policies are `INVALID_REQUEST` before any launch. `unknown` is accepted only when explicitly listed; absent classification is always refused. All methods require the provider in the app's grant and use existing request IDs, limits, cancellation and terminal delivery. Malformed freshness is `INVALID_REQUEST`; unsupported preparation is `PREPARATION_UNSUPPORTED`. Configuration changes while checking or before launch are `READINESS_CHANGED`; expired evidence after Status is `READINESS_EXPIRED` for fresh, shared and cached checks; an unverified explicit send is `READINESS_UNVERIFIED`. None of those failures launches a model turn.
 
 Fresh checks count as readiness probes in telemetry. Cache hits and shared subscribers count zero new probes; their local readiness work/wait belongs to `provider_init`, with the remaining completion/cleanup phases unchanged. The initiating explicit send reports the readiness span for all four adapters.
 

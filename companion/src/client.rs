@@ -146,6 +146,17 @@ impl Provider for RemoteProvider {
     fn send(&self, turn: Turn) -> Box<dyn Exchange> {
         self.request("send", json!(turn))
     }
+    fn send_with_readiness_policy(
+        &self,
+        turn: Turn,
+        freshness: seatline_core::readiness::Freshness,
+        policy: seatline_core::readiness::SignInPolicy,
+    ) -> Box<dyn Exchange> {
+        self.request(
+            "send_ready_with_policy",
+            json!({"turn":turn,"freshness":freshness,"allowed_sign_in":policy}),
+        )
+    }
     fn cleanup_sessions(&self, sessions: &[String]) -> Cleanup {
         let (requester, sessions) = (self.requester(), sessions.to_vec());
         Cleanup::new(

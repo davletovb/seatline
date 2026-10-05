@@ -100,7 +100,10 @@ struct Request {
 }
 impl Request {
     fn continuation(&self) -> &Value {
-        if self.method == "send_ready" {
+        if matches!(
+            self.method.as_str(),
+            "send_ready" | "send_ready_with_policy"
+        ) {
             &self.params["turn"]["continuation"]
         } else {
             &self.params["continuation"]
@@ -897,9 +900,8 @@ impl Hub {
             }))
     }
 
-    fn eligible(&self, request: &Request) -> bool {
+    fn has_capacity(&self, request: &Request, running: &[&Request]) -> bool {
         let class = Class::of(&request.method);
-        let running: Vec<_> = self.running_requests().collect();
         let class_count = running
             .iter()
             .filter(|r| Class::of(&r.method) == class)
@@ -927,6 +929,30 @@ impl Hub {
         {
             return false;
         }
+        true
+    }
+
+    fn eligible(&self, index: usize, request: &Request) -> bool {
+        let class = Class::of(&request.method);
+        let running: Vec<_> = self.running_requests().collect();
+        if !self.has_capacity(request, &running) {
+            return false;
+        }
+        // Drain this pair once cleanup has an admission slot. A cleanup
+        // waiting for another app to release the cleanup lane must not
+        // unnecessarily hold back this app's generations. Keep the barrier
+        // through the last generation's completion so interactive work
+        // cannot overtake cleanup. Cancellation/expiry removes the barrier.
+        if class == Class::Generation
+            && self.queue.iter().take(index).any(|earlier| {
+                Class::of(&earlier.method) == Class::Cleanup
+                    && earlier.app == request.app
+                    && earlier.provider == request.provider
+                    && self.has_capacity(earlier, &running)
+            })
+        {
+            return false;
+        }
         let cleanup_conflict = running.iter().any(|r| {
             r.app == request.app
                 && r.provider == request.provider
@@ -951,7 +977,7 @@ impl Hub {
             .queue
             .iter()
             .enumerate()
-            .filter(|(_, r)| self.eligible(r))
+            .filter(|(index, r)| self.eligible(*index, r))
             .collect();
         let preferred = if self.interactive_streak >= self.policy.interactive_burst
             && eligible.iter().any(|(_, r)| !Self::interactive(r))
@@ -1149,8 +1175,18 @@ impl Hub {
                 },
                 false,
             )),
-            "send" | "send_ready" => {
-                let freshness = if request.method == "send_ready" {
+            "send" | "send_ready" | "send_ready_with_policy" => {
+                let policy = if request.method == "send_ready_with_policy" {
+                    Some(
+                        serde_json::from_value::<seatline_core::readiness::SignInPolicy>(
+                            request.params["allowed_sign_in"].clone(),
+                        )
+                        .map_err(|_| invalid())?,
+                    )
+                } else {
+                    None
+                };
+                let freshness = if request.method != "send" {
                     Some(
                         serde_json::from_value::<seatline_core::readiness::Freshness>(
                             request.params["freshness"].clone(),
@@ -1209,9 +1245,12 @@ impl Hub {
                 }
                 let persistent = turn.session == SessionPolicy::Persistent;
                 Ok(Built::Exchange(
-                    match freshness {
-                        Some(freshness) => provider.send_with_readiness(turn, freshness),
-                        None => provider.send(turn),
+                    match (freshness, policy) {
+                        (Some(freshness), Some(policy)) => {
+                            provider.send_with_readiness_policy(turn, freshness, policy)
+                        }
+                        (Some(freshness), None) => provider.send_with_readiness(turn, freshness),
+                        (None, _) => provider.send(turn),
                     },
                     limits,
                     persistent,
@@ -1257,6 +1296,8 @@ mod tests {
     use super::*;
     use seatline_core::exchange::{Exchange, Scripted};
     use seatline_core::protocol::Capabilities;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
 
     struct Fixture;
     impl Provider for Fixture {
@@ -1398,6 +1439,120 @@ mod tests {
         let events = drain(&mut output[0]);
         assert_eq!(events[0]["event"]["status"]["readiness"]["source"], "fresh");
         assert_eq!(counts[0].get(), 2);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn changed_billing_mode_never_launches_even_when_client_events_are_not_consumed() {
+        use seatline_core::protocol::{Authentication, Availability, ProviderState};
+        use seatline_core::turn::SignInClassification;
+        struct Account {
+            file: PathBuf,
+            mode: Rc<Cell<SignInClassification>>,
+            launches: Rc<Cell<usize>>,
+        }
+        impl Provider for Account {
+            fn id(&self) -> &str {
+                "codex"
+            }
+            fn capabilities(&self) -> Capabilities {
+                codex::CAPABILITIES
+            }
+            fn timeouts(&self) -> Timeouts {
+                Fixture.timeouts()
+            }
+            fn readiness_key(&self) -> Option<seatline_providers::readiness::Key> {
+                seatline_providers::readiness::Key::watch(
+                    &std::env::current_exe().unwrap(),
+                    [self.file.clone()],
+                    self.capabilities(),
+                )
+            }
+            fn status(&self) -> Box<dyn Exchange> {
+                Box::new(Scripted::new([
+                    Update::Status {
+                        provider_id: "codex".into(),
+                        status: ProviderState {
+                            availability: Availability::Available,
+                            authentication: Authentication::Authenticated,
+                            capabilities: self.capabilities(),
+                            models: std::borrow::Cow::Borrowed(&[]),
+                            sign_in: Some(self.mode.get()),
+                            readiness: None,
+                        },
+                    },
+                    Update::Completed,
+                ]))
+            }
+            fn send(&self, turn: Turn) -> Box<dyn Exchange> {
+                self.launches.set(self.launches.get() + 1);
+                Fixture.send(turn)
+            }
+        }
+        let (mut hub, mut output) = setup();
+        let file = hub.root.join("account.json");
+        std::fs::write(&file, "subscription").unwrap();
+        let mode = Rc::new(Cell::new(SignInClassification::Subscription));
+        let launches = Rc::new(Cell::new(0));
+        install_provider(
+            &mut hub,
+            "first",
+            Box::new(seatline_providers::readiness::Ready::new(Account {
+                file: file.clone(),
+                mode: mode.clone(),
+                launches: launches.clone(),
+            })),
+        );
+        let cached = json!({"mode":"cached","max_age_ms":30000});
+        request(&mut hub, 1, "approved", "readiness", cached.clone());
+        settle(&mut hub);
+        let approved = drain(&mut output[0]);
+        assert_eq!(approved[0]["event"]["status"]["sign_in"], "subscription");
+        mode.set(SignInClassification::ApiKey);
+        std::fs::write(file, "api_key").unwrap();
+        let mut turn = turn_with_tools("none");
+        turn["session"] = json!("ephemeral");
+        request(
+            &mut hub,
+            1,
+            "protected",
+            "send_ready_with_policy",
+            json!({
+                "turn":turn,"freshness":cached,"allowed_sign_in":["subscription"]
+            }),
+        );
+        // The supervisor consumes events before delivery. Do not read or
+        // react to Status until it has completed the whole request.
+        settle(&mut hub);
+        assert_eq!(launches.get(), 0);
+        let events = drain(&mut output[0]);
+        assert_eq!(events[0]["event"]["status"]["sign_in"], "api_key");
+        assert_eq!(events[0]["event"]["status"]["readiness"]["source"], "fresh");
+        assert_eq!(
+            failure_reason(&events).as_deref(),
+            Some("SIGN_IN_POLICY_DENIED")
+        );
+        assert!(!events.iter().any(|e| e["event"]["type"] == "launched"));
+        for policy in [
+            json!(null),
+            json!([]),
+            json!(["bad"]),
+            json!(vec!["subscription"; 5]),
+        ] {
+            request(
+                &mut hub,
+                1,
+                "invalid-policy",
+                "send_ready_with_policy",
+                json!({"turn":turn,"freshness":cached,"allowed_sign_in":policy}),
+            );
+            settle(&mut hub);
+            assert_eq!(
+                failure_reason(&drain(&mut output[0])).as_deref(),
+                Some("INVALID_REQUEST")
+            );
+            assert_eq!(launches.get(), 0);
+        }
         std::fs::remove_dir_all(&hub.root).unwrap();
     }
 
@@ -2557,6 +2712,280 @@ mod tests {
         assert_eq!(&chosen[..4], ["0", "2", "3", "4"]);
         assert_eq!(chosen.len(), 7);
         std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn waiting_cleanup_drains_staggered_generations_before_new_work_without_blocking_other_apps() {
+        for method in ["cleanup", "forget"] {
+            let (mut hub, mut output) = setup();
+            let gates: Rc<RefCell<HashMap<String, Rc<Cell<bool>>>>> =
+                Rc::new(RefCell::new(HashMap::new()));
+            let started = Rc::new(RefCell::new(Vec::<String>::new()));
+            let cleaned = Rc::new(Cell::new(0));
+            struct Pending {
+                release: Rc<Cell<bool>>,
+                cursor: u8,
+            }
+            impl Exchange for Pending {
+                fn next(&mut self, _: Instant) -> Option<Update> {
+                    match self.cursor {
+                        0 => {
+                            self.cursor = 1;
+                            Some(Update::Launched)
+                        }
+                        1 => {
+                            self.cursor = 2;
+                            Some(Update::Started)
+                        }
+                        2 if self.release.get() => {
+                            self.cursor = 3;
+                            Some(Update::Completed)
+                        }
+                        _ => None,
+                    }
+                }
+                fn cancel(&mut self, _: Duration) {
+                    self.release.set(true);
+                }
+            }
+            struct Draining {
+                gates: Rc<RefCell<HashMap<String, Rc<Cell<bool>>>>>,
+                started: Rc<RefCell<Vec<String>>>,
+                cleaned: Rc<Cell<usize>>,
+            }
+            impl Provider for Draining {
+                fn id(&self) -> &str {
+                    "codex"
+                }
+                fn capabilities(&self) -> Capabilities {
+                    Fixture.capabilities()
+                }
+                fn timeouts(&self) -> Timeouts {
+                    Fixture.timeouts()
+                }
+                fn status(&self) -> Box<dyn Exchange> {
+                    Fixture.status()
+                }
+                fn send(&self, turn: Turn) -> Box<dyn Exchange> {
+                    let id = turn.messages[0].text.clone();
+                    if id == "newer" {
+                        assert_eq!(self.cleaned.get(), 1, "newer generation overtook cleanup");
+                    }
+                    self.started.borrow_mut().push(id.clone());
+                    let release = Rc::new(Cell::new(false));
+                    self.gates.borrow_mut().insert(id, release.clone());
+                    Box::new(Pending { release, cursor: 0 })
+                }
+                fn cleanup_sessions(&self, _: &[String]) -> Cleanup {
+                    let cleaned = self.cleaned.clone();
+                    Cleanup::new(|| Ok(()), move || cleaned.set(cleaned.get() + 1))
+                }
+                fn cleanup_group(&self, _: &str) -> Cleanup {
+                    self.cleanup_sessions(&[])
+                }
+            }
+            install_provider(
+                &mut hub,
+                "first",
+                Box::new(Draining {
+                    gates: gates.clone(),
+                    started: started.clone(),
+                    cleaned: cleaned.clone(),
+                }),
+            );
+            let ask = |name: &str| {
+                let mut turn = turn_with_tools("none");
+                turn["session"] = json!("ephemeral");
+                turn["messages"][0]["text"] = json!(name);
+                turn
+            };
+            request(&mut hub, 1, "first", "send", ask("first"));
+            request(&mut hub, 1, "second", "send", ask("second"));
+            wait_until(&mut hub, |_| started.borrow().len() == 2);
+            request(
+                &mut hub,
+                1,
+                "cleanup",
+                method,
+                if method == "cleanup" {
+                    json!({"group":"run"})
+                } else {
+                    json!({"sessions":[]})
+                },
+            );
+            request(&mut hub, 1, "newer", "send", ask("newer"));
+            hub.queue.back_mut().unwrap().hints.interactive = true;
+            gates.borrow()["first"].set(true);
+            wait_until(&mut hub, |hub| hub.active.len() == 1);
+            assert_eq!(&*started.borrow(), &["first", "second"]);
+            assert_eq!(cleaned.get(), 0);
+            assert_eq!(hub.queue.len(), 2);
+            request(&mut hub, 2, "other", "send", ask("other"));
+            request(&mut hub, 1, "readiness", "status", json!({}));
+            wait_until(&mut hub, |hub| {
+                !hub.active
+                    .values()
+                    .any(|a| a.request.id == "other" || a.request.id == "readiness")
+                    && hub.queue.len() == 2
+            });
+            assert!(
+                drain(&mut output[1])
+                    .iter()
+                    .any(|e| e["id"] == "other" && e["event"]["type"] == "completed")
+            );
+            assert!(
+                drain(&mut output[0])
+                    .iter()
+                    .any(|e| e["id"] == "readiness" && e["event"]["type"] == "completed")
+            );
+            gates.borrow()["second"].set(true);
+            wait_until(&mut hub, |_| started.borrow().len() == 3);
+            assert_eq!(cleaned.get(), 1);
+            let events = drain(&mut output[0]);
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e["id"] == "cleanup" && e["event"]["type"] == "completed"),
+                "{events:?}"
+            );
+            gates.borrow()["newer"].set(true);
+            settle(&mut hub);
+            assert_eq!(hub.queue.len(), 0);
+            std::fs::remove_dir_all(&hub.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn another_apps_full_cleanup_lane_does_not_hold_back_generations() {
+        for method in ["cleanup", "forget"] {
+            let (mut hub, mut output) = setup();
+            hub.policy.max_cleanup_running = 1;
+            struct Held(Rc<Cell<bool>>);
+            impl Exchange for Held {
+                fn next(&mut self, _: Instant) -> Option<Update> {
+                    self.0.replace(false).then_some(Update::Completed)
+                }
+                fn cancel(&mut self, _: Duration) {
+                    self.0.set(true);
+                }
+            }
+            let released = Rc::new(Cell::new(false));
+            let id = hub
+                .supervisor
+                .start(Box::new(Held(released.clone())), None, Duration::ZERO);
+            hub.active.insert(
+                id,
+                Active {
+                    request: Request {
+                        connection: 2,
+                        id: "other-cleanup".into(),
+                        app: "second".into(),
+                        provider: "codex".into(),
+                        method: "cleanup".into(),
+                        params: json!({"group":"other"}),
+                        hints: Hints::default(),
+                        expires: Instant::now() + Duration::from_secs(30),
+                    },
+                    persistent: false,
+                    terminal_sent: false,
+                    gate: Rc::new(Cell::new(true)),
+                },
+            );
+            request(
+                &mut hub,
+                1,
+                "waiting-cleanup",
+                method,
+                if method == "cleanup" {
+                    json!({"group":"run"})
+                } else {
+                    json!({"sessions":[]})
+                },
+            );
+            let mut ask = turn_with_tools("none");
+            ask["session"] = json!("ephemeral");
+            request(&mut hub, 1, "generation", "send", ask);
+            wait_until(&mut hub, |hub| {
+                hub.queue.len() == 1 && hub.active.len() == 1
+            });
+            assert_eq!(hub.queue[0].id, "waiting-cleanup");
+            let events = drain(&mut output[0]);
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e["id"] == "generation" && e["event"]["type"] == "completed"),
+                "{events:?}"
+            );
+            released.set(true);
+            settle(&mut hub);
+            std::fs::remove_dir_all(&hub.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn cancelling_or_expiring_a_cleanup_releases_its_generation_barrier() {
+        for cancel in [true, false] {
+            let (mut hub, mut output) = setup();
+            struct Pending;
+            impl Exchange for Pending {
+                fn next(&mut self, _: Instant) -> Option<Update> {
+                    None
+                }
+                fn cancel(&mut self, _: Duration) {}
+            }
+            let active = hub
+                .supervisor
+                .start(Box::new(Pending), None, Duration::ZERO);
+            hub.active.insert(
+                active,
+                Active {
+                    request: Request {
+                        connection: 1,
+                        id: "existing".into(),
+                        app: "first".into(),
+                        provider: "codex".into(),
+                        method: "send".into(),
+                        params: turn_with_tools("none"),
+                        hints: Hints::default(),
+                        expires: Instant::now() + Duration::from_secs(30),
+                    },
+                    persistent: false,
+                    terminal_sent: false,
+                    gate: Rc::new(Cell::new(true)),
+                },
+            );
+            request(&mut hub, 1, "cleanup", "cleanup", json!({"group":"run"}));
+            let mut later = turn_with_tools("none");
+            later["session"] = json!("ephemeral");
+            request(&mut hub, 1, "later", "send", later);
+            hub.tick();
+            assert_eq!(hub.queue.len(), 2);
+            assert_eq!(hub.active.len(), 1);
+            if cancel {
+                hub.command(Command::Request {
+                    connection: 1,
+                    value: json!({"id":"cancel","method":"cancel","target":"cleanup"}),
+                });
+            } else {
+                hub.queue[0].expires = Instant::now();
+            }
+            wait_until(&mut hub, |hub| {
+                hub.queue.is_empty() && hub.active.len() == 1
+            });
+            let events = drain(&mut output[0]);
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e["id"] == "later" && e["event"]["type"] == "completed"),
+                "{events:?}"
+            );
+            assert!(events.iter().any(|e| e["id"] == "cleanup"
+                && e["event"]["type"] == if cancel { "stopped" } else { "failed" }));
+            if !cancel {
+                assert_eq!(failure_reason(&events).as_deref(), Some("QUEUE_TIMEOUT"));
+            }
+            std::fs::remove_dir_all(&hub.root).unwrap();
+        }
     }
 
     #[test]

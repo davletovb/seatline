@@ -2,7 +2,31 @@
 
 How Tabbeam, Lineleaf and Conclave use the performance changes, what was checked before each moved to the new Seatline revision, how to migrate, and how to fall back. The applications own their changes; nothing here is Seatline library behavior. The record of what is open is the [performance tracker](performance-implementation-tracker.md).
 
-**Read this first.** Everything below was verified with fake or stand-in providers, on one Linux container, and by the applications' own tests. No live provider (Codex, Claude, Gemini or Grok) was available or run: **there is no live latency, quota, sign-in or cold-start result for any of the three applications, and none is claimed.** The counts of provider processes are real process launches of a stand-in; the milliseconds measure the application, its bridge, the broker and process starts, not a provider's own latency. The applications' changes are open as pull requests, not merged; their own CI has run, with one failure still open on Lineleaf (see [the applications' own CI](#the-applications-own-ci) and the [open items](#open-before-a-broad-rollout)).
+**Read this first.** Everything below was verified with fake or stand-in providers, on one Linux container, and by the applications' own tests. No live provider (Codex, Claude, Gemini or Grok) was available or run: **there is no live latency, quota, sign-in or cold-start result for any of the three applications, and none is claimed.** The counts of provider processes are real process launches of a stand-in; the milliseconds measure the application, its bridge, the broker and process starts, not a provider's own latency. The applications' changes are open as pull requests, not merged; their correction CI passed, including Lineleaf macOS (see [the applications' own CI](#the-applications-own-ci) and the [open items](#open-before-a-broad-rollout)).
+
+## Review corrections and current rollout gate (2026-10-04)
+
+The original evidence below was collected against `0cb105e` before slice F and these corrections. It does not verify the final rollout revision. All three adoption PRs remain open. Their first correction pins and platform/real-companion CI passed at `a33a0c9`; the follow-up below requires refreshed pins and checks before merging.
+
+- **Seatline launch policy:** strict clients use `send_ready_with_policy` with `allowed_sign_in`. The companion refreshes and validates readiness, then rejects a disallowed classification before provider send, even if the app has not received status. `send_ready` alone has no account-policy guarantee. Lineleaf supplies subscription; Conclave supplies subscription, plus cloud for Google. Missing/invalid policies and older companions fail before generation.
+- **Conclave handshake:** readiness/prepare capability detection belongs to the generation that delivered status, including the first handshake from 0 to 1. A reconnect requires new detection. Initial readiness and initial preparation regressions both assert a protected cached send with no inline authentication probe.
+- **Cleanup starvation:** queued cleanup/forget prevents newer generations for that app/provider from filling freed slots until existing work drains. Other apps and readiness continue. Cancellation/expiry releases the barrier.
+- **Lineleaf cancellation:** cancellation IDs are retained only until the target terminates; the real companion sends no separate cancel acknowledgement. The fixture now follows that protocol and five repeated cancellations leave zero retained IDs. The benchmark fixture holds the designated cancelled turn until stopped; a cancellation after the old 180 ms completion deadline still succeeds. This removes the demonstrated fixture race; [macOS CI run 37217540722](https://github.com/davletovb/Lineleaf/actions/runs/37217540722) passed the corrected fixture.
+- **F migration:** Tabbeam ignores `Update::Queued` and `Update::Admitted` explicitly when moving its Rust dependencies past F. Scheduling events remain opt-in on the wire.
+
+Older companions may still supply status, but strict Lineleaf/Conclave builds refuse generation with a companion-update message. Reverting to an unsafe ordinary send is not a supported fallback. Install the corrected companion before these app builds.
+
+No live-provider measurements have been made. Next performance work must profile synchronous readiness fingerprinting on the shared hub and measure real cold, prepared and warm first-text latency, including IPC. Slice E stays deferred pending the Codex app-server decision.
+
+## Follow-up review corrections
+
+A per-app `SIGN_IN_POLICY_DENIED` leaves shared/cached account evidence valid for callers whose policy permits it. Real authentication failures still invalidate that evidence. Cleanup drains only once its admission capacity is available; another app's full cleanup lane does not hold unrelated generations back. A single-conversation `forget` still drains all generation for its app/provider and remains subject to the queue deadline.
+
+Conclave reserves optional preparation synchronously before handshake work, never queues it, and leaves one foreground slot free. Lineleaf aborts and detaches unfinished preparation before writing or an explicit diagnostic; abandoned timeout/drain callbacks cannot close the replacement foreground port.
+
+**Merge strategy:** merge Seatline [#11](https://github.com/davletovb/seatline/pull/11) with a merge commit. Squash/rebase would remove the app-pinned commits from main's ancestry. Install that companion before merging the adoption PRs; their pins must name the final review revision.
+
+The first correction's completed CI is historical evidence: Seatline [37217168964](https://github.com/davletovb/seatline/actions/runs/37217168964) passed all six jobs; Conclave [37217535600](https://github.com/davletovb/conclave/actions/runs/37217535600) and [37217535531](https://github.com/davletovb/conclave/actions/runs/37217535531) passed all three; Lineleaf [37217540722](https://github.com/davletovb/Lineleaf/actions/runs/37217540722) passed all four, including macOS; TabBeam [37217546471](https://github.com/davletovb/TabBeam/actions/runs/37217546471) passed all twelve. Follow-up checks are recorded on the same PRs. The original evidence below remains historical, including its original fallback behavior; current strict clients require the protected send.
 
 ## What each application does now
 
@@ -32,7 +56,7 @@ Details and reproduction commands: Tabbeam `docs/architecture/shared-companion.m
 
 [CI run 37169150758](https://github.com/davletovb/seatline/actions/runs/37169150758) on `0cb105e` passed all six jobs: Rust on Linux, macOS and Windows (Clippy, tests, the client-only companion build and the companion build on each), the Linux release tests and the check that the client-only build links no network or crypto stack, the minimum-Rust job (`cargo +1.85 test --workspace --locked`), runtime independence, and the fuzz smoke. That is the validation of Linux, macOS, Windows, Rust 1.85 and the client-only companion build for the revision the applications pinned. It says nothing about the applications' own platform matrices, which are recorded next.
 
-### The applications' own CI
+### The applications' initial CI (before review corrections)
 
 Observed on 2026-10-04 on each pull request's head, which is the commit recorded above:
 
@@ -42,12 +66,7 @@ Observed on 2026-10-04 on each pull request's head, which is the commit recorded
 | Conclave | [#31](https://github.com/davletovb/conclave/pull/31), `f0a5853` | [37175331059](https://github.com/davletovb/conclave/actions/runs/37175331059), [37175331060](https://github.com/davletovb/conclave/actions/runs/37175331060) | All 3 jobs passed: verify, and the real-companion round trip against the current and the minimum Seatline revision. |
 | Lineleaf | [#14](https://github.com/davletovb/Lineleaf/pull/14), `eac2dec` | [37175324496](https://github.com/davletovb/Lineleaf/actions/runs/37175324496) | **3 of 4 jobs passed; `editor-and-harness (macos-latest)` failed.** Passed: `editor-and-harness (ubuntu-latest)` and `shared-companion` against the current and the minimum revision. |
 
-**The Lineleaf macOS failure is an open blocker for that pull request.** The failing test is `test_fixture_benchmark_labels_and_no_draft_content_in_report` (`tests/test_investigations.py:171`): `report["cancellation"]["stopped"]` was false. What is known:
-
-- The test runs the benchmark against Lineleaf's synthetic fixture in its default, unchanged `legacy` mode, and cancels a turn 0.1 s after starting it. The fixture's turn takes 0.18 s unless it is stopped first (`tests/fixtures/companion.py`), so the cancel has an 80 ms margin to arrive before the turn completes. Both numbers are the same on Lineleaf's `main`, whose last macOS run passed.
-- On Linux the test passed in this branch's CI run and in 15 runs here with the machine idle and 15 more with six busy loops running.
-- So a timing race on a slow runner is the likely cause, but it is **not confirmed**: the macOS job has not been re-run, and the benchmark changes in this branch (`--readiness`, `--launch-log`) were not isolated from it.
-- Until the job passes on a re-run or the margin is widened, Lineleaf's macOS result is red and the pull request should not be treated as verified.
+The original Lineleaf macOS failure asserted `report["cancellation"]["stopped"]` after cancelling at 100 ms while the fixture could complete at 180 ms. A runner delayed beyond that 80 ms margin could legitimately finish first. The correction explicitly holds the designated cancellation turn and tests cancellation at 300 ms, after the previous completion deadline. The original macOS run remains historical; [correction run 37217540722](https://github.com/davletovb/Lineleaf/actions/runs/37217540722) passed all four jobs, including macOS.
 
 ### CI and stand-in success is not live validation
 
@@ -68,23 +87,22 @@ Persistent provider processes (slice E) were not touched: the decision about Cod
 
 ## Migration notes
 
-**Order.** Update the companion first, then the applications. A new application works against an old companion through its fallback; an old application works against a new companion unchanged (Lineleaf's earlier controller and Tabbeam's per-exchange host were both run against the new companion in the measurements above). Users keep their grants: the authorization command is unchanged, and authorizing again is only needed if an application reports that Seatline is unavailable after an update.
+**Order.** Install the corrected companion before strict Lineleaf/Conclave builds. Legacy `status` remains readable, but generation requires `send_ready_with_policy`; an unknown protected method shows an update requirement without an ordinary-send fallback. Older generic clients still work against the new companion.
 
 **Pins.** Update an application's Seatline pin deliberately, in the same change as the code the new revision requires, with the application's suites and its real-broker checks passing at the new revision. The one source change slice C forced on Tabbeam is `ProviderState.readiness` (an `Option`, absent on legacy status). Keep every Seatline crate and the companion a CI installs on the same exact revision (Tabbeam's pin check does this); record the oldest companion an application still supports (Lineleaf's `config/seatline-contract.json` has `minimum_revision`; Conclave's CI runs the older revision in `--legacy` mode).
 
 **Moving a pin past slice F.** The applications pin `0cb105e`, which does not include slice F (merged in [PR #9](https://github.com/davletovb/seatline/pull/9) as `315568e`); none of the evidence above was gathered on it. A pin at or after the merge needs its own change and checks: `Update` gained the `Queued` and `Admitted` variants and is not `#[non_exhaustive]`, so a Rust `match` on it must add arms (Tabbeam's `native/host/src/host.rs` lists every variant and will not compile until it does; the new events stay opt-in on the wire, so they may simply be ignored); a request that waits in the broker's queue longer than the owner's 30-second default now fails with a retryable `QUEUE_TIMEOUT` where it used to wait; and one provider may run up to two generations plus two readiness checks at once.
 
-**Adopting the readiness contract in another client.** Use `readiness` (or `prepare`) with a freshness of `{"mode":"fresh"}` or `{"mode":"cached","max_age_ms":N}` (30 000 at most), apply your own account policy to `sign_in`, and send with `send_ready` and `check_sign_in: false`; treat an unknown method (`INVALID_REQUEST`) as an older companion only until the API has answered once on that connection; forget that when the connection is re-established. Do not let a cache of your own add to Seatline's: bound it by the age Seatline reports for its evidence.
+**Adopting the readiness contract in another client.** Use `readiness`/`prepare` with fresh or cached evidence (at most 30 seconds). For account restrictions, send with `send_ready_with_policy`, `allowed_sign_in` and `check_sign_in: false`; retain client policy checks for presentation. Treat `SIGN_IN_POLICY_DENIED` as final, and refuse generation when the protected method is unsupported. An evidence-change/expiry refusal may be retried once with a fresh check, since nothing launched. Rust callers use `Provider::send_with_readiness_policy` and `SignInPolicy`.
 
 **Adopting the shared Rust client.** One `RemoteClient` per application, `RemoteProvider::with_client` for each provider. An application whose tests close a host's input right after a request must hold the input open until the answer arrives: the shared connection answers a moment later (Tabbeam's `cli.rs` needed this).
 
-## Fallback instructions
+## Recovery instructions
 
-- **Tabbeam:** in `native/host/src/providers/mod.rs`, make `installed_provider` build `RemoteProvider::new(APP, &metadata)` and drop `Link`. Nothing else depends on the shared connection, and the new pin works with either.
-- **Lineleaf:** there is no setting. A companion without the readiness API is handled automatically; the retained connection closes after a minute idle, on pause and on reset; and the previous extension build is the way back to a connection per check.
-- **Conclave:** the same automatic fallback for an older companion; reverting the application commit restores the per-step `status` and `send`.
-- **A companion update that misbehaves:** every application still works with `dc1086582c8b98498aa48dae91c8d174bc3cfc3c`, so reinstalling it through the companion's normal procedure is a way back; the grants are unaffected.
-- **Seatline:** nothing in this adoption changes the library; there is no persistent-provider mode to turn off.
+- Update the companion before retrying an unsupported protected send; do not downgrade strict clients to ordinary send. Status remains available for setup on older companions.
+- Tabbeam can retain `RemoteProvider::new` instead of its shared client if transport reuse must be reverted; account-policy enforcement is independently available through the new provider method.
+- Lineleaf closes its retained connection on pause/reset or after a minute idle. Conclave redetects capabilities on a new handshake.
+- Grant rotation/revocation can end every in-flight request on the app connection; do not replay a request whose launch status is unknown.
 
 ## What was found along the way
 
@@ -95,7 +113,8 @@ Persistent provider processes (slice E) were not touched: the decision about Cod
 
 ## Open before a broad rollout
 
-- Lineleaf's macOS job: get [#14](https://github.com/davletovb/Lineleaf/pull/14) green. The failing test is described [above](#the-applications-own-ci); re-run the job to see whether it repeats, and if it does, widen the fixture's cancel margin. Tabbeam's [#49](https://github.com/davletovb/TabBeam/pull/49) and Conclave's [#31](https://github.com/davletovb/conclave/pull/31) have passed every job.
-- The live runs above, by someone with provider accounts. Tabbeam's live workflow also needs the companion install and grant step before it can run (see above).
-- Review of the three branches by their owners; they were written and verified by one author in one session.
-- Slice E is untouched and decides whether a persistent mode ever becomes the default. Slice F (the shared hub changes) merged after the applications chose their pins; see [moving a pin past slice F](#migration-notes).
+- Core platform/MSRV/IPC/release/fuzz validation on the correction revision, and fresh app CI and real-companion checks at the final pins, including Lineleaf macOS.
+- Review and merge the three adoption PRs; open PRs are not released adoption.
+- Profile synchronous readiness fingerprinting on the shared hub; measure real cold/prepared/warm first-text latency and original IPC scenarios. Existing fake-provider measurements do not establish real cold/warm equivalence.
+- Live sign-in, keyring, quota and provider-version validation by someone with provider accounts.
+- Keep slice E deferred until the Codex app-server decision.

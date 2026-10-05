@@ -153,6 +153,22 @@ pub trait Provider {
         }))
     }
 
+    /// Enforce the application's accepted sign-in modes before launch.
+    /// Adapters without this gate refuse; they must never fall back to send.
+    fn send_with_readiness_policy(
+        &self,
+        turn: Turn,
+        freshness: seatline_core::readiness::Freshness,
+        policy: seatline_core::readiness::SignInPolicy,
+    ) -> Box<dyn Exchange> {
+        let _ = (turn, freshness, policy);
+        Box::new(Scripted::failed(Failure {
+            code: ErrorCode::InvalidRequest,
+            reason: "READINESS_UNSUPPORTED",
+            retryable: false,
+        }))
+    }
+
     /// Opaque configuration/file fingerprint. None disables caching. The
     /// wrapper itself scopes immutable environment and workspace settings.
     fn readiness_key(&self) -> Option<readiness::Key> {

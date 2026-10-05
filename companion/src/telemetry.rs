@@ -229,9 +229,14 @@ impl Telemetry {
             return;
         }
         let method = match method {
-            "send" | "send_ready" | "status" | "readiness" | "prepare" | "forget" | "cleanup" => {
-                method
-            }
+            "send"
+            | "send_ready"
+            | "send_ready_with_policy"
+            | "status"
+            | "readiness"
+            | "prepare"
+            | "forget"
+            | "cleanup" => method,
             _ => "unknown",
         };
         self.waiting.insert(
