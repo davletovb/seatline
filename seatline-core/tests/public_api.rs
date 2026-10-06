@@ -92,6 +92,7 @@ fn exchange_and_platform_types_do_not_depend_on_host() {
             web_search: Capability::Unsupported,
             model_selection: Capability::Unknown,
             reasoning_effort: seatline_core::protocol::Capability::Unknown,
+            service_tier: seatline_core::protocol::Capability::Unknown,
             cancellation: Capability::Supported,
             tool_isolation: Capability::Supported,
         },

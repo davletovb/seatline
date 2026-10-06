@@ -133,6 +133,26 @@ capability and send an explicit budget only when it is `Supported` (`true` on
 the wire); omit it for `Unknown` or `Unsupported`. See the official [Codex config
 reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
+The optional generic `turn.service_tier` accepts `standard` or `fast`.
+Omission/null retains the provider's configured tier. An explicit Standard
+request overrides a globally configured Fast preference. Codex receives
+`-c 'service_tier="default"' -c 'features.fast_mode=false'` for Standard, or
+`-c 'service_tier="fast"' -c 'features.fast_mode=true'` for Fast. These
+invocation-only overrides leave model, reasoning effort and user config
+unchanged; Codex maps Fast to its priority request tier.
+
+`status.capabilities.service_tier` describes adapter forwarding support, not
+availability for every installed CLI, model, plan or workspace. Applications
+must require Supported (`true`) before sending either explicit tier; older
+status records deserialize as Unknown and older companions reject the new
+turn field. Claude/Gemini/Grok refuse either explicit tier with
+`SERVICE_TIER_UNSUPPORTED` before executable discovery or readiness probes.
+Rust callers updating their pin add `service_tier: None` to full `Turn`
+literals and the field to full `Capabilities` literals. There is no automatic
+retry using another tier. See the official [Codex speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed)
+for availability and usage multipliers; a requested tier is not confirmation
+of the tier served or a measured speedup.
+
 After Codex reports successful completion, ephemeral turns stop and reap the
 CLI promptly instead of granting its session-save exit grace. The answer and
 usage updates are preserved. Terminal delivery still follows process reaping,

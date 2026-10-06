@@ -73,6 +73,7 @@ fn turn(req: &Req, handle: &Option<String>) -> Turn {
         }],
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         tools: ToolPolicy::None,
         session: if req.persistent {
             SessionPolicy::Persistent
@@ -131,6 +132,7 @@ impl Provider for Metadata {
             web_search: supported,
             model_selection: supported,
             reasoning_effort: seatline_core::protocol::Capability::Unknown,
+            service_tier: seatline_core::protocol::Capability::Unknown,
             cancellation: supported,
             tool_isolation: supported,
         }

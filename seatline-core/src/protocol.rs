@@ -110,6 +110,10 @@ pub struct Capabilities {
     /// may still reject a budget it does not support.
     #[serde(default = "unknown_capability")]
     pub reasoning_effort: Capability,
+    /// The adapter can forward an explicit Standard/Fast tier. Availability
+    /// still depends on the installed CLI, selected model and account.
+    #[serde(default = "unknown_capability")]
+    pub service_tier: Capability,
     pub cancellation: Capability,
     /// The adapter can run a turn that gives the provider no tools, so text
     /// the application doesn't control can only inform the answer, never make
@@ -169,5 +173,6 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(capabilities.reasoning_effort, Capability::Unknown);
+        assert_eq!(capabilities.service_tier, Capability::Unknown);
     }
 }

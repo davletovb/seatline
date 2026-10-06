@@ -37,7 +37,9 @@ use seatline_core::protocol::{
 use seatline_core::search::{NATIVE_SEARCH_NO_SOURCES, SourceCollector, codex_message_sources};
 use seatline_core::stream::{BUSY_LIMIT, LineStream, Output};
 use seatline_core::telemetry::Span;
-use seatline_core::turn::{ReasoningEffort, SessionPolicy, ToolPolicy, Turn as TurnRequest};
+use seatline_core::turn::{
+    ReasoningEffort, ServiceTier, SessionPolicy, ToolPolicy, Turn as TurnRequest,
+};
 use seatline_platform::discovery;
 use seatline_platform::environment;
 use seatline_platform::forget;
@@ -99,6 +101,7 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     web_search: Capability::Supported,
     model_selection: Capability::Supported,
     reasoning_effort: Capability::Supported,
+    service_tier: Capability::Supported,
     cancellation: Capability::Supported,
     tool_isolation: Capability::Supported,
 };
@@ -400,6 +403,7 @@ impl Provider for Codex {
             native_search: request.tools == ToolPolicy::NativeWebSearch,
             model: request.model,
             reasoning_effort: request.reasoning_effort,
+            service_tier: request.service_tier,
             queue: VecDeque::new(),
             sources: SourceCollector::new(ID),
             cancelled: false,
@@ -791,6 +795,7 @@ struct Turn {
     /// The model to answer with, or `None` for Codex's own default.
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
+    service_tier: Option<ServiceTier>,
     /// Updates produced but not yet returned.
     queue: VecDeque<Update>,
     sources: SourceCollector,
@@ -844,6 +849,24 @@ impl Turn {
                 [
                     OsString::from("-c"),
                     OsString::from(format!("model_reasoning_effort=\"{}\"", effort.as_str())),
+                ],
+            );
+        }
+        if let Some(tier) = self.service_tier {
+            // Codex's explicit Standard request is `default`; omission can
+            // inherit Fast from the user's config. Fast also needs its feature
+            // gate enabled, otherwise Codex can silently drop the preference.
+            let (value, fast) = match tier {
+                ServiceTier::Standard => ("default", false),
+                ServiceTier::Fast => ("fast", true),
+            };
+            args.splice(
+                1..1,
+                [
+                    OsString::from("-c"),
+                    OsString::from(format!("service_tier=\"{value}\"")),
+                    OsString::from("-c"),
+                    OsString::from(format!("features.fast_mode={fast}")),
                 ],
             );
         }

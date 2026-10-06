@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 
 use seatline_core::exchange::SessionLoss;
 use seatline_core::protocol::{Authentication, Availability, Capability, ErrorCode};
-use seatline_core::turn::{Message, ReasoningEffort, Role, SessionPolicy, ToolPolicy, Turn};
+use seatline_core::turn::{
+    Message, ReasoningEffort, Role, ServiceTier, SessionPolicy, ToolPolicy, Turn,
+};
 use seatline_platform::environment::INHERITED;
 use seatline_providers::codex::{CODEX_VARIABLES, Codex, LIMITS, Limits};
 use seatline_providers::{Provider, Update};
@@ -35,6 +37,7 @@ fn ask(text: &str) -> Turn {
         }],
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         tools: ToolPolicy::ProviderDefault,
         session: SessionPolicy::Persistent,
         continuation: None,
@@ -745,6 +748,70 @@ fn a_saved_effort_choice_is_one_override_and_does_not_leak_to_the_next_turn() {
             .last()
             .unwrap()
             .contains("model_reasoning_effort")
+    );
+    codex.assert_nothing_left_running();
+}
+
+#[test]
+fn processing_tier_overrides_config_without_changing_model_effort_or_later_turns() {
+    let codex = FakeCodex::install(FIXTURES, "answers", "signed-in");
+    let home = codex.dir.join("codex-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let config = "service_tier = \"fast\"\n[features]\nfast_mode = true\n";
+    std::fs::write(home.join("config.toml"), config).unwrap();
+    let adapter = codex.adapter_with_env([
+        (OsString::from("CODEX_HOME"), home.clone().into_os_string()),
+        (OsString::from("PATH"), std::env::var_os("PATH").unwrap()),
+    ]);
+    assert_eq!(adapter.capabilities().service_tier, Capability::Supported);
+    for (tier, value, gate) in [
+        (ServiceTier::Fast, "fast", "true"),
+        (ServiceTier::Standard, "default", "false"),
+        (ServiceTier::Fast, "fast", "true"),
+    ] {
+        let updates = run_to_end(
+            adapter
+                .send(Turn {
+                    model: Some("gpt-6-luna".to_owned()),
+                    reasoning_effort: Some(ReasoningEffort::Xhigh),
+                    service_tier: Some(tier),
+                    session: SessionPolicy::Ephemeral,
+                    check_sign_in: false,
+                    ..ask("hi")
+                })
+                .as_mut(),
+        );
+        assert_eq!(updates.last(), Some(&Update::Completed));
+        let invocation = codex.invocations().last().unwrap().clone();
+        for setting in [
+            format!("service_tier=\"{value}\""),
+            format!("features.fast_mode={gate}"),
+            "model_reasoning_effort=\"xhigh\"".to_owned(),
+        ] {
+            assert_eq!(invocation.matches(&setting).count(), 1, "{invocation}");
+        }
+        assert!(invocation.contains("--model=gpt-6-luna"), "{invocation}");
+        assert!(invocation.contains("--ephemeral"), "{invocation}");
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.toml")).unwrap(),
+            config
+        );
+    }
+    let updates = run_to_end(
+        adapter
+            .send(Turn {
+                check_sign_in: false,
+                ..ask("provider default")
+            })
+            .as_mut(),
+    );
+    assert_eq!(updates.last(), Some(&Update::Completed));
+    let invocation = codex.invocations().last().unwrap().clone();
+    assert!(!invocation.contains("service_tier"), "{invocation}");
+    assert!(!invocation.contains("features.fast_mode"), "{invocation}");
+    assert!(
+        !invocation.contains("model_reasoning_effort"),
+        "{invocation}"
     );
     codex.assert_nothing_left_running();
 }

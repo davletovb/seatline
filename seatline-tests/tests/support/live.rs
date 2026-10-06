@@ -75,6 +75,7 @@ pub fn turn(system: Option<&str>, text: &str, tools: ToolPolicy) -> Turn {
         }],
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         tools,
         session: SessionPolicy::Ephemeral,
         continuation: None,

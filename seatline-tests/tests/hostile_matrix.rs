@@ -381,6 +381,7 @@ fn turn(text: &str) -> Turn {
         }],
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         tools: ToolPolicy::ProviderDefault,
         session: SessionPolicy::Ephemeral,
         continuation: None,

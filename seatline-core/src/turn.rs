@@ -97,6 +97,25 @@ impl ReasoningEffort {
     }
 }
 
+/// A requested processing tier, independent of the model's reasoning budget.
+/// Omission leaves the provider's configured tier in charge. An explicit
+/// Standard choice overrides a provider configuration that prefers Fast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTier {
+    Standard,
+    Fast,
+}
+
+impl ServiceTier {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Fast => "fast",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Turn {
@@ -116,6 +135,8 @@ pub struct Turn {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<ServiceTier>,
     pub tools: ToolPolicy,
     pub session: SessionPolicy,
     pub continuation: Option<String>,
@@ -285,6 +306,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn service_tier_is_optional_and_rejects_unrecognized_or_injected_values() {
+        let old = serde_json::json!({"system": null, "messages": [{"role": "user", "text": "hello"}],
+            "model": null, "tools": "none", "session": "ephemeral", "continuation": null,
+            "cleanup_group": null, "check_sign_in": false});
+        let turn: Turn = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(turn.service_tier, None);
+        assert_eq!(serde_json::to_value(turn).unwrap(), old);
+        for tier in [ServiceTier::Standard, ServiceTier::Fast] {
+            let mut value = old.clone();
+            value["service_tier"] = serde_json::json!(tier.as_str());
+            let turn: Turn = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(turn.service_tier, Some(tier));
+            assert_eq!(serde_json::to_value(turn).unwrap(), value);
+        }
+        for invalid in [
+            serde_json::json!("fast\" --dangerously-bypass-approvals-and-sandbox"),
+            serde_json::json!(true),
+            serde_json::json!("unknown"),
+            serde_json::json!("priority"),
+        ] {
+            let mut value = old.clone();
+            value["service_tier"] = invalid;
+            assert!(serde_json::from_value::<Turn>(value).is_err());
+        }
+    }
+
+    #[test]
     fn reasoning_effort_is_optional_and_only_accepts_named_budgets() {
         let old = serde_json::json!({"system": null, "messages": [{"role": "user", "text": "hello"}],
             "model": null, "tools": "none", "session": "ephemeral", "continuation": null,
@@ -326,6 +374,7 @@ mod tests {
             }],
             model: None,
             reasoning_effort: None,
+            service_tier: None,
             tools: ToolPolicy::None,
             session: SessionPolicy::Ephemeral,
             continuation: Some("opaque".to_owned()),
@@ -403,6 +452,7 @@ mod tests {
             }],
             model: None,
             reasoning_effort: None,
+            service_tier: None,
             tools: ToolPolicy::None,
             session: SessionPolicy::Persistent,
             continuation: None,

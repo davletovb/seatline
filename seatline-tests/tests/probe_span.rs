@@ -22,6 +22,7 @@ fn ask(check_sign_in: bool) -> Turn {
         }],
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         tools: ToolPolicy::ProviderDefault,
         session: SessionPolicy::Persistent,
         continuation: None,

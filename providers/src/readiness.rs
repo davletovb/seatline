@@ -279,6 +279,11 @@ impl Ready {
         {
             return Box::new(Scripted::failed(crate::REASONING_EFFORT_UNSUPPORTED));
         }
+        if turn.service_tier.is_some()
+            && self.provider.capabilities().service_tier == Capability::Unsupported
+        {
+            return Box::new(Scripted::failed(crate::SERVICE_TIER_UNSUPPORTED));
+        }
         let freshness = if turn.check_sign_in {
             Freshness::Fresh
         } else {
@@ -724,6 +729,7 @@ mod tests {
         fail_send: Cell<bool>,
         supported: Cell<bool>,
         effort: Cell<Capability>,
+        tier: Cell<Capability>,
         sign_in: Cell<Option<seatline_core::turn::SignInClassification>>,
     }
     #[derive(Clone)]
@@ -735,6 +741,7 @@ mod tests {
         fn capabilities(&self) -> Capabilities {
             Capabilities {
                 reasoning_effort: self.0.effort.get(),
+                service_tier: self.0.tier.get(),
                 ..crate::codex::CAPABILITIES
             }
         }
@@ -813,6 +820,7 @@ mod tests {
             fail_send: Cell::new(false),
             supported: Cell::new(true),
             effort: Cell::new(Capability::Supported),
+            tier: Cell::new(Capability::Supported),
             sign_in: Cell::new(None),
         });
         (Ready::new(Fixture(control.clone())), control)
@@ -850,11 +858,67 @@ mod tests {
             }],
             model: None,
             reasoning_effort: None,
+            service_tier: None,
             tools: ToolPolicy::None,
             session: SessionPolicy::Ephemeral,
             continuation: None,
             cleanup_group: None,
             check_sign_in,
+        }
+    }
+
+    #[test]
+    fn unsupported_tiers_do_not_probe_or_fingerprint_even_when_readiness_would_fail() {
+        use seatline_core::turn::ServiceTier;
+        for capability in [
+            Capability::Unsupported,
+            Capability::Unknown,
+            Capability::Supported,
+        ] {
+            for protected in [false, true] {
+                let (ready, control) = setup();
+                control.tier.set(capability);
+                control.sign_in.set(Some(
+                    seatline_core::turn::SignInClassification::Subscription,
+                ));
+                if capability == Capability::Unsupported {
+                    control.authentication.set(Authentication::Unauthenticated);
+                    control.availability.set(Availability::NotFound);
+                }
+                let request = Turn {
+                    service_tier: Some(ServiceTier::Fast),
+                    ..turn(true)
+                };
+                let exchange = if protected {
+                    ready.send_with_readiness_policy(
+                        request,
+                        CACHED,
+                        SignInPolicy::try_from(vec![
+                            seatline_core::turn::SignInClassification::Subscription,
+                        ])
+                        .unwrap(),
+                    )
+                } else {
+                    ready.send_with_readiness(request, CACHED)
+                };
+                if capability == Capability::Unsupported {
+                    assert_eq!(
+                        drain(exchange).last(),
+                        Some(&Update::Failed(crate::SERVICE_TIER_UNSUPPORTED))
+                    );
+                    assert_eq!(
+                        (
+                            control.probes.get(),
+                            control.fingerprints.get(),
+                            control.sends.get()
+                        ),
+                        (0, 0, 0)
+                    );
+                } else {
+                    assert_eq!(drain(exchange).last(), Some(&Update::Completed));
+                    assert_eq!((control.probes.get(), control.sends.get()), (1, 1));
+                }
+            }
         }
     }
 

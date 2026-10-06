@@ -241,6 +241,7 @@ fn all_providers_prepare_without_generating_then_reuse_verified_readiness() {
             }],
             model: model.map(str::to_owned),
             reasoning_effort: None,
+            service_tier: None,
             tools: ToolPolicy::None,
             session: SessionPolicy::Ephemeral,
             continuation: None,
