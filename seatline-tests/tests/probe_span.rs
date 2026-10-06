@@ -21,6 +21,7 @@ fn ask(check_sign_in: bool) -> Turn {
             text: "hello".to_owned(),
         }],
         model: None,
+        reasoning_effort: None,
         tools: ToolPolicy::ProviderDefault,
         session: SessionPolicy::Persistent,
         continuation: None,

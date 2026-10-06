@@ -74,6 +74,7 @@ pub fn turn(system: Option<&str>, text: &str, tools: ToolPolicy) -> Turn {
             text: text.to_owned(),
         }],
         model: None,
+        reasoning_effort: None,
         tools,
         session: SessionPolicy::Ephemeral,
         continuation: None,

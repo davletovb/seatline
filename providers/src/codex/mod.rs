@@ -37,7 +37,7 @@ use seatline_core::protocol::{
 use seatline_core::search::{NATIVE_SEARCH_NO_SOURCES, SourceCollector, codex_message_sources};
 use seatline_core::stream::{BUSY_LIMIT, LineStream, Output};
 use seatline_core::telemetry::Span;
-use seatline_core::turn::{SessionPolicy, ToolPolicy, Turn as TurnRequest};
+use seatline_core::turn::{ReasoningEffort, SessionPolicy, ToolPolicy, Turn as TurnRequest};
 use seatline_platform::discovery;
 use seatline_platform::environment;
 use seatline_platform::forget;
@@ -70,6 +70,7 @@ pub struct Limits {
     /// unknown.
     pub probe: Duration,
     /// How long Codex gets to save its session and exit after the turn ended.
+    /// Successful ephemeral turns are reaped immediately after completion.
     pub finish: Duration,
 }
 
@@ -97,6 +98,7 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     continuation: Capability::Supported,
     web_search: Capability::Supported,
     model_selection: Capability::Supported,
+    reasoning_effort: Capability::Supported,
     cancellation: Capability::Supported,
     tool_isolation: Capability::Supported,
 };
@@ -397,6 +399,7 @@ impl Provider for Codex {
             context_turn: request.tools == ToolPolicy::None,
             native_search: request.tools == ToolPolicy::NativeWebSearch,
             model: request.model,
+            reasoning_effort: request.reasoning_effort,
             queue: VecDeque::new(),
             sources: SourceCollector::new(ID),
             cancelled: false,
@@ -787,6 +790,7 @@ struct Turn {
     native_search: bool,
     /// The model to answer with, or `None` for Codex's own default.
     model: Option<String>,
+    reasoning_effort: Option<ReasoningEffort>,
     /// Updates produced but not yet returned.
     queue: VecDeque<Update>,
     sources: SourceCollector,
@@ -823,7 +827,7 @@ impl Turn {
         let Ok(workspace) = self.launch.workspace() else {
             return self.end(Update::Failed(NO_WORKSPACE));
         };
-        let args = exec_args_for_session(
+        let mut args = exec_args_for_session(
             &workspace,
             self.session_policy,
             self.restrict_tools,
@@ -832,6 +836,17 @@ impl Turn {
             self.resume.as_deref(),
             self.model.as_deref(),
         );
+        if let Some(effort) = self.reasoning_effort {
+            // Static enum values go directly to argv, never through a shell.
+            // This override belongs to this invocation, not the user's config.
+            args.splice(
+                1..1,
+                [
+                    OsString::from("-c"),
+                    OsString::from(format!("model_reasoning_effort=\"{}\"", effort.as_str())),
+                ],
+            );
+        }
         match Process::spawn(&self.launch.command(&workspace, &self.executable, args)) {
             Ok(mut process) => {
                 // The question goes on stdin: it can exceed the size one
@@ -955,8 +970,18 @@ impl Turn {
         } else {
             outcome
         };
+        // Successful ephemeral turns have no session to save. Once the
+        // provider has reported completion, stop and reap promptly instead
+        // of granting the persistent-session exit grace. Terminal delivery
+        // still follows reaping, so cancellation and scheduler slots retain
+        // their existing ownership rules.
+        let finish = if outcome.is_ok() && self.session_policy == SessionPolicy::Ephemeral {
+            Duration::ZERO
+        } else {
+            self.finish_grace
+        };
         self.outcome = Some(outcome);
-        self.finish_by = Some(after(self.finish_grace));
+        self.finish_by = Some(after(finish));
     }
 
     /// The terminal update once the process has exited.

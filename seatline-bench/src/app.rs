@@ -72,6 +72,7 @@ fn turn(req: &Req, handle: &Option<String>) -> Turn {
             text: req.prompt.clone(),
         }],
         model: None,
+        reasoning_effort: None,
         tools: ToolPolicy::None,
         session: if req.persistent {
             SessionPolicy::Persistent
@@ -129,6 +130,7 @@ impl Provider for Metadata {
             continuation: supported,
             web_search: supported,
             model_selection: supported,
+            reasoning_effort: seatline_core::protocol::Capability::Unknown,
             cancellation: supported,
             tool_isolation: supported,
         }

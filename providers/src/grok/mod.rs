@@ -57,6 +57,7 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     continuation: Capability::Supported,
     web_search: Capability::Unsupported,
     model_selection: Capability::Supported,
+    reasoning_effort: Capability::Unsupported,
     cancellation: Capability::Supported,
     tool_isolation: Capability::Supported,
 };
@@ -410,6 +411,9 @@ impl Provider for Grok {
     }
 
     fn send(&self, request: TurnRequest) -> Box<dyn Exchange> {
+        if request.reasoning_effort.is_some() {
+            return Box::new(Scripted::failed(crate::REASONING_EFFORT_UNSUPPORTED));
+        }
         if request.session != SessionPolicy::Ephemeral {
             return Box::new(Scripted::failed(PERSISTENT_SESSION_UNSUPPORTED));
         }

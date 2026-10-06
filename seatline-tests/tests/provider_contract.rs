@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use seatline_core::protocol::{Authentication, Availability, Capability, ErrorCode};
-use seatline_core::turn::{Message, Role, SessionPolicy, ToolPolicy, Turn};
+use seatline_core::turn::{Message, ReasoningEffort, Role, SessionPolicy, ToolPolicy, Turn};
 use seatline_providers::{BUSY_LIMIT, Provider, Update};
 use support::{
     FIXTURES, FakeClaude, FakeCodex, FakeGemini, FakeGrok, answer_text, failure, run_to_end,
@@ -31,6 +31,31 @@ enum Kind {
 }
 
 const ALL: [Kind; 4] = [Kind::Codex, Kind::Claude, Kind::Gemini, Kind::Grok];
+
+#[test]
+fn adapters_refuse_an_effort_choice_they_cannot_honor_without_launching() {
+    for kind in [Kind::Claude, Kind::Gemini, Kind::Grok] {
+        let rig = Rig::new(kind, Behaviour::Answers);
+        assert_eq!(
+            rig.provider.capabilities().reasoning_effort,
+            Capability::Unsupported
+        );
+        let updates = run_to_end(
+            rig.provider
+                .send(Turn {
+                    reasoning_effort: Some(ReasoningEffort::Low),
+                    ..rig.ask("hi")
+                })
+                .as_mut(),
+        );
+        assert_eq!(
+            failure(&updates),
+            (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+        );
+        assert_eq!(rig.command_lines(), "");
+        rig.assert_nothing_left();
+    }
+}
 
 /// How the fake provider behaves once a turn reaches it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +183,7 @@ impl Rig {
                 text: text.to_owned(),
             }],
             model: self.model.map(str::to_owned),
+            reasoning_effort: None,
             tools: ToolPolicy::None,
             session: SessionPolicy::Ephemeral,
             continuation: None,

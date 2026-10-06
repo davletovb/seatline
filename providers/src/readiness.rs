@@ -839,6 +839,7 @@ mod tests {
                 text: "hello".into(),
             }],
             model: None,
+            reasoning_effort: None,
             tools: ToolPolicy::None,
             session: SessionPolicy::Ephemeral,
             continuation: None,

@@ -109,6 +109,33 @@ grant cancels its connected requests within one second.
 Provider adapters still launch one process per turn. This change centralizes
 installation and execution; it does not change warming or provider sign-in.
 
+## Reasoning effort and ephemeral completion
+
+The optional generic `turn.reasoning_effort` field accepts `none`, `low`,
+`medium`, `high`, `xhigh` or `max`. Omit it (or use null) for the provider's
+configured default. `status.capabilities.reasoning_effort` reports whether
+the adapter can honor an explicit choice; older status records deserialize
+as unknown. Codex supports the override and passes it directly in argv as
+`-c 'model_reasoning_effort="low"'` for that invocation only. The model may
+reject a budget it does not support. Other adapters currently refuse explicit
+effort with `REASONING_EFFORT_UNSUPPORTED` before launching anything.
+Applications own whether this comes from a saved setting and which default
+they choose; Seatline does not impose a writing-specific budget.
+
+JSON requests that omit the field keep their existing behavior. Rust callers
+updating this pre-release dependency must add `reasoning_effort: None` to full
+`Turn` literals and state the new field in full `Capabilities` literals.
+Older companions deny unknown turn fields, so applications must check the
+capability before sending an explicit budget. See the official [Codex config
+reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+
+After Codex reports successful completion, ephemeral turns stop and reap the
+CLI promptly instead of granting its session-save exit grace. The answer and
+usage updates are preserved. Terminal delivery still follows process reaping,
+and persistent turns retain their save/exit grace; cancellation, process
+ownership and scheduler slot release follow the existing lifecycle. This is
+not provider process reuse or token streaming.
+
 ## Lifecycle and upgrades
 
 Clients start the broker on demand from the installed binary. When several

@@ -27,6 +27,7 @@ fn ask(text: &str) -> Turn {
             text: text.to_owned(),
         }],
         model: None,
+        reasoning_effort: None,
         tools: ToolPolicy::ProviderDefault,
         session: SessionPolicy::Persistent,
         continuation: None,

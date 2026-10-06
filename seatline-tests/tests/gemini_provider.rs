@@ -24,6 +24,7 @@ fn ask(text: &str) -> Turn {
             text: text.to_owned(),
         }],
         model: Some("gemini-test".to_owned()),
+        reasoning_effort: None,
         tools: ToolPolicy::None,
         session: SessionPolicy::Ephemeral,
         continuation: None,

@@ -24,6 +24,7 @@ fn ask(text: &str) -> Turn {
             text: text.to_owned(),
         }],
         model: Some("grok-4.6".to_owned()),
+        reasoning_effort: None,
         tools: ToolPolicy::None,
         session: SessionPolicy::Ephemeral,
         continuation: None,
