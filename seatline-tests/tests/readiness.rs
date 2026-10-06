@@ -240,6 +240,7 @@ fn all_providers_prepare_without_generating_then_reuse_verified_readiness() {
                 text: "hello".into(),
             }],
             model: model.map(str::to_owned),
+            reasoning_effort: None,
             tools: ToolPolicy::None,
             session: SessionPolicy::Ephemeral,
             continuation: None,

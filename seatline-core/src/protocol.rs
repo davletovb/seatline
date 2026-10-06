@@ -84,6 +84,10 @@ pub enum Capability {
     Unknown,
 }
 
+fn unknown_capability() -> Capability {
+    Capability::Unknown
+}
+
 impl Serialize for Capability {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
@@ -102,6 +106,10 @@ pub struct Capabilities {
     pub continuation: Capability,
     pub web_search: Capability,
     pub model_selection: Capability,
+    /// The adapter can honor an explicit reasoning budget. The model itself
+    /// may still reject a budget it does not support.
+    #[serde(default = "unknown_capability")]
+    pub reasoning_effort: Capability,
     pub cancellation: Capability,
     /// The adapter can run a turn that gives the provider no tools, so text
     /// the application doesn't control can only inform the answer, never make
@@ -146,5 +154,20 @@ impl<'de> Deserialize<'de> for Capability {
             serde_json::Value::String(value) if value == "unknown" => Ok(Self::Unknown),
             _ => Err(serde::de::Error::custom("invalid capability")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_status_does_not_claim_reasoning_control() {
+        let capabilities: Capabilities = serde_json::from_value(serde_json::json!({
+            "streaming": true, "continuation": true, "web_search": false,
+            "model_selection": true, "cancellation": true, "tool_isolation": true
+        }))
+        .unwrap();
+        assert_eq!(capabilities.reasoning_effort, Capability::Unknown);
     }
 }

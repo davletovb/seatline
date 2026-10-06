@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use seatline_core::exchange::SessionLoss;
 use seatline_core::protocol::{Authentication, Availability, Capability, ErrorCode};
-use seatline_core::turn::{Message, Role, SessionPolicy, ToolPolicy, Turn};
+use seatline_core::turn::{Message, ReasoningEffort, Role, SessionPolicy, ToolPolicy, Turn};
 use seatline_platform::environment::INHERITED;
 use seatline_providers::codex::{CODEX_VARIABLES, Codex, LIMITS, Limits};
 use seatline_providers::{Provider, Update};
@@ -34,6 +34,7 @@ fn ask(text: &str) -> Turn {
             text: text.to_owned(),
         }],
         model: None,
+        reasoning_effort: None,
         tools: ToolPolicy::ProviderDefault,
         session: SessionPolicy::Persistent,
         continuation: None,
@@ -631,6 +632,120 @@ fn a_codex_that_lingers_after_its_turn_is_stopped_and_the_answer_kept() {
     let updates = run_to_end(codex.adapter().send(ask("hi")).as_mut());
     assert_eq!(updates.last(), Some(&Update::Completed));
     assert!(started.elapsed() >= TEST_LIMITS.finish);
+    codex.assert_nothing_left_running();
+}
+
+#[test]
+fn successful_ephemeral_codex_turns_reap_without_the_session_save_grace() {
+    for behavior in [
+        "lingers",
+        "completed-stdout-flood",
+        "completed-unknown-flood",
+        "completed-stderr-flood",
+    ] {
+        let codex = FakeCodex::install(FIXTURES, behavior, "signed-in");
+        let adapter = codex.adapter().with_limits(Limits {
+            finish: Duration::from_secs(10),
+            ..TEST_LIMITS
+        });
+        let mut exchange = adapter.send(Turn {
+            session: SessionPolicy::Ephemeral,
+            ..ask("hi")
+        });
+        let began = Instant::now();
+        let updates = run_to_end(exchange.as_mut());
+        assert_eq!(
+            updates.last(),
+            Some(&Update::Completed),
+            "{behavior}: {updates:?}"
+        );
+        assert_eq!(answer_text(&updates), "You asked: hi", "{behavior}");
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "{behavior} waited for the session-save grace"
+        );
+        assert_eq!(exchange.next(Instant::now()), None);
+        codex.assert_nothing_left_running();
+    }
+}
+
+#[test]
+fn failed_ephemeral_codex_turns_keep_the_finish_grace_and_are_reaped() {
+    let codex = FakeCodex::install(FIXTURES, "failed-lingers", "signed-in");
+    let finish = Duration::from_millis(300);
+    let adapter = codex.adapter().with_limits(Limits {
+        finish,
+        ..TEST_LIMITS
+    });
+    let mut exchange = adapter.send(Turn {
+        session: SessionPolicy::Ephemeral,
+        ..ask("hi")
+    });
+    run_until_started(exchange.as_mut());
+    let began = Instant::now();
+    let updates = run_to_end(exchange.as_mut());
+    assert_eq!(
+        failure(&updates),
+        (ErrorCode::ProviderFailed, "PROVIDER_UNAVAILABLE")
+    );
+    assert!(
+        began.elapsed() >= finish,
+        "a failed ephemeral turn skipped its finish grace"
+    );
+    assert_eq!(exchange.next(Instant::now()), None);
+    codex.assert_nothing_left_running();
+}
+
+#[test]
+fn a_saved_effort_choice_is_one_override_and_does_not_leak_to_the_next_turn() {
+    let codex = FakeCodex::install(FIXTURES, "answers", "signed-in");
+    let adapter = codex.adapter();
+    assert_eq!(
+        adapter.capabilities().reasoning_effort,
+        Capability::Supported
+    );
+    for effort in [
+        ReasoningEffort::None,
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::Xhigh,
+        ReasoningEffort::Max,
+    ] {
+        let updates = run_to_end(
+            adapter
+                .send(Turn {
+                    reasoning_effort: Some(effort),
+                    check_sign_in: false,
+                    ..ask("hi")
+                })
+                .as_mut(),
+        );
+        assert_eq!(updates.last(), Some(&Update::Completed));
+        let invocation = codex.invocations().last().unwrap().clone();
+        assert!(
+            invocation.starts_with(&format!(
+                "exec -c model_reasoning_effort=\"{}\" --json ",
+                effort.as_str()
+            )),
+            "{invocation}"
+        );
+    }
+    run_to_end(
+        adapter
+            .send(Turn {
+                check_sign_in: false,
+                ..ask("default")
+            })
+            .as_mut(),
+    );
+    assert!(
+        !codex
+            .invocations()
+            .last()
+            .unwrap()
+            .contains("model_reasoning_effort")
+    );
     codex.assert_nothing_left_running();
 }
 

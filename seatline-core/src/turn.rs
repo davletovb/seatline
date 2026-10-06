@@ -71,6 +71,32 @@ pub enum SessionPolicy {
     Persistent,
 }
 
+/// A requested reasoning budget. Omission leaves the provider's own default.
+/// Adapters that cannot honor this choice refuse it before launching a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    None,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Turn {
@@ -88,6 +114,8 @@ pub struct Turn {
     pub system: Option<String>,
     pub messages: Vec<Message>,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub tools: ToolPolicy,
     pub session: SessionPolicy,
     pub continuation: Option<String>,
@@ -257,6 +285,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reasoning_effort_is_optional_and_only_accepts_named_budgets() {
+        let old = serde_json::json!({"system": null, "messages": [{"role": "user", "text": "hello"}],
+            "model": null, "tools": "none", "session": "ephemeral", "continuation": null,
+            "cleanup_group": null, "check_sign_in": false});
+        let turn: Turn = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(turn.reasoning_effort, None);
+        assert_eq!(serde_json::to_value(turn).unwrap(), old);
+        for effort in [
+            ReasoningEffort::None,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::Xhigh,
+            ReasoningEffort::Max,
+        ] {
+            let mut value = old.clone();
+            value["reasoning_effort"] = serde_json::json!(effort.as_str());
+            let turn: Turn = serde_json::from_value(value).unwrap();
+            assert_eq!(turn.reasoning_effort, Some(effort));
+        }
+        for invalid in [
+            serde_json::json!("low\" --dangerously-bypass-approvals-and-sandbox"),
+            serde_json::json!(true),
+            serde_json::json!("unknown"),
+        ] {
+            let mut value = old.clone();
+            value["reasoning_effort"] = invalid;
+            assert!(serde_json::from_value::<Turn>(value).is_err());
+        }
+    }
+
+    #[test]
     fn a_continuation_requires_persistence() {
         let turn = Turn {
             system: None,
@@ -265,6 +325,7 @@ mod tests {
                 text: "hello".to_owned(),
             }],
             model: None,
+            reasoning_effort: None,
             tools: ToolPolicy::None,
             session: SessionPolicy::Ephemeral,
             continuation: Some("opaque".to_owned()),
@@ -341,6 +402,7 @@ mod tests {
                 text: "hello".to_owned(),
             }],
             model: None,
+            reasoning_effort: None,
             tools: ToolPolicy::None,
             session: SessionPolicy::Persistent,
             continuation: None,

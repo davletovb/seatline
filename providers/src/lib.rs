@@ -91,6 +91,13 @@ pub const INVALID_TURN: Failure = Failure {
     retryable: false,
 };
 
+/// Explicit choices are never silently replaced by a provider default.
+pub const REASONING_EFFORT_UNSUPPORTED: Failure = Failure {
+    code: ErrorCode::InvalidRequest,
+    reason: "REASONING_EFFORT_UNSUPPORTED",
+    retryable: false,
+};
+
 /// One execution mode of a provider CLI, in terms that belong to no
 /// application: it runs a [`Turn`], and knows nothing of conversations, of
 /// browsers, or of which sessions an application keeps.

@@ -229,6 +229,7 @@ fn ask(text: &str) -> Turn {
             text: text.to_owned(),
         }],
         model: None,
+        reasoning_effort: None,
         tools: ToolPolicy::None,
         session: SessionPolicy::Ephemeral,
         continuation: None,
@@ -494,7 +495,10 @@ fn prepare_readiness_and_checked_sends_travel_through_the_shared_client() {
     let cached_send = drain(
         provider
             .send_with_readiness_policy(
-                ask("Say hello"),
+                Turn {
+                    reasoning_effort: Some(seatline_core::turn::ReasoningEffort::Low),
+                    ..ask("Say hello")
+                },
                 CACHED,
                 SignInPolicy::try_from(vec![
                     seatline_core::turn::SignInClassification::Subscription,
@@ -510,6 +514,9 @@ fn prepare_readiness_and_checked_sends_travel_through_the_shared_client() {
     );
     assert_eq!(text(&cached_send), "You asked: Say hello");
     assert_eq!(source(&cached_send), Some(Source::Cached));
+    assert!(cached_send.iter().any(|update| matches!(update,
+        Update::Status { status, .. } if status.capabilities.reasoning_effort == seatline_core::protocol::Capability::Supported
+    )), "{cached_send:?}");
     let status_at = cached_send
         .iter()
         .position(|u| matches!(u, Update::Status { .. }))
@@ -539,6 +546,18 @@ fn prepare_readiness_and_checked_sends_travel_through_the_shared_client() {
     let count = |prefix: &str| invocations.iter().filter(|l| l.starts_with(prefix)).count();
     assert_eq!(count("login "), 2, "{invocations:?}");
     assert_eq!(count("exec "), 2, "{invocations:?}");
+    let generations: Vec<_> = invocations
+        .iter()
+        .filter(|line| line.starts_with("exec "))
+        .collect();
+    assert!(
+        generations[0].contains("-c model_reasoning_effort=\"low\""),
+        "{generations:?}"
+    );
+    assert!(
+        !generations[1].contains("model_reasoning_effort"),
+        "{generations:?}"
+    );
 
     // And what the broker saw: five requests on one connection.
     wait_until("the broker's records", || {

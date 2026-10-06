@@ -285,7 +285,7 @@ fn exec(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCode> {
             }
             return Ok(ExitCode::SUCCESS);
         }
-        "fails-401" | "fails-429" | "fails-500" | "failed-stdout-flood" => {
+        "fails-401" | "fails-429" | "fails-500" | "failed-stdout-flood" | "failed-lingers" => {
             let message = match behavior {
                 "fails-401" => {
                     "unexpected status 401 Unauthorized: Incorrect API key provided: sk-abc***xyz"
@@ -300,6 +300,9 @@ fn exec(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCode> {
             )?;
             if behavior == "failed-stdout-flood" {
                 flood(&mut out, &progress(0), usize::MAX)?;
+            }
+            if behavior == "failed-lingers" {
+                hang();
             }
             return Ok(ExitCode::from(1));
         }

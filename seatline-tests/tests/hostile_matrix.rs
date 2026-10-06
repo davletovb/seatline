@@ -380,6 +380,7 @@ fn turn(text: &str) -> Turn {
             text: text.to_owned(),
         }],
         model: None,
+        reasoning_effort: None,
         tools: ToolPolicy::ProviderDefault,
         session: SessionPolicy::Ephemeral,
         continuation: None,

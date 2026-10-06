@@ -5,7 +5,7 @@
 use crate::{Cleanup, Exchange, Provider, Scripted, Timeouts, Update};
 use seatline_core::discovery::FileStamp;
 use seatline_core::protocol::{
-    Authentication, Availability, Capabilities, ErrorCode, Failure, ProviderState,
+    Authentication, Availability, Capabilities, Capability, ErrorCode, Failure, ProviderState,
 };
 use seatline_core::readiness::{Freshness, MAX_AGE, Readiness, SignInPolicy, Source};
 use seatline_core::telemetry::Span;
@@ -273,6 +273,11 @@ impl Ready {
     ) -> Box<dyn Exchange> {
         if turn.validate().is_err() {
             return Box::new(Scripted::failed(crate::INVALID_TURN));
+        }
+        if turn.reasoning_effort.is_some()
+            && self.provider.capabilities().reasoning_effort == Capability::Unsupported
+        {
+            return Box::new(Scripted::failed(crate::REASONING_EFFORT_UNSUPPORTED));
         }
         let freshness = if turn.check_sign_in {
             Freshness::Fresh
@@ -718,6 +723,7 @@ mod tests {
         availability: Cell<Availability>,
         fail_send: Cell<bool>,
         supported: Cell<bool>,
+        effort: Cell<Capability>,
         sign_in: Cell<Option<seatline_core::turn::SignInClassification>>,
     }
     #[derive(Clone)]
@@ -727,7 +733,10 @@ mod tests {
             "fixture"
         }
         fn capabilities(&self) -> Capabilities {
-            crate::codex::CAPABILITIES
+            Capabilities {
+                reasoning_effort: self.0.effort.get(),
+                ..crate::codex::CAPABILITIES
+            }
         }
         fn timeouts(&self) -> Timeouts {
             crate::codex::LIMITS.timeouts
@@ -803,6 +812,7 @@ mod tests {
             availability: Cell::new(Availability::Available),
             fail_send: Cell::new(false),
             supported: Cell::new(true),
+            effort: Cell::new(Capability::Supported),
             sign_in: Cell::new(None),
         });
         (Ready::new(Fixture(control.clone())), control)
@@ -839,11 +849,67 @@ mod tests {
                 text: "hello".into(),
             }],
             model: None,
+            reasoning_effort: None,
             tools: ToolPolicy::None,
             session: SessionPolicy::Ephemeral,
             continuation: None,
             cleanup_group: None,
             check_sign_in,
+        }
+    }
+
+    #[test]
+    fn checked_effort_is_refused_before_readiness_only_when_known_unsupported() {
+        use seatline_core::turn::ReasoningEffort;
+        for capability in [
+            Capability::Unsupported,
+            Capability::Unknown,
+            Capability::Supported,
+        ] {
+            for protected in [false, true] {
+                let (ready, control) = setup();
+                control.effort.set(capability);
+                control.sign_in.set(Some(
+                    seatline_core::turn::SignInClassification::Subscription,
+                ));
+                if capability == Capability::Unsupported {
+                    control.authentication.set(Authentication::Unauthenticated);
+                    control.availability.set(Availability::NotFound);
+                }
+                let request = Turn {
+                    reasoning_effort: Some(ReasoningEffort::Low),
+                    ..turn(true)
+                };
+                let exchange = if protected {
+                    ready.send_with_readiness_policy(
+                        request,
+                        CACHED,
+                        SignInPolicy::try_from(vec![
+                            seatline_core::turn::SignInClassification::Subscription,
+                        ])
+                        .unwrap(),
+                    )
+                } else {
+                    ready.send_with_readiness(request, CACHED)
+                };
+                if capability == Capability::Unsupported {
+                    assert_eq!(
+                        drain(exchange).last(),
+                        Some(&Update::Failed(crate::REASONING_EFFORT_UNSUPPORTED))
+                    );
+                    assert_eq!(
+                        (
+                            control.probes.get(),
+                            control.fingerprints.get(),
+                            control.sends.get()
+                        ),
+                        (0, 0, 0)
+                    );
+                } else {
+                    assert_eq!(drain(exchange).last(), Some(&Update::Completed));
+                    assert_eq!((control.probes.get(), control.sends.get()), (1, 1));
+                }
+            }
         }
     }
 
