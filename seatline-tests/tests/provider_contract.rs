@@ -15,8 +15,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use seatline_core::protocol::{Authentication, Availability, Capability, ErrorCode};
+use seatline_core::readiness::{Freshness, SignInPolicy};
 use seatline_core::turn::{Message, ReasoningEffort, Role, SessionPolicy, ToolPolicy, Turn};
-use seatline_providers::{BUSY_LIMIT, Provider, Update};
+use seatline_providers::{BUSY_LIMIT, Provider, Update, readiness::Ready};
 use support::{
     FIXTURES, FakeClaude, FakeCodex, FakeGemini, FakeGrok, answer_text, failure, run_to_end,
     run_until_started, session_of, visible,
@@ -35,25 +36,49 @@ const ALL: [Kind; 4] = [Kind::Codex, Kind::Claude, Kind::Gemini, Kind::Grok];
 #[test]
 fn adapters_refuse_an_effort_choice_they_cannot_honor_without_launching() {
     for kind in [Kind::Claude, Kind::Gemini, Kind::Grok] {
-        let rig = Rig::new(kind, Behaviour::Answers);
-        assert_eq!(
-            rig.provider.capabilities().reasoning_effort,
-            Capability::Unsupported
-        );
-        let updates = run_to_end(
-            rig.provider
-                .send(Turn {
-                    reasoning_effort: Some(ReasoningEffort::Low),
-                    ..rig.ask("hi")
-                })
-                .as_mut(),
-        );
-        assert_eq!(
-            failure(&updates),
-            (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
-        );
-        assert_eq!(rig.command_lines(), "");
-        rig.assert_nothing_left();
+        for missing in [false, true] {
+            let rig = if missing {
+                Rig::without_executable(kind)
+            } else {
+                Rig::new(kind, Behaviour::Answers)
+            };
+            assert_eq!(
+                rig.provider.capabilities().reasoning_effort,
+                Capability::Unsupported
+            );
+            let request = Turn {
+                reasoning_effort: Some(ReasoningEffort::Low),
+                ..rig.ask("hi")
+            };
+            // Neither status probes nor generations may launch, even when readiness
+            // would fail because the executable is absent or the account is signed out.
+            let ready = Ready::boxed(match &rig.fixture {
+                Fixture::Claude(fake) => Box::new(fake.adapter()),
+                Fixture::Gemini(fake) => Box::new(fake.adapter()),
+                Fixture::Grok(fake) => Box::new(fake.adapter()),
+                Fixture::Codex(_) => unreachable!(),
+            });
+            for mut exchange in [
+                rig.provider.send(request.clone()),
+                ready.send_with_readiness(request.clone(), Freshness::Fresh),
+                ready.send_with_readiness_policy(
+                    request,
+                    Freshness::Fresh,
+                    SignInPolicy::try_from(vec![
+                        seatline_core::turn::SignInClassification::Subscription,
+                    ])
+                    .unwrap(),
+                ),
+            ] {
+                let updates = run_to_end(exchange.as_mut());
+                assert_eq!(
+                    failure(&updates),
+                    (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+                );
+                assert_eq!(rig.command_lines(), "");
+                rig.assert_nothing_left();
+            }
+        }
     }
 }
 

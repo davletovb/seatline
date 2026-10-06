@@ -670,6 +670,33 @@ fn successful_ephemeral_codex_turns_reap_without_the_session_save_grace() {
 }
 
 #[test]
+fn failed_ephemeral_codex_turns_keep_the_finish_grace_and_are_reaped() {
+    let codex = FakeCodex::install(FIXTURES, "failed-lingers", "signed-in");
+    let finish = Duration::from_millis(300);
+    let adapter = codex.adapter().with_limits(Limits {
+        finish,
+        ..TEST_LIMITS
+    });
+    let mut exchange = adapter.send(Turn {
+        session: SessionPolicy::Ephemeral,
+        ..ask("hi")
+    });
+    run_until_started(exchange.as_mut());
+    let began = Instant::now();
+    let updates = run_to_end(exchange.as_mut());
+    assert_eq!(
+        failure(&updates),
+        (ErrorCode::ProviderFailed, "PROVIDER_UNAVAILABLE")
+    );
+    assert!(
+        began.elapsed() >= finish,
+        "a failed ephemeral turn skipped its finish grace"
+    );
+    assert_eq!(exchange.next(Instant::now()), None);
+    codex.assert_nothing_left_running();
+}
+
+#[test]
 fn a_saved_effort_choice_is_one_override_and_does_not_leak_to_the_next_turn() {
     let codex = FakeCodex::install(FIXTURES, "answers", "signed-in");
     let adapter = codex.adapter();
