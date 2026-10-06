@@ -78,6 +78,7 @@ fn ask(text: &str) -> TurnRequest {
         }],
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         tools: ToolPolicy::ProviderDefault,
         session: SessionPolicy::Ephemeral,
         continuation: None,

@@ -98,6 +98,13 @@ pub const REASONING_EFFORT_UNSUPPORTED: Failure = Failure {
     retryable: false,
 };
 
+/// An explicit tier is refused rather than silently using another tier.
+pub const SERVICE_TIER_UNSUPPORTED: Failure = Failure {
+    code: ErrorCode::InvalidRequest,
+    reason: "SERVICE_TIER_UNSUPPORTED",
+    retryable: false,
+};
+
 /// One execution mode of a provider CLI, in terms that belong to no
 /// application: it runs a [`Turn`], and knows nothing of conversations, of
 /// browsers, or of which sessions an application keeps.

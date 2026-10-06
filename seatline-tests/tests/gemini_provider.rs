@@ -25,6 +25,7 @@ fn ask(text: &str) -> Turn {
         }],
         model: Some("gemini-test".to_owned()),
         reasoning_effort: None,
+        service_tier: None,
         tools: ToolPolicy::None,
         session: SessionPolicy::Ephemeral,
         continuation: None,

@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 
 use seatline_core::protocol::{Authentication, Availability, Capability, ErrorCode};
 use seatline_core::readiness::{Freshness, SignInPolicy};
-use seatline_core::turn::{Message, ReasoningEffort, Role, SessionPolicy, ToolPolicy, Turn};
+use seatline_core::turn::{
+    Message, ReasoningEffort, Role, ServiceTier, SessionPolicy, ToolPolicy, Turn,
+};
 use seatline_providers::{BUSY_LIMIT, Provider, Update, readiness::Ready};
 use support::{
     FIXTURES, FakeClaude, FakeCodex, FakeGemini, FakeGrok, answer_text, failure, run_to_end,
@@ -32,6 +34,55 @@ enum Kind {
 }
 
 const ALL: [Kind; 4] = [Kind::Codex, Kind::Claude, Kind::Gemini, Kind::Grok];
+
+#[test]
+fn unsupported_service_tiers_are_refused_before_direct_or_readiness_processes() {
+    for kind in [Kind::Claude, Kind::Gemini, Kind::Grok] {
+        for missing in [false, true] {
+            let rig = if missing {
+                Rig::without_executable(kind)
+            } else {
+                Rig::new(kind, Behaviour::Answers)
+            };
+            assert_eq!(
+                rig.provider.capabilities().service_tier,
+                Capability::Unsupported
+            );
+            let ready = Ready::boxed(match &rig.fixture {
+                Fixture::Claude(fake) => Box::new(fake.adapter()),
+                Fixture::Gemini(fake) => Box::new(fake.adapter()),
+                Fixture::Grok(fake) => Box::new(fake.adapter()),
+                Fixture::Codex(_) => unreachable!(),
+            });
+            for tier in [ServiceTier::Standard, ServiceTier::Fast] {
+                let request = Turn {
+                    service_tier: Some(tier),
+                    ..rig.ask("hi")
+                };
+                for mut exchange in [
+                    rig.provider.send(request.clone()),
+                    ready.send_with_readiness(request.clone(), Freshness::Fresh),
+                    ready.send_with_readiness_policy(
+                        request,
+                        Freshness::Fresh,
+                        SignInPolicy::try_from(vec![
+                            seatline_core::turn::SignInClassification::Subscription,
+                        ])
+                        .unwrap(),
+                    ),
+                ] {
+                    let updates = run_to_end(exchange.as_mut());
+                    assert_eq!(
+                        failure(&updates),
+                        (ErrorCode::InvalidRequest, "SERVICE_TIER_UNSUPPORTED")
+                    );
+                    assert_eq!(rig.command_lines(), "");
+                    rig.assert_nothing_left();
+                }
+            }
+        }
+    }
+}
 
 #[test]
 fn adapters_refuse_an_effort_choice_they_cannot_honor_without_launching() {
@@ -209,6 +260,7 @@ impl Rig {
             }],
             model: self.model.map(str::to_owned),
             reasoning_effort: None,
+            service_tier: None,
             tools: ToolPolicy::None,
             session: SessionPolicy::Ephemeral,
             continuation: None,

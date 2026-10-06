@@ -754,6 +754,7 @@ mod tests {
                     web_search: crate::protocol::Capability::Supported,
                     model_selection: crate::protocol::Capability::Supported,
                     reasoning_effort: crate::protocol::Capability::Unknown,
+                    service_tier: crate::protocol::Capability::Unknown,
                     cancellation: crate::protocol::Capability::Supported,
                     tool_isolation: crate::protocol::Capability::Supported,
                 },

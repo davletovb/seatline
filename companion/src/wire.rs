@@ -39,6 +39,7 @@ reasons!(
     PROVIDER_PERMISSIONS_TOO_OPEN,
     MODEL_NOT_SUPPORTED,
     REASONING_EFFORT_UNSUPPORTED,
+    SERVICE_TIER_UNSUPPORTED,
     TOOL_ISOLATION_UNAVAILABLE,
     NATIVE_SEARCH_CONFIGURATION_UNSAFE,
     SEARCH_UNSUPPORTED,
@@ -190,6 +191,12 @@ pub fn decode_update(value: Value) -> io::Result<Update> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_service_tier_preserves_the_adapters_failure_over_the_wire() {
+        let original = Update::Failed(seatline_providers::SERVICE_TIER_UNSUPPORTED);
+        assert_eq!(decode_update(encode_update(&original)).unwrap(), original);
+    }
 
     #[test]
     fn remote_failures_preserve_rate_limits_and_isolation_without_reflecting_output() {
