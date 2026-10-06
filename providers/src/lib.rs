@@ -98,6 +98,7 @@ pub const REASONING_EFFORT_UNSUPPORTED: Failure = Failure {
     retryable: false,
 };
 
+/// An explicit tier is refused rather than silently using another tier.
 pub const SERVICE_TIER_UNSUPPORTED: Failure = Failure {
     code: ErrorCode::InvalidRequest,
     reason: "SERVICE_TIER_UNSUPPORTED",
