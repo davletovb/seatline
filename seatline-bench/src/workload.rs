@@ -25,16 +25,30 @@ pub struct Spec {
 pub enum Method {
     Send,
     Status,
+    /// `prepare`: check readiness ahead of a send, accepting evidence up to
+    /// [`CACHED_MAX_AGE_MS`] old, as an application does when it sees the user
+    /// is about to ask.
+    Prepare,
+    /// `send_ready`: a send that checks readiness first, accepting the same
+    /// evidence, so it runs no sign-in probe when a `prepare` just made some.
+    SendReady,
 }
 
 impl Method {
+    /// The method's name on the wire.
     pub fn name(self) -> &'static str {
         match self {
             Self::Send => "send",
             Self::Status => "status",
+            Self::Prepare => "prepare",
+            Self::SendReady => "send_ready",
         }
     }
 }
+
+/// How old readiness evidence a `prepare` or a `send_ready` accepts: the most a
+/// request may ask for.
+pub const CACHED_MAX_AGE_MS: u64 = 30_000;
 
 /// How the application talks to the broker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

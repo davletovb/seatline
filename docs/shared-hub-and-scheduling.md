@@ -48,9 +48,12 @@ Optional owner configuration lives in `scheduling.json` beside the broker's gran
   "max_readiness_running": 2,
   "max_cleanup_running": 2,
   "interactive_burst": 3,
-  "queue_timeout_ms": 30000
+  "queue_timeout_ms": 30000,
+  "claude_isolation": false
 }
 ```
+
+`claude_isolation` is the one setting that is not a limit; see [Claude launch isolation](#claude-launch-isolation-i-06).
 
 The global ceiling covers **all** classes. App/provider limits apply **within each class**, so two long generations no longer occupy the readiness allowance. Generation's global allowance is `max(1, max_running - max_readiness_running)`: six by default, leaving readiness capacity. Cleanup has a separate two-job ceiling and uses available global capacity. Smaller global limits still win over class limits. The hard ceilings are 8 globally, 2 per app/provider/class, 2 readiness jobs, 2 cleanup jobs, an interactive burst of 1–8, and a queue timeout of 1–900,000 ms. The queue remains capped at 64 requests globally and 8 per app; session caps remain 10,000 globally and 2,000 per app. Effective policy and worker limits appear in the broker telemetry record.
 
@@ -87,6 +90,20 @@ Update::Queued { .. } | Update::Admitted => {}
 ```
 
 Scheduling events remain opt-in on the wire; opting out does not remove this compile-time migration requirement. No application pin is updated in this PR.
+
+## Claude launch isolation (I-06)
+
+`"claude_isolation": true` in `scheduling.json` starts the turns that give Claude no tools (`tools: none`, and native search) with `claude --safe-mode`. It is **off by default** and is read at startup like the rest of the file, so a running broker has to be stopped (`seatline-companion stop`) for a change to apply; the next use starts a new one. The broker's telemetry record reports it as `limits.claude_isolation` (0 or 1).
+
+**Why.** `claude -p` loads the user's own setup every time it starts: hooks, plugins, skills and `CLAUDE.md`. For a turn an application wrote itself that is time at every start, which depends on the machine and is paid before the model is asked anything, and instructions the application did not choose. A turn that leaves the provider's own configuration in charge (`tools: provider_default`, which an owner has to grant an app) is started as before, because it asked for the user's setup.
+
+**What it keeps and drops.** Observed with Claude CLI 2.1.295 against a local stand-in for the API, so that no model was reached: both configured hooks (session start, prompt submit) ran in a normal start and neither ran in safe mode; the user's `CLAUDE.md` text was in the request in a normal start and was not in safe mode; the `env` block of Claude's settings (a base URL set only there) still took effect; an `apiKeyHelper` still ran and its key was sent. The model and effort a turn names are passed as before. Other versions are not covered by that observation. After turning this on, and after a Claude upgrade, check one live turn: an authentication or proxy setup that lives somewhere other than those two places is the thing to look for.
+
+**An older Claude.** A Claude from before the option answers `error: unknown option '--safe-mode'` and runs nothing. The turn is then started again without it, once. The application hears of one launch (two processes were started, and telemetry counts the turn's launch once). That executable is not offered the option again until it is replaced, or until the readiness evidence is invalidated (a revoked grant, an authentication failure). Any other early exit is an ordinary failure and is not repeated.
+
+**Not a security setting.** Tool isolation is unchanged and does not depend on it (`--tools ""`, MCP blocked). This is about what each start costs and what the model is told.
+
+**Measuring it.** `seatline-bench run --live claude --policy FILE` writes FILE into each scratch broker as its `scheduling.json`, so the same scenarios can be run with the setting off and on (see [measuring performance](performance-measurement.md#recording-a-live-baseline)). What it saves on a given machine is that machine's hooks, plugins and skills, so quote only a measurement made there. The one live measurement so far was on a home that loads almost nothing of its own: authentication worked in safe mode and the prompt was 684 tokens shorter, but latency did not change measurably ([summary](performance-baselines/2026-10-09-claude-live-summary.md#does-launch-isolation-i-06-help-here)). The saving on a machine with real hooks is unmeasured, which is why the setting is off.
 
 ## Adaptive waiting and evidence
 

@@ -24,13 +24,14 @@ pub struct Params {
 }
 
 /// Every scenario, in the order they are run.
-pub const ALL: [&str; 12] = [
+pub const ALL: [&str; 13] = [
     "cold-broker",
     "cold-three-app",
     "warm-send",
     "warm-send-adapter",
     "warm-send-shared",
     "warm-send-probe",
+    "prepared-send",
     "warm-status",
     "resumed-context",
     "reused-process",
@@ -41,12 +42,13 @@ pub const ALL: [&str; 12] = [
 
 /// The scenarios a live provider can be asked for. The competing-load ones
 /// need requests of a known length, which only the fake provider has.
-pub const LIVE: [&str; 8] = [
+pub const LIVE: [&str; 9] = [
     "cold-broker",
     "warm-send",
     "warm-send-adapter",
     "warm-send-shared",
     "warm-send-probe",
+    "prepared-send",
     "warm-status",
     "resumed-context",
     "reused-process",
@@ -86,6 +88,10 @@ fn describe(name: &str) -> Option<Description> {
         "warm-send-probe" => Description {
             state: "warm_broker_fresh_provider",
             text: "As `warm-send`, but each request asks the adapter to check the sign-in first, which runs the provider's own status command before the turn.",
+        },
+        "prepared-send" => Description {
+            state: "prepared_broker_fresh_provider",
+            text: "A broker is running and the application has prepared the provider: each measured request is a `send_ready` that accepts readiness evidence up to 30 s old, made by a `prepare` just before it, so it runs no sign-in probe. The provider is a fresh process. The `prepare` before each send is not measured. Compare with `warm-send-probe`, which pays the probe in every request, and with `warm-send`, which asks no readiness question at all.",
         },
         "warm-status" => Description {
             state: "warm_broker_fresh_provider",
@@ -257,6 +263,28 @@ pub fn run(lab: &mut Lab, name: &str, params: Params) -> io::Result<Scenario> {
                 req.check_sign_in = true
             }),
         }],
+        "prepared-send" => {
+            // A `prepare` before every send, as an application makes one when it
+            // sees the user is about to ask: the evidence a send finds is a
+            // moment old, never older than the 30 s it accepts, even when a live
+            // answer takes seconds.
+            let requests = sequence(name, "bench-a", live, params, |req| {
+                req.method = Method::SendReady
+            })
+            .into_iter()
+            .flat_map(|send| {
+                let mut prepare = request(format!("{}-prepare", send.id), short_prompt(live));
+                prepare.method = Method::Prepare;
+                prepare.measured = false;
+                [prepare, send]
+            })
+            .collect();
+            vec![Plan {
+                app: "bench-a",
+                role: "single",
+                requests,
+            }]
+        }
         "warm-status" => vec![Plan {
             app: "bench-a",
             role: "single",
@@ -829,6 +857,7 @@ mod tests {
             live: Some("grok".to_owned()),
             scratch: scratch.clone(),
             keep: false,
+            policy: None,
         };
         let mut lab = Lab::new(&settings).unwrap();
         let params = Params {

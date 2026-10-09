@@ -6,7 +6,7 @@
 //! seatline-bench run [--scenario NAME]... [--samples N] [--warmup N] [--gap-ms N]
 //!                    [--label TEXT] [--output FILE.json] [--markdown FILE.md]
 //!                    [--companion PATH] [--fake-provider PATH]
-//!                    [--live PROVIDER] [--scratch DIR] [--keep]
+//!                    [--live PROVIDER] [--policy FILE] [--scratch DIR] [--keep]
 //! seatline-bench report FILE.json
 //! seatline-bench compare BEFORE.json AFTER.json
 //! seatline-bench overhead [--turns N] [--updates N] [--rounds N]
@@ -34,23 +34,30 @@ use serde_json::{Value, json};
 use lab::{Lab, Settings};
 use report::{Parameters, Report};
 use scenarios::Params;
+use seatline_companion::scheduling;
 
 const USAGE: &str = "usage:
   seatline-bench run [--scenario NAME]... [--samples N] [--warmup N] [--gap-ms N]
                      [--label TEXT] [--output FILE.json] [--markdown FILE.md]
                      [--companion PATH] [--fake-provider PATH] [--live PROVIDER]
-                     [--scratch DIR] [--keep]
+                     [--policy FILE] [--scratch DIR] [--keep]
   seatline-bench report FILE.json
   seatline-bench compare BEFORE.json AFTER.json
   seatline-bench overhead [--turns N] [--updates N] [--rounds N]
   seatline-bench hub [--idle-ms N] [--samples N] [--label TEXT] [--output FILE.json]
 
-scenarios: cold-broker warm-send warm-send-probe warm-status resumed-context
-           reused-process short-isolated-paced three-app-short short-contended
+scenarios: cold-broker cold-three-app warm-send warm-send-adapter warm-send-shared
+           warm-send-probe prepared-send warm-status resumed-context reused-process
+           short-isolated-paced three-app-short short-contended
 
 --live runs the real provider CLI installed on this machine and sends it real
 prompts. It needs SEATLINE_BENCH_LIVE=1 as well, and uses a little of the
-account's quota.";
+account's quota. It uses your own HOME and provider configuration, so that you
+are signed in.
+
+--policy FILE writes FILE as the owner's scheduling.json into every scratch
+broker's data directory, so that one run can be made with a setting on and the
+next with it off.";
 
 fn main() -> ExitCode {
     match run() {
@@ -139,6 +146,7 @@ fn run_scenarios(args: &[String]) -> io::Result<()> {
     ) = (None, None, None);
     let mut keep = false;
     let mut scratch: Option<PathBuf> = None;
+    let mut policy: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         match flag.as_str() {
@@ -152,6 +160,7 @@ fn run_scenarios(args: &[String]) -> io::Result<()> {
             "--companion" => companion = Some(PathBuf::from(value(&mut it, flag)?)),
             "--fake-provider" => fake_provider = Some(PathBuf::from(value(&mut it, flag)?)),
             "--live" => live = Some(value(&mut it, flag)?.clone()),
+            "--policy" => policy = Some(PathBuf::from(value(&mut it, flag)?)),
             "--keep" => keep = true,
             "--scratch" => scratch = Some(PathBuf::from(value(&mut it, flag)?)),
             other => {
@@ -213,6 +222,19 @@ fn run_scenarios(args: &[String]) -> io::Result<()> {
     if live.is_none() {
         require(&fake_provider, "the fake provider")?;
     }
+    // Checked with the broker's own rules now, rather than by a broker that
+    // refuses to start after a live run has begun.
+    let policy = policy
+        .map(|path| {
+            let bytes = std::fs::read(&path)?;
+            let parsed: scheduling::Policy = serde_json::from_slice(&bytes)
+                .map_err(|error| io::Error::other(format!("--policy: {error}")))?;
+            parsed
+                .validate()
+                .map_err(|error| io::Error::other(format!("--policy: {error}")))?;
+            Ok::<_, io::Error>(bytes)
+        })
+        .transpose()?;
     let settings = Settings {
         companion: std::fs::canonicalize(&companion)?,
         fake_provider: std::fs::canonicalize(&fake_provider).unwrap_or(fake_provider),
@@ -220,6 +242,7 @@ fn run_scenarios(args: &[String]) -> io::Result<()> {
         live: live.clone(),
         scratch: scratch.unwrap_or_else(lab::default_scratch),
         keep,
+        policy,
     };
 
     let mut results = Vec::new();
@@ -270,6 +293,11 @@ fn run_scenarios(args: &[String]) -> io::Result<()> {
             samples: params.samples,
             warmup: params.warmup,
             gap_ms: params.gap_ms,
+            // The file as the owner wrote it: small, and no path or credential.
+            policy: settings
+                .policy
+                .as_deref()
+                .and_then(|bytes| serde_json::from_slice(bytes).ok()),
         },
         scenarios: results,
         limitations: limitations(live.is_some(), params),
@@ -328,7 +356,7 @@ fn limitations(live: bool, params: Params) -> Vec<String> {
     let mut notes = vec![
         "Broker marks are taken when its hub thread observes an update, so they include the hub's polling interval (5 ms when idle) and cannot resolve differences smaller than that; client timings include the socket and the application's own scheduling.".to_owned(),
         "Only compare results from the same machine, build profile and mode; a shared or virtualized machine adds noise of its own. `compare` warns when these differ.".to_owned(),
-        "`prepare` is connecting and the handshake. There is no provider-side preparation to measure yet: readiness is not cached (C-02) and there is no prepare API (C-03).".to_owned(),
+        "`prepare`, in the `client_prepare_us` metric, is connecting and the handshake. A provider's own readiness check is measured by `warm-status`, by the sign-in probe in `warm-send-probe`, and by `prepared-send`, which prepares first and so runs no probe in the send.".to_owned(),
         "Resumed context continues a conversation in a fresh provider process; it is not process reuse, which is unsupported until a persistent-provider adapter exists (E-02).".to_owned(),
         "A scenario's first request after warm-up is still the first of its kind in this run's broker; a genuinely cold machine (empty page cache, first start after installation) is not reproduced.".to_owned(),
     ];

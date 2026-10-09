@@ -15,11 +15,12 @@ use seatline_companion::remote::RemoteClient;
 use seatline_companion::{PROTOCOL_VERSION, client, wire};
 use seatline_core::exchange::{Exchange, Scripted, Timeouts, Update};
 use seatline_core::protocol::{Capabilities, Capability};
+use seatline_core::readiness::Freshness;
 use seatline_core::turn::{Message, Role, SessionPolicy, ToolPolicy, Turn};
 use seatline_providers::Provider;
 use serde_json::{Value, json};
 
-use crate::workload::{Method, Req, Sample, Spec, Via};
+use crate::workload::{CACHED_MAX_AGE_MS, Method, Req, Sample, Spec, Via};
 
 /// How long one request may take, from connecting to its end.
 const REQUEST_LIMIT: Duration = Duration::from_secs(300);
@@ -58,6 +59,13 @@ pub fn run(spec: Spec) -> io::Result<()> {
     }
     writeln!(out, "{}", json!({"done": true}))?;
     out.flush()
+}
+
+/// Readiness evidence up to the most a request may accept.
+fn cached() -> Freshness {
+    Freshness::Cached {
+        max_age_ms: CACHED_MAX_AGE_MS,
+    }
 }
 
 fn micros(duration: Duration) -> u64 {
@@ -151,6 +159,28 @@ impl Provider for Metadata {
     }
 }
 
+/// What the wire request for `req` carries, as the broker reads it: a turn for
+/// a send, readiness to accept for a prepare, both for a send that checks first.
+fn wire_params(req: &Req, handle: &Option<String>) -> Value {
+    match req.method {
+        Method::Send => json!(turn(req, handle)),
+        Method::Status => Value::Null,
+        Method::Prepare => json!(cached()),
+        Method::SendReady => json!({"turn": turn(req, handle), "freshness": cached()}),
+    }
+}
+
+/// The call on `provider` that `req` is: what an application's adapter makes of
+/// the same request.
+fn begin(provider: &dyn Provider, req: &Req, handle: &Option<String>) -> Box<dyn Exchange> {
+    match req.method {
+        Method::Send => provider.send(turn(req, handle)),
+        Method::Status => provider.status(),
+        Method::Prepare => provider.prepare(cached()),
+        Method::SendReady => provider.send_with_readiness(turn(req, handle), cached()),
+    }
+}
+
 /// The request as an application's adapter makes it, through `RemoteProvider`.
 /// Without a `client` the exchange it returns starts a thread, a runtime and a
 /// connection of its own; with one it is a request on the application's shared
@@ -169,10 +199,7 @@ fn through_adapter(
         None => RemoteProvider::new(&spec.app, &metadata),
     };
     let begun = Instant::now();
-    let mut exchange = match req.method {
-        Method::Send => provider.send(turn(req, handle)),
-        Method::Status => provider.status(),
-    };
+    let mut exchange = begin(&provider, req, handle);
     let deadline = begun + REQUEST_LIMIT;
     loop {
         let Some(update) = exchange.next(deadline) else {
@@ -263,10 +290,7 @@ async fn exchange(
         return Ok(());
     }
 
-    let params = match req.method {
-        Method::Send => json!(turn(req, handle)),
-        Method::Status => Value::Null,
-    };
+    let params = wire_params(req, handle);
     let submitted = Instant::now();
     wire::write_frame(
         &mut stream,
@@ -309,5 +333,112 @@ async fn exchange(
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use seatline_core::readiness::MAX_AGE;
+
+    use super::*;
+
+    /// A provider that only records which call a request became.
+    struct Recorder(RefCell<Vec<String>>);
+
+    impl Recorder {
+        fn log(&self, call: String) -> Box<dyn Exchange> {
+            self.0.borrow_mut().push(call);
+            Box::new(Scripted::new([]))
+        }
+    }
+
+    impl Provider for Recorder {
+        fn id(&self) -> &str {
+            "recorder"
+        }
+
+        fn timeouts(&self) -> Timeouts {
+            Metadata(String::new()).timeouts()
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Metadata(String::new()).capabilities()
+        }
+
+        fn status(&self) -> Box<dyn Exchange> {
+            self.log("status".to_owned())
+        }
+
+        fn prepare(&self, freshness: Freshness) -> Box<dyn Exchange> {
+            self.log(format!("prepare {freshness:?}"))
+        }
+
+        fn send_with_readiness(&self, turn: Turn, freshness: Freshness) -> Box<dyn Exchange> {
+            self.log(format!(
+                "send_ready {freshness:?} check_sign_in={}",
+                turn.check_sign_in
+            ))
+        }
+
+        fn send(&self, turn: Turn) -> Box<dyn Exchange> {
+            self.log(format!("send check_sign_in={}", turn.check_sign_in))
+        }
+    }
+
+    fn req(method: Method) -> Req {
+        Req {
+            id: "r".to_owned(),
+            method,
+            prompt: "p".to_owned(),
+            persistent: false,
+            resume: false,
+            check_sign_in: false,
+            gap_ms: 0,
+            measured: true,
+            via: Via::Adapter,
+        }
+    }
+
+    #[test]
+    fn a_request_becomes_the_call_an_adapter_makes_with_the_most_cached_readiness_it_may_ask_for() {
+        let recorder = Recorder(RefCell::new(Vec::new()));
+        for method in [
+            Method::Send,
+            Method::Status,
+            Method::Prepare,
+            Method::SendReady,
+        ] {
+            begin(&recorder, &req(method), &None);
+        }
+        let freshness = "Cached { max_age_ms: 30000 }";
+        assert_eq!(
+            *recorder.0.borrow(),
+            [
+                "send check_sign_in=false".to_owned(),
+                "status".to_owned(),
+                format!("prepare {freshness}"),
+                format!("send_ready {freshness} check_sign_in=false"),
+            ]
+        );
+        // The documented "most a request may ask for" is the broker's own cap.
+        assert_eq!(u128::from(CACHED_MAX_AGE_MS), MAX_AGE.as_millis());
+        assert_eq!(cached().max_age(), MAX_AGE);
+    }
+
+    #[test]
+    fn a_wire_request_carries_what_the_broker_reads_from_it() {
+        let read = |params: &Value| serde_json::from_value::<Freshness>(params.clone());
+        assert_eq!(
+            read(&wire_params(&req(Method::Prepare), &None)).unwrap(),
+            cached()
+        );
+        let ready = wire_params(&req(Method::SendReady), &None);
+        assert_eq!(read(&ready["freshness"]).unwrap(), cached());
+        let sent = serde_json::from_value::<Turn>(ready["turn"].clone()).unwrap();
+        assert_eq!(sent.messages[0].text, "p");
+        assert!(serde_json::from_value::<Turn>(wire_params(&req(Method::Send), &None)).is_ok());
+        assert_eq!(wire_params(&req(Method::Status), &None), Value::Null);
     }
 }

@@ -209,6 +209,17 @@ instead of waiting for it; end that one process by hand once (macOS and Linux:
 Manager). Native-host processes that Chrome started for extensions are separate
 from the broker and keep running until Chrome closes their port.
 
+## Claude launch isolation
+
+Off by default. With `"claude_isolation": true` in `scheduling.json` (read when
+the broker starts), the turns that give Claude no tools start with `claude
+--safe-mode`, so the user's hooks, plugins, skills and `CLAUDE.md` are not loaded
+at every start; a turn with `tools: provider_default` keeps them. Claude still
+reads the settings that carry authentication and network configuration, and a
+Claude that does not know the option is started again without it, once. What it
+keeps and drops, how that was observed, and how to measure it on your own
+machine are in [shared hub and scheduling](../docs/shared-hub-and-scheduling.md#claude-launch-isolation-i-06).
+
 ## Phase telemetry
 
 The broker records nothing about requests unless `SEATLINE_TELEMETRY_FILE`

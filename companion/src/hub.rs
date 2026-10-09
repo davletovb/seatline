@@ -1076,7 +1076,10 @@ impl Hub {
             };
             let provider: Box<dyn Provider> = match request.provider.as_str() {
                 "codex" => Box::new(codex::Codex::installed(&layout)),
-                "claude" => Box::new(claude::Claude::installed(&layout)),
+                "claude" => Box::new(
+                    claude::Claude::installed(&layout)
+                        .with_isolated_launch(self.policy.claude_isolation),
+                ),
                 "gemini" => Box::new(gemini::Gemini::installed(&layout)),
                 "grok" => Box::new(grok::Grok::installed(&layout)),
                 _ => {

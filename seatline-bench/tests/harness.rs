@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const HARNESS: &str = env!("CARGO_BIN_EXE_seatline-bench");
 const FAKE: &str = env!("CARGO_BIN_EXE_seatline-bench-fake-provider");
@@ -222,6 +222,133 @@ fn warm_scenarios_count_processes_the_way_the_fake_provider_did() {
 }
 
 #[test]
+fn a_prepared_send_pays_no_probe_where_a_checked_one_pays_one_each() {
+    let (report, _) = report(&[
+        "run",
+        "--scenario",
+        "prepared-send",
+        "--scenario",
+        "warm-send-probe",
+        "--samples",
+        "3",
+        "--warmup",
+        "1",
+    ]);
+    let prepared = scenario(&report, "prepared-send");
+    assert_eq!(prepared["state"], "prepared_broker_fresh_provider");
+    assert_eq!(prepared["status"], "measured");
+    // Four sends, one of them warm-up, and a `prepare` before each.
+    assert_eq!(prepared["counts"]["requests_total"], 8);
+    assert_eq!(prepared["counts"]["fake_turns"], 4);
+    // The broker counted no probe in any measured send, and the fake saw one in
+    // all: the first `prepare`'s. Every later one found it still fresh.
+    assert_eq!(prepared["counts"]["broker_probes"], 0);
+    assert_eq!(prepared["counts"]["fake_probes"], 1);
+    let app = &prepared["apps"][0];
+    assert_eq!(
+        (app["completed"].as_u64(), app["failed"].as_u64()),
+        (Some(3), Some(0))
+    );
+    // What is measured is the sends. The prepares are not part of it.
+    for sample in app["samples"].as_array().unwrap() {
+        assert_eq!(sample["method"], "send_ready", "{sample}");
+        assert_eq!(sample["broker"]["probes"], 0, "{sample}");
+    }
+    assert!(metric(app, "broker_sign_in_probe_us").is_null());
+    assert_eq!(metric(app, "client_submit_to_first_text_us")["n"], 3);
+
+    // The same sends, each checking sign-in for itself, pay for it every time.
+    let probe = scenario(&report, "warm-send-probe");
+    assert_eq!(probe["counts"]["broker_probes"], 3);
+    assert_eq!(metric(&probe["apps"][0], "broker_sign_in_probe_us")["n"], 3);
+}
+
+#[test]
+fn an_owner_policy_reaches_every_scratch_broker_and_a_bad_one_is_refused_up_front() {
+    let file = unique_file("policy");
+    let given = file.to_str().unwrap().to_owned();
+    std::fs::write(&file, r#"{"claude_isolation": true, "max_running": 4}"#).unwrap();
+    let (report, text) = report(&[
+        "run",
+        "--scenario",
+        "warm-send",
+        "--samples",
+        "2",
+        "--warmup",
+        "0",
+        "--policy",
+        &given,
+    ]);
+    // The broker says it ran with it, and the report says what it was given:
+    // the contents, never where they were read from.
+    assert_eq!(report["broker"]["limits"]["claude_isolation"], 1);
+    assert_eq!(report["broker"]["limits"]["max_running"], 4);
+    assert_eq!(
+        report["parameters"]["policy"],
+        json!({"claude_isolation": true, "max_running": 4})
+    );
+    assert!(
+        !text.contains(&given),
+        "the policy file's path is in the report"
+    );
+
+    // Rendering and comparing say which policy a report ran with, so that two
+    // reports are not taken for like with like when one had a setting on.
+    let saved = unique_file("policy-saved");
+    std::fs::write(&saved, &text).unwrap();
+    let saved_path = saved.to_str().unwrap();
+    #[allow(clippy::disallowed_methods)] // Runs the harness binary this package builds.
+    let run = |args: &[&str]| Command::new(HARNESS).args(args).output().unwrap();
+    let rendered = run(&["report", saved_path]);
+    assert!(rendered.status.success());
+    let rendered = String::from_utf8_lossy(&rendered.stdout);
+    assert!(
+        rendered.contains(
+            "Owner policy every broker ran with: `{\"claude_isolation\":true,\"max_running\":4}`"
+        ),
+        "{rendered}"
+    );
+    let compared = run(&["compare", saved_path, saved_path]);
+    assert!(compared.status.success());
+    let compared = String::from_utf8_lossy(&compared.stdout);
+    assert!(
+        compared.contains("policy `{\"claude_isolation\":true,\"max_running\":4}`"),
+        "{compared}"
+    );
+    let _ = std::fs::remove_file(&saved);
+
+    // Without one, the broker's defaults and no policy in the report.
+    let (report, _) = self::report(&[
+        "run",
+        "--scenario",
+        "warm-send",
+        "--samples",
+        "1",
+        "--warmup",
+        "0",
+    ]);
+    assert_eq!(report["broker"]["limits"]["claude_isolation"], 0);
+    assert!(report["parameters"].get("policy").is_none());
+
+    // A policy the broker would refuse is refused before anything runs, not by
+    // a broker that fails to start in the middle of a live run.
+    for bad in [
+        r#"{"max_running": 0}"#,
+        r#"{"claude_isolation": "yes"}"#,
+        r#"{"unknown_field": 1}"#,
+        "not json",
+    ] {
+        std::fs::write(&file, bad).unwrap();
+        let output = harness(&["run", "--scenario", "warm-send", "--policy", &given]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{bad}");
+        assert!(stderr.contains("--policy"), "{bad}: {stderr}");
+        assert!(!stderr.contains("running warm-send"), "{bad}: {stderr}");
+    }
+    let _ = std::fs::remove_file(&file);
+}
+
+#[test]
 fn applications_that_start_together_with_no_broker_are_counted_and_all_served() {
     let (report, _) = report(&[
         "run",
@@ -404,6 +531,54 @@ fn a_live_run_needs_a_second_confirmation_and_starts_nothing_without_it() {
     assert!(!output.status.success());
     let message = String::from_utf8_lossy(&output.stderr);
     assert!(message.contains("SEATLINE_BENCH_LIVE=1"), "{message}");
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Runs the harness binary this package builds.
+fn a_live_run_takes_the_scenarios_that_need_no_long_requests_and_no_others() {
+    // The scenario is checked before the companion is looked for, and a
+    // companion that does not exist keeps anything from starting: which of the
+    // two refused the run says whether the scenario was accepted.
+    let ask = |scenario: &str| {
+        let output = Command::new(HARNESS)
+            .args(["run", "--live", "claude", "--scenario", scenario])
+            .args(["--companion", "/nonexistent/seatline-companion"])
+            .env("SEATLINE_BENCH_LIVE", "1")
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{scenario}");
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    for scenario in [
+        "cold-broker",
+        "warm-send",
+        "warm-send-adapter",
+        "warm-send-shared",
+        "warm-send-probe",
+        "prepared-send",
+        "warm-status",
+        "resumed-context",
+        "reused-process",
+    ] {
+        let message = ask(scenario);
+        assert!(
+            message.contains("the companion not found"),
+            "{scenario}: {message}"
+        );
+    }
+    // Those that need requests of a known length have only the fake provider.
+    for scenario in [
+        "cold-three-app",
+        "short-isolated-paced",
+        "three-app-short",
+        "short-contended",
+    ] {
+        let message = ask(scenario);
+        assert!(
+            message.contains(&format!("no scenario `{scenario}` for a live provider")),
+            "{scenario}: {message}"
+        );
+    }
 }
 
 #[test]

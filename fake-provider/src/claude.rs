@@ -119,13 +119,25 @@ fn print_mode(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCod
         return Ok(ExitCode::from(2));
     }
 
-    // A Claude from before `--effort` does what its command-line parser does
-    // with any option it does not know: say so, and exit before starting.
-    if behavior == "no-effort-option" {
-        if let Some(option) = args.iter().find(|arg| arg.starts_with("--effort")) {
-            let _ = writeln!(io::stderr(), "error: unknown option '{option}'");
-            return Ok(ExitCode::from(1));
+    // A Claude from before an option does what its command-line parser does
+    // with any option it does not know: say so, and exit before starting. The
+    // first one on the command line is the one it names.
+    let unknown: &[&str] = match behavior {
+        "no-effort-option" => &["--effort"],
+        "no-safe-mode-option" | "slow-no-safe-mode-option" => &["--safe-mode"],
+        "no-newer-options" => &["--safe-mode", "--effort"],
+        _ => &[],
+    };
+    if let Some(option) = args
+        .iter()
+        .find(|arg| unknown.iter().any(|name| arg.starts_with(name)))
+    {
+        if behavior.starts_with("slow-") {
+            // Long enough for a test to cancel the run before it is rejected.
+            thread::sleep(Duration::from_millis(1500));
         }
+        let _ = writeln!(io::stderr(), "error: unknown option '{option}'");
+        return Ok(ExitCode::from(1));
     }
 
     let Some(tools) = args

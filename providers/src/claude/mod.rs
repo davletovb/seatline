@@ -7,6 +7,7 @@
 //! runs in as an opaque handle, and resumes one it is given.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -15,7 +16,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::{Cleanup, Exchange, Provider, Scripted, Timeouts, Update};
-use seatline_core::discovery::{CachedSearchPath, SearchPath};
+use seatline_core::discovery::{CachedSearchPath, FileStamp, SearchPath};
 use seatline_core::exchange::SessionLoss;
 use seatline_core::process::{Event, Exit, Process, ProcessSpec};
 use seatline_core::prompt;
@@ -201,11 +202,67 @@ impl Launch {
     }
 }
 
+/// Whether turns are started without the user's own customizations, and what
+/// has been learned about the installed Claude since.
+///
+/// An owner who asks for it has every turn that gives Claude no tools started
+/// with `--safe-mode`: the user's hooks, plugins, skills and `CLAUDE.md` are not
+/// loaded, which would otherwise cost time at every start and has no place in a
+/// turn an application wrote. A turn that leaves the provider's own
+/// configuration in charge ([`ToolPolicy::ProviderDefault`]) keeps them. Claude
+/// still reads its settings for authentication and network configuration, and
+/// still takes the model and effort a turn names.
+///
+/// A Claude from before the option answers `unknown option` and runs nothing.
+/// The turn is then started again without it, once, and that executable is not
+/// tried with it again until it changes.
+struct Isolation {
+    enabled: bool,
+    /// The executable that did not know `--safe-mode`, as it was then.
+    unsupported: RefCell<Option<(PathBuf, FileStamp)>>,
+}
+
+impl Isolation {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            unsupported: RefCell::new(None),
+        }
+    }
+
+    /// Whether a turn with `tools`, run by `executable`, starts in safe mode.
+    fn applies(&self, executable: &Path, tools: ToolPolicy) -> bool {
+        self.enabled && tools != ToolPolicy::ProviderDefault && !self.is_unsupported(executable)
+    }
+
+    fn is_unsupported(&self, executable: &Path) -> bool {
+        self.unsupported
+            .borrow()
+            .as_ref()
+            .is_some_and(|(path, stamp)| {
+                // Replaced or upgraded since: it may know the option now.
+                path == executable
+                    && FileStamp::read(executable).ok().flatten().as_ref() == Some(stamp)
+            })
+    }
+
+    fn remember_unsupported(&self, executable: &Path) {
+        if let Ok(Some(stamp)) = FileStamp::read(executable) {
+            *self.unsupported.borrow_mut() = Some((executable.to_path_buf(), stamp));
+        }
+    }
+
+    fn forget(&self) {
+        self.unsupported.borrow_mut().take();
+    }
+}
+
 pub struct Claude {
     search: CachedSearchPath,
     launch: Rc<Launch>,
     limits: Limits,
     account_file: readiness::AccountFile,
+    isolation: Rc<Isolation>,
 }
 
 impl Claude {
@@ -223,6 +280,7 @@ impl Claude {
             launch: Rc::new(Launch::new(work_dir, std::env::vars_os().collect())),
             limits: LIMITS,
             account_file: readiness::AccountFile::default(),
+            isolation: Rc::new(Isolation::new(false)),
         }
     }
 
@@ -241,6 +299,16 @@ impl Claude {
     #[must_use]
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Starts the turns that give Claude no tools without the user's own hooks,
+    /// plugins, skills and `CLAUDE.md` (`claude --safe-mode`). Off unless asked
+    /// for. A turn with [`ToolPolicy::ProviderDefault`] keeps them, and so does
+    /// every turn on a Claude that does not know the option.
+    #[must_use]
+    pub fn with_isolated_launch(mut self, enabled: bool) -> Self {
+        self.isolation = Rc::new(Isolation::new(enabled));
         self
     }
 
@@ -298,6 +366,7 @@ impl Provider for Claude {
     fn invalidate_readiness(&self) {
         self.search.invalidate();
         self.account_file.invalidate();
+        self.isolation.forget();
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -358,6 +427,7 @@ impl Provider for Claude {
         if request.validate().is_err() {
             return Box::new(Scripted::failed(crate::INVALID_TURN));
         }
+        let isolate = self.isolation.applies(&executable, request.tools);
 
         let mut turn = Turn {
             stage: Stage::Done,
@@ -370,6 +440,8 @@ impl Provider for Claude {
             finish_grace: self.limits.finish,
             model: request.model,
             reasoning_effort: request.reasoning_effort,
+            isolation: Rc::clone(&self.isolation),
+            isolate,
             native_search: request.tools == ToolPolicy::NativeWebSearch,
             queue: VecDeque::new(),
             sources: SourceCollector::new(ID),
@@ -398,7 +470,7 @@ impl Provider for Claude {
                     give_up: after(self.limits.probe),
                 };
             }
-            Some(Err(_)) | None => turn.start(),
+            Some(Err(_)) | None => turn.start(false),
         }
         Box::new(turn)
     }
@@ -605,6 +677,7 @@ fn claude_args(resume: Option<&str>, model: Option<&str>, native_search: bool) -
         native_search,
         seatline_core::turn::SessionPolicy::Persistent,
         None,
+        false,
     )
 }
 
@@ -614,6 +687,7 @@ fn claude_args_for_session(
     native_search: bool,
     session_policy: seatline_core::turn::SessionPolicy,
     effort: Option<ReasoningEffort>,
+    isolate: bool,
 ) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "-p",
@@ -639,6 +713,12 @@ fn claude_args_for_session(
     .into();
     if native_search {
         args.extend(["--allowedTools", "WebSearch"].map(OsString::from));
+    }
+    if isolate {
+        // Leaves out what the user's own setup would load at every start:
+        // hooks, plugins, skills and CLAUDE.md. Settings that carry
+        // authentication or a proxy still apply.
+        args.push("--safe-mode".into());
     }
     if session_policy == seatline_core::turn::SessionPolicy::Ephemeral {
         args.push("--no-session-persistence".into());
@@ -673,6 +753,11 @@ struct Turn {
     model: Option<String>,
     /// The effort to answer with, or `None` for Claude's own default.
     reasoning_effort: Option<ReasoningEffort>,
+    isolation: Rc<Isolation>,
+    /// Whether the run in progress was started with `--safe-mode`. The question
+    /// is kept until Claude starts, so that a Claude that does not know the
+    /// option can be asked again without it.
+    isolate: bool,
     native_search: bool,
     queue: VecDeque<Update>,
     sources: SourceCollector,
@@ -707,7 +792,10 @@ enum Stage {
 }
 
 impl Turn {
-    fn start(&mut self) {
+    /// Starts `claude -p` and hands it the question. `relaunch` says an earlier
+    /// run of this turn was rejected before it began, so the application has
+    /// already heard that a process was launched.
+    fn start(&mut self, relaunch: bool) {
         self.probe_over();
         let Ok(workspace) = self.launch.workspace() else {
             return self.end(Update::Failed(NO_WORKSPACE));
@@ -718,6 +806,7 @@ impl Turn {
             self.native_search,
             self.session_policy,
             self.reasoning_effort,
+            self.isolate,
         );
         let input = serde_json::json!({
             "type": "user",
@@ -732,8 +821,12 @@ impl Turn {
             Ok(mut process) => {
                 let _ = process.write(input.as_bytes());
                 process.close_stdin();
-                self.prompt.clear();
-                self.queue.push_back(Update::Launched);
+                if !self.isolate {
+                    self.prompt.clear();
+                }
+                if !relaunch {
+                    self.queue.push_back(Update::Launched);
+                }
                 self.stage = Stage::Running(
                     LineStream::new(process, MAX_LINE_BYTES).keeping_stderr_tail(STDERR_TAIL_BYTES),
                 );
@@ -770,6 +863,7 @@ impl Turn {
                     return self.end(Update::Failed(MALFORMED_OUTPUT));
                 }
                 self.started = true;
+                self.prompt = String::new();
                 if self.session_policy == SessionPolicy::Persistent {
                     self.reported_session = Some(session.clone());
                     self.queue.push_back(Update::Session(session));
@@ -968,7 +1062,7 @@ impl Exchange for Turn {
                 Stage::Done => return None,
                 Stage::Probing { process, give_up } if Instant::now() >= *give_up => {
                     process.kill();
-                    self.start();
+                    self.start(false);
                 }
                 Stage::Probing { process, give_up } => {
                     match process.next_event(deadline.min(*give_up)) {
@@ -976,7 +1070,7 @@ impl Exchange for Turn {
                             Authentication::Unauthenticated => {
                                 self.end(Update::Failed(NOT_SIGNED_IN));
                             }
-                            _ => self.start(),
+                            _ => self.start(false),
                         },
                         Some(Event::Stdout(_) | Event::Stderr(_)) => {}
                         None if Instant::now() >= *give_up => {}
@@ -1005,6 +1099,18 @@ impl Exchange for Turn {
                             let effort_unknown = !self.started
                                 && self.reasoning_effort.is_some()
                                 && output::names_unknown_option(&stderr, "--effort");
+                            let safe_mode_unknown = !self.started
+                                && self.isolate
+                                && !self.cancelled
+                                && output::names_unknown_option(&stderr, "--safe-mode");
+                            if safe_mode_unknown {
+                                // Nothing ran. Ask again without the option, once,
+                                // and do not offer it to this executable again.
+                                self.isolation.remember_unsupported(&self.executable);
+                                self.isolate = false;
+                                self.start(true);
+                                continue;
+                            }
                             self.ended(&exit, session_gone, effort_unknown);
                         }
                         Some(Output::Error(_)) => {
@@ -1067,6 +1173,7 @@ mod tests {
             false,
             SessionPolicy::Persistent,
             Some(ReasoningEffort::Xhigh),
+            false,
         );
         let args: Vec<&str> = args.iter().map(|arg| arg.to_str().unwrap()).collect();
         let model = args
@@ -1107,6 +1214,7 @@ mod tests {
             false,
             SessionPolicy::Ephemeral,
             Some(ReasoningEffort::None),
+            false,
         );
         assert!(
             !args
@@ -1124,8 +1232,53 @@ mod tests {
             false,
             seatline_core::turn::SessionPolicy::Ephemeral,
             None,
+            false,
         );
         assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
+    }
+
+    #[test]
+    fn safe_mode_is_asked_for_only_when_a_turn_is_isolated() {
+        let flag = |isolate| {
+            claude_args_for_session(
+                Some("session-1"),
+                Some("sonnet"),
+                false,
+                SessionPolicy::Ephemeral,
+                Some(ReasoningEffort::Low),
+                isolate,
+            )
+            .iter()
+            .any(|arg| arg == "--safe-mode")
+        };
+        assert!(flag(true));
+        assert!(!flag(false));
+        // Still the safe stream-json arguments, with or without it.
+        let args = claude_args_for_session(None, None, true, SessionPolicy::Persistent, None, true);
+        let args: Vec<&str> = args.iter().map(|arg| arg.to_str().unwrap()).collect();
+        for expected in ["--strict-mcp-config", "--safe-mode", "WebSearch"] {
+            assert!(args.contains(&expected), "{expected}: {args:?}");
+        }
+    }
+
+    #[test]
+    fn only_an_enabled_isolation_that_the_executable_knows_applies_to_a_turn_without_tools() {
+        let executable = std::env::current_exe().unwrap();
+        let off = Isolation::new(false);
+        let on = Isolation::new(true);
+        for tools in [ToolPolicy::None, ToolPolicy::NativeWebSearch] {
+            assert!(!off.applies(&executable, tools));
+            assert!(on.applies(&executable, tools));
+        }
+        // The provider's own configuration is what such a turn asked for.
+        assert!(!on.applies(&executable, ToolPolicy::ProviderDefault));
+        // An executable that did not know the option is left alone, until it
+        // changes or what was learned is forgotten.
+        on.remember_unsupported(&executable);
+        assert!(!on.applies(&executable, ToolPolicy::None));
+        assert!(on.applies(&executable.with_extension("other"), ToolPolicy::None));
+        on.forget();
+        assert!(on.applies(&executable, ToolPolicy::None));
     }
 
     #[test]
