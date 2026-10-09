@@ -5,6 +5,11 @@
 //! through stream-json on stdin/stdout. It runs one turn per process, and
 //! knows no conversations: a persistent turn reports the native session it
 //! runs in as an opaque handle, and resumes one it is given.
+//!
+//! A turn that succeeded and keeps no session ends when Claude prints its final
+//! result, not when Claude exits: the process spends about half a second more
+//! uploading its own usage analytics and removing its own session files, and is left to do
+//! that in the background ([`seatline_core::process::Reaper`]).
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -18,7 +23,7 @@ use std::time::{Duration, Instant};
 use crate::{Cleanup, Exchange, Provider, Scripted, Timeouts, Update};
 use seatline_core::discovery::{CachedSearchPath, FileStamp, SearchPath};
 use seatline_core::exchange::SessionLoss;
-use seatline_core::process::{Event, Exit, Process, ProcessSpec};
+use seatline_core::process::{Event, Exit, Process, ProcessSpec, Reaper};
 use seatline_core::prompt;
 use seatline_core::protocol::Failure as ErrorBody;
 use seatline_core::protocol::{
@@ -64,7 +69,10 @@ pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 pub struct Limits {
     pub timeouts: Timeouts,
     pub probe: Duration,
-    /// How long Claude may linger after its terminal `result` event.
+    /// How long Claude may linger after its terminal `result` event: for a
+    /// turn that keeps a session, how long the turn waits for it to save the
+    /// session and leave; for one that keeps none, how long it is left to leave
+    /// on its own, in the background, before it is stopped.
     pub finish: Duration,
 }
 
@@ -263,6 +271,9 @@ pub struct Claude {
     limits: Limits,
     account_file: readiness::AccountFile,
     isolation: Rc<Isolation>,
+    /// Waits for the processes of finished turns that keep no session: the
+    /// process-wide one, unless a test asks for its own.
+    reaper: Reaper,
 }
 
 impl Claude {
@@ -281,6 +292,7 @@ impl Claude {
             limits: LIMITS,
             account_file: readiness::AccountFile::default(),
             isolation: Rc::new(Isolation::new(false)),
+            reaper: Reaper::shared(),
         }
     }
 
@@ -309,6 +321,16 @@ impl Claude {
     #[must_use]
     pub fn with_isolated_launch(mut self, enabled: bool) -> Self {
         self.isolation = Rc::new(Isolation::new(enabled));
+        self
+    }
+
+    /// How many finished turns' processes this adapter alone may leave to exit
+    /// in the background at once, instead of sharing the process-wide bound
+    /// ([`seatline_core::process::SHARED_REAPER_CAPACITY`]). With none, every
+    /// turn waits for its own process.
+    #[must_use]
+    pub fn with_background_exits(mut self, capacity: usize) -> Self {
+        self.reaper = Reaper::new(capacity);
         self
     }
 
@@ -438,6 +460,8 @@ impl Provider for Claude {
             session_policy: request.session,
             reported_session: None,
             finish_grace: self.limits.finish,
+            stop_grace: self.limits.timeouts.stop_grace,
+            reaper: self.reaper.clone(),
             model: request.model,
             reasoning_effort: request.reasoning_effort,
             isolation: Rc::clone(&self.isolation),
@@ -749,6 +773,8 @@ struct Turn {
     /// reported again.
     reported_session: Option<String>,
     finish_grace: Duration,
+    stop_grace: Duration,
+    reaper: Reaper,
     /// The model to answer with, or `None` for Claude's own default.
     model: Option<String>,
     /// The effort to answer with, or `None` for Claude's own default.
@@ -1001,6 +1027,40 @@ impl Turn {
         self.finish_by = Some(after(self.finish_grace));
     }
 
+    /// A turn that succeeded and keeps no session has nothing left to wait for
+    /// once Claude has said its last word: the answer and its usage are in
+    /// hand, and there is no transcript for the next turn to resume. What Claude
+    /// does between its `result` and its exit is its own wrap-up, about half a
+    /// second of which is uploading its own usage analytics, and the application should not
+    /// wait through it. So the process is left to leave on its own, in the
+    /// background, and the turn completes now.
+    ///
+    /// The process is not stopped to save that time. A signal is answered by
+    /// the same wrap-up and takes as long, and a kill skips it and leaves the
+    /// session bookkeeping Claude removes on a normal exit behind in the user's
+    /// own `~/.claude`. It is waited for off the turn's path, for the same
+    /// `finish` grace the turn would have waited, and then stopped.
+    ///
+    /// A turn that keeps a session waits for the process as before: Claude is
+    /// still writing the transcript the next turn resumes. So does a failed one,
+    /// and one the reaper has no room for. A cancelled turn is already stopping
+    /// its process, which the stream refuses to release.
+    fn release_finished(&mut self) {
+        if !matches!(self.outcome, Some(Ok(()))) || self.session_policy != SessionPolicy::Ephemeral
+        {
+            return;
+        }
+        match std::mem::replace(&mut self.stage, Stage::Done) {
+            Stage::Running(stream) => {
+                match stream.release(&self.reaper, self.finish_grace, self.stop_grace) {
+                    Ok(()) => self.queue.push_back(Update::Completed),
+                    Err(stream) => self.stage = Stage::Running(*stream),
+                }
+            }
+            other => self.stage = other,
+        }
+    }
+
     /// Claude exited. `session_gone` says it reported, on stderr before `init`,
     /// that the session it was asked to resume doesn't exist; `effort_unknown`
     /// that it does not know `--effort`, which a Claude from before the option
@@ -1091,7 +1151,10 @@ impl Exchange for Turn {
                         .finish_by
                         .map_or(deadline, |finish_by| deadline.min(finish_by));
                     match stream.next(wait) {
-                        Some(Output::Line(line)) => self.on_line(&line),
+                        Some(Output::Line(line)) => {
+                            self.on_line(&line);
+                            self.release_finished();
+                        }
                         Some(Output::Final(exit) | Output::Stopped(exit)) => {
                             let stderr = String::from_utf8_lossy(stream.stderr_tail());
                             let session_gone =

@@ -374,8 +374,26 @@ impl Rig {
     /// Nothing this provider started is still running, and nothing it saved
     /// for a turn is left behind. Call it once the exchange is gone; a
     /// workspace is removed in the background, so it gets a moment.
+    ///
+    /// Every provider has reaped its process before a turn ends, except Claude
+    /// for a turn that keeps no session: that one ends at Claude's final
+    /// result and leaves the process to exit on its own, so it gets a moment
+    /// too.
     fn assert_nothing_left(&self) {
-        assert_eq!(self.still_running(), Vec::<u32>::new(), "{:?}", self.kind);
+        let leaving = match self.kind {
+            Kind::Claude => Duration::from_secs(5),
+            Kind::Codex | Kind::Gemini | Kind::Grok => Duration::ZERO,
+        };
+        let process_deadline = Instant::now() + leaving;
+        while !self.still_running().is_empty() {
+            assert!(
+                Instant::now() < process_deadline,
+                "{:?} left {:?} running",
+                self.kind,
+                self.still_running()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let give_up = Instant::now() + Duration::from_secs(5);
         while self.left_behind() > 0 {
             assert!(

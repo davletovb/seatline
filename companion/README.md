@@ -107,7 +107,11 @@ cancelled. A client that connects when all 32 slots are taken receives
 grant cancels its connected requests within one second.
 
 Provider adapters still launch one process per turn. This change centralizes
-installation and execution; it does not change warming or provider sign-in.
+installation and execution; it does not change warming or provider sign-in. A
+Claude turn that succeeded and keeps no session ends when Claude prints its
+final result, and the process finishes leaving on its own in the background
+(at most 8 at a time across applications), so an application does not wait through the half second
+Claude spends on its way out.
 
 ## Reasoning effort and ephemeral completion
 

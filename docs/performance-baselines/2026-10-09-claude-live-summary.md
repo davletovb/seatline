@@ -2,7 +2,7 @@
 
 The first live-provider baseline for Seatline. It covers **Claude only**: it is the one provider CLI installed and signed in where it was run. **Codex, Gemini and Grok have no live baseline yet**; they need a machine and an account of the owner's, and [the runbook](../performance-measurement.md#recording-a-live-baseline) gives the commands.
 
-It answers where the time goes between a request and a one-word answer on this machine, and whether Claude launch isolation (I-06) changes it. It does not say how long Claude answers on anyone's machine: see [what it may claim](#what-it-may-and-may-not-claim) at the end.
+It answers where the time goes between a request and a one-word answer on this machine, and whether Claude launch isolation (I-06) changes it. These are the numbers **before** tracker item I-05, which later ended the half second Claude spends exiting for turns that keep no session: see the [I-05 summary](2026-10-09-claude-live-i05-summary.md). It does not say how long Claude answers on anyone's machine: see [what it may claim](#what-it-may-and-may-not-claim) at the end.
 
 ## What was measured
 

@@ -99,8 +99,10 @@ pub trait Exchange {
     /// or Codex's `turn.completed`, whether the turn succeeded or failed. The
     /// terminal update comes later, once the provider's process is gone and the
     /// adapter has finished its own wrap-up, and the difference is the tail an
-    /// application waits through after its answer is complete. The default says
-    /// the adapter reports none.
+    /// application waits through after its answer is complete. An adapter that
+    /// leaves a finished process to exit on its own ([`crate::process::Reaper`])
+    /// ends the turn at the result, and its tail is next to nothing. The default
+    /// says the adapter reports none.
     fn result_at(&self) -> Option<Instant> {
         None
     }
