@@ -309,7 +309,7 @@ impl LineStream {
             .release(process, exit_grace, stop_grace)
             .map_err(|process| {
                 Box::new(Self {
-                    process,
+                    process: *process,
                     lines,
                     ready,
                     stderr_bytes,

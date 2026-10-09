@@ -597,20 +597,15 @@ impl Reaper {
     ///
     /// Gives the process back, still running, when the reaper is already
     /// waiting for as many as its capacity or the helper thread cannot start.
+    /// (Boxed, as the way back is the rare one and a process is large.)
     pub fn release(
         &self,
         process: Process,
         exit_grace: Duration,
         stop_grace: Duration,
-    ) -> Result<(), Process> {
-        let took_place = self
-            .waiting
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |waiting| {
-                (waiting < self.capacity).then_some(waiting + 1)
-            })
-            .is_ok();
-        if !took_place {
-            return Err(process);
+    ) -> Result<(), Box<Process>> {
+        if !self.take_place() {
+            return Err(Box::new(process));
         }
         // The thread starts first and the process follows, so that a thread
         // that cannot start leaves it with the caller. If it fails, the place
@@ -626,9 +621,30 @@ impl Reaper {
                 }
             });
         if spawned.is_err() {
-            return Err(process);
+            return Err(Box::new(process));
         }
-        hand_over.send(process).map_err(|error| error.0)
+        hand_over.send(process).map_err(|error| Box::new(error.0))
+    }
+
+    /// Takes one of the places, if one is free. (A compare-and-swap loop of its
+    /// own: the library's `fetch_update` is being renamed, and this builds the
+    /// same on the oldest Rust the workspace supports and on the newest.)
+    fn take_place(&self) -> bool {
+        let mut waiting = self.waiting.load(Ordering::Acquire);
+        loop {
+            if waiting >= self.capacity {
+                return false;
+            }
+            match self.waiting.compare_exchange_weak(
+                waiting,
+                waiting + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(now) => waiting = now,
+            }
+        }
     }
 }
 

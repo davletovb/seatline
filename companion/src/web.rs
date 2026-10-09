@@ -246,11 +246,14 @@ type RelaySocket =
 /// frame written while the one before it is still unacknowledged waits for that
 /// acknowledgement, which a relay may hold back for its delayed-ACK timer, so
 /// streamed text reached the browser in lumps instead of as it arrived. The
-/// option is set on the TCP socket before any TLS handshake.
+/// option is set on the TCP socket before any TLS handshake. (The error is
+/// boxed: the library's own is large, and this is the rare way out.)
 async fn connect_relay(
     endpoint: &str,
-) -> Result<(RelaySocket, tungstenite::handshake::client::Response), tungstenite::Error> {
-    tokio_tungstenite::connect_async_with_config(endpoint, None, true).await
+) -> Result<(RelaySocket, tungstenite::handshake::client::Response), Box<tungstenite::Error>> {
+    tokio_tungstenite::connect_async_with_config(endpoint, None, true)
+        .await
+        .map_err(Box::new)
 }
 
 async fn connection(
@@ -265,17 +268,21 @@ async fn connection(
     let connecting = tokio::time::timeout(timing.connect, connect_relay(endpoint));
     let (mut socket, _) = match connecting.await {
         Err(_) => return Err(End::retry("relay did not answer in time")),
-        Ok(Err(tungstenite::Error::Http(response))) => {
-            let status = response.status();
-            return Err(if matches!(status.as_u16(), 401 | 403 | 404 | 410) {
-                End::fatal(format!(
-                    "relay refused this pairing (HTTP {status}); it has expired or is not valid, run `pair` again"
-                ))
-            } else {
-                End::retry(format!("relay answered HTTP {status}"))
+        Ok(Err(failure)) => {
+            return Err(match *failure {
+                tungstenite::Error::Http(response) => {
+                    let status = response.status();
+                    if matches!(status.as_u16(), 401 | 403 | 404 | 410) {
+                        End::fatal(format!(
+                            "relay refused this pairing (HTTP {status}); it has expired or is not valid, run `pair` again"
+                        ))
+                    } else {
+                        End::retry(format!("relay answered HTTP {status}"))
+                    }
+                }
+                failure => End::Retry(io::Error::other(failure)),
             });
         }
-        Ok(Err(failure)) => return Err(End::Retry(io::Error::other(failure))),
         Ok(Ok(connected)) => connected,
     };
     socket
