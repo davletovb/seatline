@@ -142,6 +142,13 @@ pub fn parse(line: &str) -> Result<Line, Malformed> {
                         output_tokens: event
                             .pointer("/usage/output_tokens")
                             .and_then(Value::as_u64),
+                        cached_input_tokens: event
+                            .pointer("/usage/cache_read_input_tokens")
+                            .and_then(Value::as_u64),
+                        cache_write_input_tokens: event
+                            .pointer("/usage/cache_creation_input_tokens")
+                            .and_then(Value::as_u64),
+                        reasoning_output_tokens: None,
                     },
                 }
             }
@@ -225,6 +232,26 @@ pub fn names_unknown_session(message: &str) -> bool {
     ]
     .iter()
     .any(|phrase| lower.contains(phrase))
+}
+
+/// Whether Claude's message says its command line does not know `option` (given
+/// in lower case). Claude's CLI reports this on stderr and exits before it
+/// starts anything: `error: unknown option '--effort=low'`. The option has to
+/// be named on the line that says so, as a whole name: a CLI that knows it but
+/// refuses something else, and prints its usage after the error, lists it too.
+pub fn names_unknown_option(message: &str, option: &str) -> bool {
+    message.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        line.contains("unknown option") && names_whole_option(&line, option)
+    })
+}
+
+/// Whether `text` has `option` in it and not just as the start of a longer name.
+fn names_whole_option(text: &str, option: &str) -> bool {
+    text.match_indices(option).any(|(at, _)| {
+        !text[at + option.len()..]
+            .starts_with(|next: char| next.is_ascii_alphanumeric() || next == '-' || next == '_')
+    })
 }
 
 /// Classifies a failed `result` by specific phrases, never bare words such as
@@ -418,6 +445,52 @@ mod tests {
         }
     }
     #[test]
+    fn an_unknown_option_is_told_from_other_complaints() {
+        for message in [
+            "error: unknown option '--effort=low'\n",
+            "Error: Unknown option '--effort' (Did you mean --model?)",
+        ] {
+            assert!(names_unknown_option(message, "--effort"), "{message}");
+        }
+        for message in [
+            // Another option, a value Claude merely warns about, and silence.
+            "error: unknown option '--safe-mode'",
+            "Warning: Unknown --effort value 'bogus' - ignoring it",
+            "error: option '--effort <level>' argument missing",
+            "",
+        ] {
+            assert!(!names_unknown_option(message, "--effort"), "{message}");
+        }
+    }
+
+    #[test]
+    fn an_option_that_only_the_usage_text_names_is_not_the_unknown_one() {
+        // A CLI that knows both options refuses a third and prints its usage.
+        let usage = "error: unknown option '--tols'\n(Did you mean --tools?)\n\n\
+            Usage: claude [options] [prompt]\n\
+              --effort <level>   Effort level for the current session\n\
+              --safe-mode        Skip hooks, plugins and skills\n";
+        for option in ["--effort", "--safe-mode"] {
+            assert!(!names_unknown_option(usage, option), "{option}");
+        }
+        assert!(names_unknown_option(usage, "--tols"));
+        // Nor is a longer name that merely starts with it.
+        assert!(!names_unknown_option(
+            "error: unknown option '--effort-level'",
+            "--effort"
+        ));
+        assert!(!names_unknown_option(
+            "error: unknown option '--safe-mode-x'",
+            "--safe-mode"
+        ));
+        // The option on a line of its own, apart from the complaint, is not named by it.
+        assert!(!names_unknown_option(
+            "error: unknown option\n--effort\n",
+            "--effort"
+        ));
+    }
+
+    #[test]
     fn usage_includes_cache_creation_and_cache_reads() {
         let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"abc-123","usage":{"input_tokens":10,"cache_creation_input_tokens":4,"cache_read_input_tokens":6,"output_tokens":3}}"#;
         assert!(matches!(
@@ -425,7 +498,11 @@ mod tests {
             Ok(Line::ResultSuccess {
                 usage: Usage {
                     input_tokens: Some(20),
-                    output_tokens: Some(3)
+                    output_tokens: Some(3),
+                    // What the total is made of, as Claude reports it.
+                    cached_input_tokens: Some(6),
+                    cache_write_input_tokens: Some(4),
+                    reasoning_output_tokens: None,
                 },
                 ..
             })

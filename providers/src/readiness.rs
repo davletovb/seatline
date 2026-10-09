@@ -9,7 +9,7 @@ use seatline_core::protocol::{
 };
 use seatline_core::readiness::{Freshness, MAX_AGE, Readiness, SignInPolicy, Source};
 use seatline_core::telemetry::Span;
-use seatline_core::turn::Turn;
+use seatline_core::turn::{ReasoningEffort, Turn};
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
 use std::io::Read;
@@ -232,6 +232,9 @@ impl Provider for Ready {
     fn supports_preparation(&self) -> bool {
         self.provider.supports_preparation()
     }
+    fn refuses_reasoning_effort(&self, effort: ReasoningEffort) -> bool {
+        self.provider.refuses_reasoning_effort(effort)
+    }
     fn status(&self) -> Box<dyn Exchange> {
         self.check(Freshness::Fresh)
     }
@@ -274,8 +277,9 @@ impl Ready {
         if turn.validate().is_err() {
             return Box::new(Scripted::failed(crate::INVALID_TURN));
         }
-        if turn.reasoning_effort.is_some()
-            && self.provider.capabilities().reasoning_effort == Capability::Unsupported
+        if turn
+            .reasoning_effort
+            .is_some_and(|effort| self.provider.refuses_reasoning_effort(effort))
         {
             return Box::new(Scripted::failed(crate::REASONING_EFFORT_UNSUPPORTED));
         }
@@ -617,6 +621,9 @@ impl Exchange for Tracked {
     fn probe_span(&self) -> Option<Span> {
         self.exchange.probe_span()
     }
+    fn result_at(&self) -> Option<Instant> {
+        self.exchange.result_at()
+    }
 }
 
 struct PreparedSend {
@@ -706,6 +713,12 @@ impl Exchange for PreparedSend {
             .and_then(|c| c.probe_span())
             .or(self.span)
     }
+    fn result_at(&self) -> Option<Instant> {
+        // The readiness check has no provider result; the turn it let through does.
+        self.running
+            .as_ref()
+            .and_then(|running| running.result_at())
+    }
 }
 
 #[cfg(test)]
@@ -729,6 +742,10 @@ mod tests {
         fail_send: Cell<bool>,
         supported: Cell<bool>,
         effort: Cell<Capability>,
+        /// One level the adapter refuses although it takes efforts in general.
+        refused_effort: Cell<Option<seatline_core::turn::ReasoningEffort>>,
+        /// Whether a send's exchange says when it read the provider's result.
+        reports_result: Cell<bool>,
         tier: Cell<Capability>,
         sign_in: Cell<Option<seatline_core::turn::SignInClassification>>,
     }
@@ -750,6 +767,10 @@ mod tests {
         }
         fn supports_preparation(&self) -> bool {
             self.0.supported.get()
+        }
+        fn refuses_reasoning_effort(&self, effort: ReasoningEffort) -> bool {
+            self.0.refused_effort.get() == Some(effort)
+                || self.capabilities().reasoning_effort == Capability::Unsupported
         }
         fn readiness_key(&self) -> Option<Key> {
             self.0.fingerprints.set(self.0.fingerprints.get() + 1);
@@ -780,7 +801,7 @@ mod tests {
         }
         fn send(&self, _: Turn) -> Box<dyn Exchange> {
             self.0.sends.set(self.0.sends.get() + 1);
-            Box::new(if self.0.fail_send.get() {
+            let scripted = if self.0.fail_send.get() {
                 Scripted::failed(Failure {
                     code: ErrorCode::ProviderNotAuthenticated,
                     reason: "AUTH_REJECTED",
@@ -788,7 +809,25 @@ mod tests {
                 })
             } else {
                 Scripted::new([Update::Launched, Update::Started, Update::Completed])
-            })
+            };
+            if self.0.reports_result.get() {
+                Box::new(ReportsResult(scripted, Instant::now()))
+            } else {
+                Box::new(scripted)
+            }
+        }
+    }
+    /// A send that says when it read the provider's final result.
+    struct ReportsResult(Scripted, Instant);
+    impl Exchange for ReportsResult {
+        fn next(&mut self, deadline: Instant) -> Option<Update> {
+            self.0.next(deadline)
+        }
+        fn cancel(&mut self, grace: Duration) {
+            self.0.cancel(grace);
+        }
+        fn result_at(&self) -> Option<Instant> {
+            Some(self.1)
         }
     }
     struct Probe {
@@ -820,6 +859,8 @@ mod tests {
             fail_send: Cell::new(false),
             supported: Cell::new(true),
             effort: Cell::new(Capability::Supported),
+            refused_effort: Cell::new(None),
+            reports_result: Cell::new(false),
             tier: Cell::new(Capability::Supported),
             sign_in: Cell::new(None),
         });
@@ -974,6 +1015,92 @@ mod tests {
                     assert_eq!((control.probes.get(), control.sends.get()), (1, 1));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_sends_report_of_its_result_survives_both_wrappers_around_it() {
+        let (ready, control) = setup();
+        control.reports_result.set(true);
+
+        // A plain send is tracked.
+        let mut tracked = ready.send(turn(false));
+        while tracked
+            .next(Instant::now())
+            .is_some_and(|u| !u.is_terminal())
+        {}
+        assert!(tracked.result_at().is_some(), "lost by the tracked send");
+
+        // A checked send runs a readiness check first and then the turn, which is
+        // the part that has a result.
+        let mut checked = ready.send_with_readiness(turn(false), CACHED);
+        assert!(checked.result_at().is_none(), "the check has no result");
+        while checked
+            .next(Instant::now())
+            .is_some_and(|u| !u.is_terminal())
+        {}
+        assert!(checked.result_at().is_some(), "lost by the checked send");
+
+        // An adapter that reports none leaves both without one.
+        control.reports_result.set(false);
+        let mut silent = ready.send_with_readiness(turn(false), CACHED);
+        while silent
+            .next(Instant::now())
+            .is_some_and(|u| !u.is_terminal())
+        {}
+        assert!(silent.result_at().is_none());
+    }
+
+    #[test]
+    fn an_effort_refused_by_level_is_turned_away_before_readiness_and_the_others_are_not() {
+        use seatline_core::turn::SignInClassification::Subscription;
+        for protected in [false, true] {
+            let (ready, control) = setup();
+            let checked = |request: Turn| {
+                if protected {
+                    ready.send_with_readiness_policy(
+                        request,
+                        CACHED,
+                        SignInPolicy::try_from(vec![Subscription]).unwrap(),
+                    )
+                } else {
+                    ready.send_with_readiness(request, CACHED)
+                }
+            };
+            control.refused_effort.set(Some(ReasoningEffort::None));
+            // The wrapper answers for the adapter it wraps.
+            assert!(ready.refuses_reasoning_effort(ReasoningEffort::None));
+            assert!(!ready.refuses_reasoning_effort(ReasoningEffort::Low));
+            // Readiness would fail were it run at all.
+            control.authentication.set(Authentication::Unauthenticated);
+            control.availability.set(Availability::NotFound);
+            let refused = Turn {
+                reasoning_effort: Some(ReasoningEffort::None),
+                ..turn(true)
+            };
+            assert_eq!(
+                drain(checked(refused)).last(),
+                Some(&Update::Failed(crate::REASONING_EFFORT_UNSUPPORTED))
+            );
+            assert_eq!(
+                (
+                    control.probes.get(),
+                    control.fingerprints.get(),
+                    control.sends.get()
+                ),
+                (0, 0, 0)
+            );
+
+            // Any other level takes the ordinary path: one check, one send.
+            control.authentication.set(Authentication::Authenticated);
+            control.availability.set(Availability::Available);
+            control.sign_in.set(Some(Subscription));
+            let allowed = Turn {
+                reasoning_effort: Some(ReasoningEffort::Low),
+                ..turn(true)
+            };
+            assert_eq!(drain(checked(allowed)).last(), Some(&Update::Completed));
+            assert_eq!((control.probes.get(), control.sends.get()), (1, 1));
         }
     }
 

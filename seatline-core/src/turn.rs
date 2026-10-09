@@ -72,7 +72,9 @@ pub enum SessionPolicy {
 }
 
 /// A requested reasoning budget. Omission leaves the provider's own default.
-/// Adapters that cannot honor this choice refuse it before launching a turn.
+/// Adapters that cannot pass this choice on refuse it before launching a turn.
+/// It is a request: what runs is for the provider to decide, and an adapter
+/// cannot always tell which level did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
@@ -215,10 +217,30 @@ pub enum TurnError {
     InvalidCleanupGroup,
 }
 
+/// What a provider reported using for a turn.
+///
+/// The two totals are what the wire carries. The rest says where the time
+/// went, and stays inside the process that read it: it feeds phase telemetry
+/// and in-process hosts, and is neither sent nor received (`serde(skip)`), so
+/// the wire format does not change. Each is part of a total, as the provider
+/// counts it; a provider that does not report one leaves it `None`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    /// Of `input_tokens`, those served from the provider's prompt cache. A
+    /// prompt whose start changes every turn never hits it, and pays for the
+    /// whole prompt each time.
+    #[serde(skip)]
+    pub cached_input_tokens: Option<u64>,
+    /// Of `input_tokens`, those written to the provider's prompt cache: a
+    /// start of the prompt it had not seen lately.
+    #[serde(skip)]
+    pub cache_write_input_tokens: Option<u64>,
+    /// Of `output_tokens`, those the model spent reasoning before and between
+    /// its visible text.
+    #[serde(skip)]
+    pub reasoning_output_tokens: Option<u64>,
 }
 
 impl Usage {
@@ -392,11 +414,13 @@ mod tests {
         let first = Usage {
             input_tokens: Some(10),
             output_tokens: Some(3),
+            ..Usage::default()
         };
         assert!(
             Usage {
                 input_tokens: Some(10),
                 output_tokens: Some(4),
+                ..Usage::default()
             }
             .is_monotonic_after(first)
         );
@@ -404,8 +428,45 @@ mod tests {
             !Usage {
                 input_tokens: Some(9),
                 output_tokens: Some(4),
+                ..Usage::default()
             }
             .is_monotonic_after(first)
+        );
+    }
+
+    #[test]
+    fn where_the_time_went_never_reaches_the_wire() {
+        let detailed = Usage {
+            input_tokens: Some(1000),
+            output_tokens: Some(40),
+            cached_input_tokens: Some(900),
+            cache_write_input_tokens: Some(50),
+            reasoning_output_tokens: Some(30),
+        };
+        // Only the totals are serialized, so a client that checks its events
+        // strictly sees exactly what it always did.
+        let wire = serde_json::to_value(detailed).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"input_tokens": 1000, "output_tokens": 40})
+        );
+        let received: Usage = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            received,
+            Usage {
+                input_tokens: Some(1000),
+                output_tokens: Some(40),
+                ..Usage::default()
+            }
+        );
+        // And a sender that includes them is read as before.
+        let sent =
+            serde_json::json!({"input_tokens": 1, "output_tokens": 2, "cached_input_tokens": 3});
+        assert_eq!(
+            serde_json::from_value::<Usage>(sent)
+                .unwrap()
+                .cached_input_tokens,
+            None
         );
     }
 

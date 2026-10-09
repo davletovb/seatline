@@ -119,6 +119,37 @@ fn print_mode(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCod
         return Ok(ExitCode::from(2));
     }
 
+    // `exits-after-<ms>` answers, and `fails-after-<ms>` fails, and either then
+    // takes that long to leave, as a CLI does that uploads its own usage analytics on the way
+    // out. A launch records its exit only if it is allowed to get that far.
+    let leaves_after = ["exits-after-", "fails-after-"]
+        .iter()
+        .find_map(|prefix| behavior.strip_prefix(prefix))
+        .and_then(|ms| ms.parse::<u64>().ok())
+        .map(Duration::from_millis);
+    let fails_slowly = behavior.starts_with("fails-after-");
+
+    // A Claude from before an option does what its command-line parser does
+    // with any option it does not know: say so, and exit before starting. The
+    // first one on the command line is the one it names.
+    let unknown: &[&str] = match behavior {
+        "no-effort-option" => &["--effort"],
+        "no-safe-mode-option" | "slow-no-safe-mode-option" => &["--safe-mode"],
+        "no-newer-options" => &["--safe-mode", "--effort"],
+        _ => &[],
+    };
+    if let Some(option) = args
+        .iter()
+        .find(|arg| unknown.iter().any(|name| arg.starts_with(name)))
+    {
+        if behavior.starts_with("slow-") {
+            // Long enough for a test to cancel the run before it is rejected.
+            thread::sleep(Duration::from_millis(1500));
+        }
+        let _ = writeln!(io::stderr(), "error: unknown option '{option}'");
+        return Ok(ExitCode::from(1));
+    }
+
     let Some(tools) = args
         .iter()
         .position(|arg| arg == "--tools")
@@ -221,6 +252,14 @@ fn print_mode(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCod
                 &mut out,
                 &json!({"type":"result","subtype":"error_during_execution","is_error":true,"result":"rate limit exceeded (429 Too Many Requests)","session_id":result_session}),
             )?;
+            return Ok(ExitCode::from(1));
+        }
+        _ if fails_slowly => {
+            emit(
+                &mut out,
+                &json!({"type":"result","subtype":"error_during_execution","is_error":true,"result":"rate limit exceeded (429 Too Many Requests)","session_id":result_session}),
+            )?;
+            leave_after(dir, leaves_after);
             return Ok(ExitCode::from(1));
         }
         "no-result" => return Ok(ExitCode::SUCCESS),
@@ -357,16 +396,23 @@ fn print_mode(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCod
             "message":{"role":"assistant","content":[{"type":"text","text":result}]}
         }),
     )?;
-    emit(
-        &mut out,
-        &json!({
-            "type":"result",
-            "subtype":"success",
-            "is_error":false,
-            "result":result,
-            "session_id":result_session
-        }),
-    )?;
+    let mut finished = json!({
+        "type":"result",
+        "subtype":"success",
+        "is_error":false,
+        "result":result,
+        "session_id":result_session
+    });
+    if leaves_after.is_some() {
+        finished["usage"] = json!({
+            "input_tokens":11,
+            "cache_creation_input_tokens":2,
+            "cache_read_input_tokens":5,
+            "output_tokens":3
+        });
+    }
+    emit(&mut out, &finished)?;
+    leave_after(dir, leaves_after);
 
     if behavior == "lingers" {
         hang();
@@ -382,6 +428,18 @@ fn print_mode(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCod
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Takes `delay` to leave, if there is one, and records that it got to: a
+/// launch that is stopped first records nothing.
+fn leave_after(dir: &Path, delay: Option<Duration>) {
+    if let Some(delay) = delay {
+        thread::sleep(delay);
+        append(
+            &dir.join("claude-exits"),
+            &format!("{}\n", std::process::id()),
+        );
+    }
 }
 
 fn message_start(out: &mut impl Write, session: &str) -> io::Result<()> {

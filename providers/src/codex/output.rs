@@ -78,6 +78,15 @@ pub fn parse(line: &str) -> Result<Line, Malformed> {
             output_tokens: event
                 .pointer("/usage/output_tokens")
                 .and_then(Value::as_u64),
+            cached_input_tokens: event
+                .pointer("/usage/cached_input_tokens")
+                .and_then(Value::as_u64),
+            cache_write_input_tokens: event
+                .pointer("/usage/cache_write_input_tokens")
+                .and_then(Value::as_u64),
+            reasoning_output_tokens: event
+                .pointer("/usage/reasoning_output_tokens")
+                .and_then(Value::as_u64),
         }),
         "turn.failed" => Line::TurnFailed(
             event
@@ -179,7 +188,10 @@ mod tests {
                 Line::AgentMessage("Hello from the mock — ünïcödé ✓".to_owned()),
                 Line::TurnCompleted(Usage {
                     input_tokens: Some(12),
-                    output_tokens: Some(7)
+                    output_tokens: Some(7),
+                    cached_input_tokens: Some(0),
+                    cache_write_input_tokens: Some(0),
+                    reasoning_output_tokens: Some(0),
                 }),
             ]
         );
@@ -201,6 +213,35 @@ mod tests {
             Some(&Line::TurnCompleted(Usage {
                 input_tokens: Some(24),
                 output_tokens: Some(14),
+                cached_input_tokens: Some(0),
+                cache_write_input_tokens: Some(0),
+                reasoning_output_tokens: Some(0),
+            }))
+        );
+    }
+
+    #[test]
+    fn each_usage_count_lands_in_its_own_field() {
+        // Distinct numbers, which the all-zero fixtures cannot tell apart.
+        let line = r#"{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":800,"cache_write_input_tokens":50,"output_tokens":300,"reasoning_output_tokens":250}}"#;
+        assert_eq!(
+            parse(line),
+            Ok(Line::TurnCompleted(Usage {
+                input_tokens: Some(1000),
+                output_tokens: Some(300),
+                cached_input_tokens: Some(800),
+                cache_write_input_tokens: Some(50),
+                reasoning_output_tokens: Some(250),
+            }))
+        );
+        // A Codex that reports only the totals leaves the rest unknown, not zero.
+        let older = r#"{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":6}}"#;
+        assert_eq!(
+            parse(older),
+            Ok(Line::TurnCompleted(Usage {
+                input_tokens: Some(5),
+                output_tokens: Some(6),
+                ..Usage::default()
             }))
         );
     }

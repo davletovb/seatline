@@ -13,7 +13,7 @@ use seatline_core::turn::{
     Message, Namespace, Role, SessionPolicy, ToolPolicy, Turn as TurnRequest,
 };
 use seatline_providers::Provider;
-use seatline_providers::claude::Claude;
+use seatline_providers::claude::{Claude, Limits as ClaudeLimits};
 use seatline_providers::codex::{Codex, Limits as CodexLimits};
 use seatline_scheduler::{EndReason, Event, TimeoutKind};
 use seatline_service::{CONSUMER_TOO_SLOW, Limits, Runtime, Turn as ServiceTurn, TurnFactory};
@@ -178,6 +178,35 @@ fn a_dropped_turn_stops_its_provider() {
     wait_until("the process outlived its dropped turn", || {
         fake.still_running().is_empty()
     });
+}
+
+#[test]
+fn stopping_the_service_stops_the_process_a_finished_claude_turn_left_to_leave() {
+    // The turn ended at Claude's result, and the fake never leaves after it.
+    // Its adapter is given long enough that only the service's stopping can be
+    // what ends the process.
+    let fake = FakeClaude::install(FIXTURES, "lingers", "signed-in");
+    let dir = fake.dir.clone();
+    let runtime = service(move || {
+        Claude::new(SearchPath::new([dir.clone()]), dir.join("claude-work")).with_limits(
+            ClaudeLimits {
+                finish: Duration::from_secs(20),
+                ..CLAUDE_TEST_LIMITS
+            },
+        )
+    });
+    let mut turn = runtime.start_turn(ask("Say hello")).unwrap();
+    let (_, reason) = finish(&mut turn);
+    assert_eq!(reason, EndReason::Completed);
+    drop(turn);
+    #[cfg(unix)]
+    assert!(
+        !fake.still_running().is_empty(),
+        "the process had already gone"
+    );
+
+    drop(runtime);
+    fake.assert_nothing_left_running();
 }
 
 #[test]

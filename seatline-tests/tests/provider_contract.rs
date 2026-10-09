@@ -86,7 +86,7 @@ fn unsupported_service_tiers_are_refused_before_direct_or_readiness_processes() 
 
 #[test]
 fn adapters_refuse_an_effort_choice_they_cannot_honor_without_launching() {
-    for kind in [Kind::Claude, Kind::Gemini, Kind::Grok] {
+    for kind in [Kind::Gemini, Kind::Grok] {
         for missing in [false, true] {
             let rig = if missing {
                 Rig::without_executable(kind)
@@ -129,6 +129,52 @@ fn adapters_refuse_an_effort_choice_they_cannot_honor_without_launching() {
                 assert_eq!(rig.command_lines(), "");
                 rig.assert_nothing_left();
             }
+        }
+    }
+}
+
+#[test]
+fn claude_takes_every_effort_but_none_and_refuses_that_one_before_any_probe_or_launch() {
+    for missing in [false, true] {
+        let rig = if missing {
+            Rig::without_executable(Kind::Claude)
+        } else {
+            Rig::new(Kind::Claude, Behaviour::Answers)
+        };
+        assert_eq!(
+            rig.provider.capabilities().reasoning_effort,
+            Capability::Supported
+        );
+        let ready = Ready::boxed(match &rig.fixture {
+            Fixture::Claude(fake) => Box::new(fake.adapter()),
+            _ => unreachable!(),
+        });
+        let request = Turn {
+            reasoning_effort: Some(ReasoningEffort::None),
+            ..rig.ask("hi")
+        };
+        // Claude has no such level. Neither a status probe nor a generation may
+        // launch, even when readiness would fail because the executable is
+        // absent: the answer to a level it lacks does not depend on the machine.
+        for mut exchange in [
+            rig.provider.send(request.clone()),
+            ready.send_with_readiness(request.clone(), Freshness::Fresh),
+            ready.send_with_readiness_policy(
+                request,
+                Freshness::Fresh,
+                SignInPolicy::try_from(vec![
+                    seatline_core::turn::SignInClassification::Subscription,
+                ])
+                .unwrap(),
+            ),
+        ] {
+            let updates = run_to_end(exchange.as_mut());
+            assert_eq!(
+                failure(&updates),
+                (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+            );
+            assert_eq!(rig.command_lines(), "");
+            rig.assert_nothing_left();
         }
     }
 }
@@ -328,8 +374,26 @@ impl Rig {
     /// Nothing this provider started is still running, and nothing it saved
     /// for a turn is left behind. Call it once the exchange is gone; a
     /// workspace is removed in the background, so it gets a moment.
+    ///
+    /// Every provider has reaped its process before a turn ends, except Claude
+    /// for a turn that keeps no session: that one ends at Claude's final
+    /// result and leaves the process to exit on its own, so it gets a moment
+    /// too.
     fn assert_nothing_left(&self) {
-        assert_eq!(self.still_running(), Vec::<u32>::new(), "{:?}", self.kind);
+        let leaving = match self.kind {
+            Kind::Claude => Duration::from_secs(5),
+            Kind::Codex | Kind::Gemini | Kind::Grok => Duration::ZERO,
+        };
+        let process_deadline = Instant::now() + leaving;
+        while !self.still_running().is_empty() {
+            assert!(
+                Instant::now() < process_deadline,
+                "{:?} left {:?} running",
+                self.kind,
+                self.still_running()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let give_up = Instant::now() + Duration::from_secs(5);
         while self.left_behind() > 0 {
             assert!(

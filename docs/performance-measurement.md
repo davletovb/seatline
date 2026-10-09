@@ -1,6 +1,6 @@
 # Measuring performance
 
-How Seatline's startup and request overhead is measured, what a measurement may and may not be used to claim, the baseline captured before any speedup work, and the budgets that baseline sets. It is the method behind tracker items B-01 to B-03; the [implementation tracker](performance-implementation-tracker.md) says what is done.
+How Seatline's startup and request overhead is measured, what a measurement may and may not be used to claim, the baseline captured before any speedup work, and the budgets that baseline sets. It is the method behind tracker items B-01 to B-03 and I-04; the [implementation tracker](performance-implementation-tracker.md) says what is done.
 
 Two parts make it up:
 
@@ -15,12 +15,13 @@ A request's latency depends on what is already warm. The harness measures **stat
 | --- | --- | --- |
 | `cold_broker_fresh_provider` | No broker is running. The application's client starts one, connects, and sends one request; the provider is a fresh process. | `cold-broker`, and `cold-three-app` (three applications start together) |
 | `warm_broker_fresh_provider` | A broker is running. Each request is a new connection, as the shipped client makes it, and runs a fresh provider process. | `warm-send`, `warm-send-adapter`, `warm-send-shared`, `warm-send-probe`, `warm-status`, `short-isolated-paced`, `three-app-short`, `short-contended` |
+| `prepared_broker_fresh_provider` | As warm, but the application has just called `prepare` and then sends with `send_ready`, accepting readiness evidence up to 30 s old: the send runs no sign-in probe, and the provider is a fresh process. The `prepare` before each request is not measured. | `prepared-send` |
 | `resumed_context` | As warm, but each request continues the provider-side conversation the last one started, in a fresh process. | `resumed-context` |
 | `reused_process` | One provider process serving several requests. | `reused-process`: **unsupported** until a persistent-provider adapter exists (tracker E-02). It is reported as unsupported with that reason, never as a number. |
 
 **Preparation is reported apart from submit-to-text.** `prepare` is everything the application does before it can send: connecting (starting the broker, when cold) and the authentication handshake. `submit→text` runs from sending the request to the first visible answer text. `start→text` is the two together, from the application's own start of the request; it is the one figure that means the same thing over the wire and through the shipped `RemoteProvider`, which cannot time its connect apart. Cold work stays visible: the cold scenario reports `prepare`, it does not hide it.
 
-**Two views of every request.** The *client* view (`client_*` metrics) is what the application saw, from its own monotonic clock. The *broker* view (`broker_*` metrics) is the broker's own [phase telemetry](telemetry.md): `queue_wait`, `sign_in_probe`, `provider_init`, `first_text`, `completion`, `cleanup`, and the broker side of the handshake. The harness matches them by request ID (a request through `RemoteProvider` names every request `request`, so those are matched by order, and not at all if the counts disagree). Their difference bounds what the socket and the application's own scheduling add.
+**Two views of every request.** The *client* view (`client_*` metrics) is what the application saw, from its own monotonic clock. The *broker* view (`broker_*` metrics) is the broker's own [phase telemetry](telemetry.md): `queue_wait`, `sign_in_probe`, `provider_init`, `first_text`, `completion`, `cleanup`, the `tail` after the provider's final result (where the adapter reports one; it overlaps `completion` and is not a phase), and the broker side of the handshake. The harness matches them by request ID (a request through `RemoteProvider` names every request `request`, so those are matched by order, and not at all if the counts disagree). Their difference bounds what the socket and the application's own scheduling add.
 
 **Process and probe counts** come from two independent sources that must agree: the broker's telemetry (`probes`, `launches` per request) and, with the fake provider, the fake CLI's own invocation log. The harness's tests assert that they do.
 
@@ -49,7 +50,7 @@ target/release/seatline-bench compare before.json after.json
 target/release/seatline-bench overhead      # scheduler cost of phase timing
 ```
 
-Run from the repository root so the report records the revision and whether the tree has uncommitted changes. `seatline-companion` and the fake provider are looked for next to the harness binary; `--companion` and `--fake-provider` override that. `--scenario NAME` (repeatable) picks scenarios. A scenario that cannot run does not discard the others: it is kept in the report as `failed` with its reason, the run goes on, and the command exits non-zero once the report is written. A report is JSON with every measured request in it, so any summary can be recomputed; `seatline-bench report FILE.json` renders the tables.
+Run from the repository root so the report records the revision and whether the tree has uncommitted changes. `seatline-companion` and the fake provider are looked for next to the harness binary; `--companion` and `--fake-provider` override that. `--scenario NAME` (repeatable) picks scenarios. `--policy FILE` writes the owner's [`scheduling.json`](shared-hub-and-scheduling.md) into every scratch broker's data directory, after checking it with the broker's own rules, and records it in the report: how a setting is measured on and then off. A scenario that cannot run does not discard the others: it is kept in the report as `failed` with its reason, the run goes on, and the command exits non-zero once the report is written. A report is JSON with every measured request in it, so any summary can be recomputed; `seatline-bench report FILE.json` renders the tables.
 
 Reports hold no path, user name, host name or credential: only the OS and architecture, the CPU count, the compiler and companion versions, the revision, the broker's limits and the measurements. A test asserts that the scratch and source paths and the word "token" do not appear.
 
@@ -57,6 +58,7 @@ Reports hold no path, user name, host name or credential: only the OS and archit
 
 - Each simulated application is **a process of its own** (the harness runs itself as `seatline-bench app`), so a cold start goes through the shipped client's own `connect`, which starts the broker when none is running, and so that several applications compete as separate programs do.
 - **`cold-broker`** gives every sample a new data directory and broker, started by the application's client; the broker leaves by itself a second after it is idle, and the harness waits for it before the next sample.
+- **`prepared-send`** puts an unmeasured `prepare` before every measured `send_ready`, both accepting readiness evidence up to 30 s old, so the send runs no sign-in probe: its counts show no probes for the measured requests, and `requests_total` includes the prepares.
 - **Warm scenarios** start one broker and keep it up (it would leave after 120 s idle, so one orphaned by a killed harness does not linger). **Warm-up requests** are made first, not counted, and still appear in process counts (which say so).
 - **Three-application scenarios** start all applications together after each says it is ready. In `short-contended`, two applications issue back-to-back long requests (the fake provider's `slow` behavior, about 300 ms; the second starts half a request later so the two do not finish in lockstep) until the short application is done.
 - Everything runs under a scratch directory in the user's cache directory, not `/tmp`: a provider refuses to run in a directory another user could change, and `/tmp` is one. `--scratch` changes it (the path must stay short enough for a Unix socket).
@@ -69,7 +71,73 @@ SEATLINE_BENCH_LIVE=1 target/release/seatline-bench run --live codex \
     --samples 10 --warmup 1 --label "codex live" --output codex-live.json
 ```
 
-`--live PROVIDER` (`codex`, `claude`, `gemini` or `grok`) measures the real CLI installed on the machine instead of the fake. It **sends real prompts** ("Reply with the single word: ok", tools off) and uses a little of the account's quota, so it needs the explicit `SEATLINE_BENCH_LIVE=1` as well, and defaults to 5 samples with 1 warm-up. It supports the scenarios that do not need requests of a known length: `cold-broker`, `warm-send`, `warm-send-adapter`, `warm-send-shared`, `warm-send-probe`, `warm-status`, `resumed-context` and the unsupported `reused-process`. A scenario a provider's adapter cannot run is reported as **unsupported** with its reason, never dropped, never aborting the run and never measured as something else: `resumed-context` for Gemini and Grok (their one-shot modes keep no session, so the broker refuses a persistent turn) and `warm-send-probe` for Gemini and Grok (they run no sign-in probe on the send path, so it would be an ordinary send under the wrong name). It uses your real home and provider configuration (so that you are signed in) with a scratch broker data directory, and records the provider's `--version`. **No live run was made in this slice**: nothing here claims a live latency.
+`--live PROVIDER` (`codex`, `claude`, `gemini` or `grok`) measures the real CLI installed on the machine instead of the fake. It **sends real prompts** ("Reply with the single word: ok", tools off) and uses a little of the account's quota, so it needs the explicit `SEATLINE_BENCH_LIVE=1` as well, and defaults to 5 samples with 1 warm-up. It supports the scenarios that do not need requests of a known length: `cold-broker`, `warm-send`, `warm-send-adapter`, `warm-send-shared`, `warm-send-probe`, `prepared-send`, `warm-status`, `resumed-context` and the unsupported `reused-process`. A scenario a provider's adapter cannot run is reported as **unsupported** with its reason, never dropped, never aborting the run and never measured as something else: `resumed-context` for Gemini and Grok (their one-shot modes keep no session, so the broker refuses a persistent turn) and `warm-send-probe` for Gemini and Grok (they run no sign-in probe on the send path, so it would be an ordinary send under the wrong name). It uses your real home and provider configuration (so that you are signed in) with a scratch broker data directory, and records the provider's `--version`. What a live run measured, and what it may be used to claim, is [below](#recording-a-live-baseline).
+
+A live run also shows where the *answer* time went, which a fake run cannot: each sample carries the broker's `tail` (from the provider's final result to the terminal update, the wait through its process leaving) and the token counts the provider reported, including how many of the input came from its prompt cache and how many of the output were reasoning (see [phase telemetry](telemetry.md#beside-the-phases-the-tail-and-the-usage)). Read them before changing anything about how a provider is launched or ended.
+
+## Recording a live baseline
+
+A live baseline is a run of the harness against a real, signed-in CLI. It is the only measurement here that can say how long a real answer takes and how much of that time Seatline owns; a fake-provider run has no provider start-up, network or model in it. This is the method for making one, and for what it may be used to claim. The first, for Claude, is [recorded below](#live-baseline-claude-2026-10-09); Codex, Gemini and Grok are made on a machine that has them.
+
+**Before a run.**
+
+- The CLI is installed and signed in **on the machine the run is made on**, with the account whose latency matters. The run uses that machine's real home and provider configuration, so its hooks, plugins, `CLAUDE.md` or `AGENTS.md`, MCP servers and default model are all in the numbers. That is the point, and it is also why a baseline from one machine says nothing about another's.
+- It costs quota: one prompt for every request of every scenario, that is (`--samples` + `--warmup`) per scenario, plus one more for `resumed-context`. `warm-status` runs the provider's status command and sends no prompt.
+- The machine is otherwise quiet and on mains power, and the network is the one that matters (a VPN, a proxy or a hotel connection is in the numbers). Do not build or test anything while a run is going: the provider's process start-up is part of what is timed.
+- Write down what the report cannot know, because the report says no more than the CLI's `--version`: **the plan** (for example Claude Max, ChatGPT Plus, an API key), **the model** the CLI used by default, the date and time, the network, and whether the home loads hooks, plugins or MCP servers at start. Put them in the `--label` or the summary that accompanies the report.
+- A run leaves a little behind in that real home, and the harness does not remove it: a workspace directory named for the simulated application (`bench-a`) in the cache directory, and, for `resumed-context`, the provider's own saved conversations of its persistent turns (Claude's are under `~/.claude/projects/`, in a directory named for that workspace). They hold only the one-word prompts and their answers. Delete them when the runs are done.
+
+**Commands.** From the repository root, build once and then run each provider the machine has:
+
+```sh
+cargo build --release --locked -p seatline-companion -p seatline-bench
+export SEATLINE_BENCH_LIVE=1       # confirms that real prompts will be sent
+
+# Codex and Claude: sign-in probe, session resumption and prepared sends all exist.
+for p in codex claude; do
+  target/release/seatline-bench run --live $p --samples 20 --warmup 1 \
+      --scenario cold-broker --scenario warm-send --scenario warm-send-probe \
+      --scenario prepared-send --scenario warm-status --scenario resumed-context \
+      --label "$p live, <plan>, <model>, <date>" \
+      --output $p-live.json --markdown $p-live.md
+done
+
+# Gemini (Antigravity) and Grok: one-shot modes, so no session to resume and no probe on the send path.
+for p in gemini grok; do
+  target/release/seatline-bench run --live $p --samples 20 --warmup 1 \
+      --scenario cold-broker --scenario warm-send --scenario prepared-send \
+      --scenario warm-status \
+      --label "$p live, <plan>, <model>, <date>" \
+      --output $p-live.json --markdown $p-live.md
+done
+```
+
+Twenty samples is the least that gives a 95th percentile its own value (rule 5); at twenty, the commands above send 106 prompts per Claude or Codex run (five scenarios of 21, and the prompt that starts the resumed conversation) and 63 per Gemini or Grok run. For a first look, `--samples 10` roughly halves that and the report says its p95 is the maximum. `warm-send-adapter` and `warm-send-shared` add only the client's own 0.1 to 0.3 ms to `warm-send`, which seconds of provider time bury, so a live run need not repeat them. Run from the repository root so the report records the revision and whether the tree is clean.
+
+**What the phases tell apart** (broker view, in the report's columns): `init` is the provider's start-up from launch until it announces itself, and is where a CLI that loads hooks, plugins or `CLAUDE.md` pays for them; `text wait` is from then to the first visible text, which is the network and the model; `completion` is from first text to the terminal update; and `tail`, inside `completion`, is the part after the provider's final result, spent waiting for its process to leave (a Claude turn that keeps no session no longer waits, so its tail is next to nothing; `scripts/measure-claude-exit.py` shows what your Claude CLI does between its result and its exit). The sample's `usage` counts say whether the provider's prompt cache is being hit: a `cached_input` near zero on every request after the first means the prefix it sends changes from turn to turn. `queue wait`, `cleanup` and the handshake are the only phases that are purely Seatline's.
+
+**Measuring a Seatline setting.** A setting that changes how a provider is launched is measured on the same machine, in the same hour, with the same scenarios, once without it, once with it, and then **without it again**: the second run without it is the noise. The owner's [`scheduling.json`](shared-hub-and-scheduling.md#claude-launch-isolation-i-06) is passed to every scratch broker of the run with `--policy`, which checks it with the broker's own rules first and records its contents in the report. For Claude launch isolation:
+
+```sh
+S="--scenario warm-send --scenario prepared-send --scenario cold-broker"
+echo '{"claude_isolation": true}' > isolated.json
+target/release/seatline-bench run --live claude --samples 20 --warmup 1 $S --label "claude, isolation off (1)" --output off-1.json
+target/release/seatline-bench run --live claude --samples 20 --warmup 1 $S --policy isolated.json --label "claude, isolation on" --output on.json
+target/release/seatline-bench run --live claude --samples 20 --warmup 1 $S --label "claude, isolation off (2)" --output off-2.json
+target/release/seatline-bench compare off-1.json off-2.json     # the noise
+target/release/seatline-bench compare off-1.json on.json        # the effect
+```
+
+That is three runs of 63 prompts. A difference smaller than the one between the two runs without the setting is not evidence of an effect. Compare fresh turns (`warm-send`, `prepared-send`, `cold-broker`): a later run can find the provider's prompt cache warmed by an earlier one (in the Claude baseline, a resumed conversation wrote 600 to 960 tokens to the cache in the first run and none in the second), which flatters it.
+
+**What a live baseline may claim, and what it may not.**
+
+- It may say how long a one-word answer took, request by request, on this account, machine, network and hour, and how that time divides between Seatline's phases, the provider's start-up, the network and model, and the wait after the answer.
+- It may support a claim about a Seatline setting or change only through the three-run comparison above, on the same machine, and only as large as the difference is against the repeat.
+- It may **not** rank providers or models. The accounts, plans, default models, networks and CLI versions differ, and a one-word answer is not the answer anyone is waiting for. It may not carry over to another machine, account or model.
+- It may **not** say how long a long answer takes. The prompt is a single word and the reply is a few tokens, so the time that grows with the length of an answer is not in it; the fixed costs around the answer are, which is exactly what Seatline can change.
+- It may **not** claim a cold *machine*: the first request of a run follows other runs of the same CLI, whose files are in the page cache. `cold-broker` is a new broker and a new provider process, not a first start since installation.
+- A run with fewer than 20 samples may not quote a 95th percentile, and a first request after quiet time may include a prompt-cache write (`cache_write` in `usage`) that later requests do not pay.
 
 ## Baseline
 
@@ -143,6 +211,25 @@ Measured at `a8dd5af` (clean tree, release builds, fake provider, the same machi
 
 The shared client meets its budget (p50 within +0.2 ms of the bare wire) and is 0.2 to 0.3 ms below the per-exchange adapter, which is what connection reuse was worth in the baseline and **not the reason for D-01**. Run 1's p95 is two requests that stalled for reasons outside the client (see the summary); three further runs of 100 requests each had a worst case of 11.6 ms.
 
+## Live baseline: Claude, 2026-10-09
+
+Claude Code 2.1.295 on a 4-CPU cloud-sandbox container, release builds, 10 measured requests and 1 warm-up per scenario, three runs (isolation off, on, off). The full method, every table, the noise and the limits are in the [summary](performance-baselines/2026-10-09-claude-live-summary.md); raw reports: [run 1](performance-baselines/2026-10-09-claude-live-run1.json), [isolated](performance-baselines/2026-10-09-claude-live-isolated.json), [run 2](performance-baselines/2026-10-09-claude-live-run2.json). **Claude only: no Codex, Gemini or Grok baseline exists yet.** The plan is unknown, the model was the CLI's default (`claude-opus-5-5`), the prompt a single word, and the home loaded almost nothing of its own.
+
+| Warm send, p50 of run 1 / run 2 | ms |
+| --- | --- |
+| `submit→text` | 1855 / 1867 |
+| `submit→done` | 2382 / 2402 |
+| `init` (Claude starting) | 574 / 618 |
+| `text wait` (network and model) | 1284 / 1239 |
+| `completion` (first text to the end) | 476 / 516 |
+| of which `tail` (final result to Claude's exit) | 449 / 495 |
+| Seatline's own (queue wait, cleanup) | 0.011, 0.004 |
+
+- **Seatline's own time is about 2 ms of 2.4 s.** The answer time is the provider's: about a quarter is Claude starting, over half the network and model, and a fifth the wait for its process to leave.
+- **That wait, the `tail`, was steady at about 0.5 s (0.38 to 0.80 s in 149 of 150 prompts), and it is the CLI's own exit time**: run directly, without Seatline, it took 0.33 to 0.54 s after the final `result` line. It was the largest piece Seatline could act on, and tracker item I-05 has: a Claude turn that keeps no session now ends at the result and leaves the process to exit on its own. In alternating runs of the old and new code the answer's end came 382 ms sooner (16 %) against run-to-run differences of at most 41 ms, and the `tail` fell from 0.44 s to 0.1 ms; a turn that keeps a session is unchanged. See the [I-05 summary](performance-baselines/2026-10-09-claude-live-i05-summary.md), which also says why a signal and a kill were not used.
+- **A sign-in probe is 0.21 to 0.24 s**, and a prepared send pays none of it. Claude's readiness evidence survived the turns between a `prepare` and the next, six of six.
+- **Launch isolation made no measurable difference on this home** (every difference was smaller than that between the two runs without it), and there was almost nothing to drop. It stays off by default, and its effect on a machine that loads hooks or plugins is unmeasured.
+
 ## Budgets
 
 Improvement budgets set from that baseline. A budget is what a slice must demonstrate, with before and after reports from the same machine; it can be revised with a stated reason, not quietly. p50 budgets are checked at p50 (noise 0.1 ms; about 5 ms for `short-contended`); p95 budgets in whole polling steps.
@@ -163,7 +250,7 @@ Improvement budgets set from that baseline. A budget is what a slice must demons
 | D-01, G-02 | `warm-send-shared` against `warm-send`, `start→text` | `warm-send-adapter` was 6.3–6.4 against 6.2–6.3 (+0.1); **met by D-01**: `warm-send-shared` 6.1–6.3 against 6.1–6.3 (see [Slice D](#slice-d-the-shared-client-and-coordinated-startup)) | the reusable client p50 within +0.2 of the bare wire | Connection reuse is worth at most about 0.3 ms locally: justify D-01 by bounded routing, one runtime and cancellation, not latency. |
 | B-01 | scheduler cost per update, phase timing off | 105–133 ns; `main`'s scheduler 116–139 | indistinguishable from `main` | See [telemetry cost](telemetry.md#cost). |
 | B-01 | scheduler cost per update, phase timing on | +11 to +15 ns | ≤ +30 ns | |
-| E-02 to E-04 | persistent provider processes | no local baseline | **no budget set** | The fake provider has no start-up time to save, so a local baseline cannot price a reused process. Set it from a `--live` baseline and report `reused-process` as its own state. |
+| E-02 to E-04 | persistent provider processes | no local baseline | **no budget set** | The fake provider has no start-up time to save, so a local baseline cannot price a reused process. Set it from a `--live` baseline and report `reused-process` as its own state. The [first live Claude baseline](#live-baseline-claude-2026-10-09) prices a fresh process at about 0.6 s to start and 0.5 s to leave per turn on that machine, the most a reused one could save for Claude there; one provider and one sandbox do not set a budget. |
 
 Slices A-01 to A-03 have no latency budget: their gates are lifecycle bounds.
 
@@ -171,7 +258,7 @@ F-01 through F-04 add [hub-only before/after evidence](performance-baselines/202
 
 ## What this does not cover
 
-- **No live-provider baseline.** Network and model latency, a real provider's start-up and the real cost of resuming a context are unmeasured. The live mode exists and is untested against a real provider here; the budgets that depend on it (E-02 to E-04) are left open.
+- **One live-provider baseline, of Claude, from one sandbox.** Codex, Gemini and Grok have none, and the Claude one is of a one-word answer on an account of unknown plan on a home that loads almost nothing (see [what it may claim](performance-baselines/2026-10-09-claude-live-summary.md#what-it-may-and-may-not-claim)); the budgets that depend on live numbers (E-02 to E-04) are left open.
 - **One machine.** A virtualized 4-CPU Linux container. macOS and Windows (named pipes, different process start costs) are measured by the CI matrix only for correctness, not speed.
 - **Long requests are fake and fixed.** The 300 ms `slow` behavior is the only long request; contention results scale with it.
 - **Idle cost** (CPU, wakeups) and **memory** were not measured in the original B baseline. The F follow-up above measures idle cost; memory remains unmeasured.

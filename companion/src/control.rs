@@ -12,7 +12,8 @@
 //! - `stop` reads the token, connects to the broker without starting one, and sends
 //!   `{"version":1,"control":"stop","token":…}` in place of the authentication frame. The broker
 //!   answers `{"type":"stopping"}`, closes its listener, and leaves as soon as the hub has nothing
-//!   queued or running, or after [`grace`] at the latest, whichever comes first. What is still running
+//!   queued or running (a process that a finished Claude turn left to exit on its own counts), or
+//!   after [`grace`] at the latest, whichever comes first. What is still running
 //!   then is ended the way a closing broker always ends it: providers are stopped and reaped, and the
 //!   apps' connections close, so each app sees a lost connection and reconnects by itself.
 //! - The next use of Seatline starts the installed copy, as it does after an idle exit.

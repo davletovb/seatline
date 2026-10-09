@@ -43,6 +43,12 @@ pub struct Policy {
     pub max_cleanup_running: usize,
     pub interactive_burst: usize,
     pub queue_timeout_ms: u64,
+    /// Start the turns that give Claude no tools without the user's own hooks,
+    /// plugins, skills and `CLAUDE.md` (`claude --safe-mode`), which Claude
+    /// would otherwise load at every start. Off by default. A turn that leaves
+    /// the provider's own configuration in charge keeps them. Not a scheduling
+    /// limit: it lives here because this is the owner's one broker-wide file.
+    pub claude_isolation: bool,
 }
 
 impl Default for Policy {
@@ -55,6 +61,7 @@ impl Default for Policy {
             max_cleanup_running: 2,
             interactive_burst: 3,
             queue_timeout_ms: 30_000,
+            claude_isolation: false,
         }
     }
 }
@@ -87,6 +94,7 @@ impl Policy {
             ("max_cleanup_running", self.max_cleanup_running as u64),
             ("interactive_burst", self.interactive_burst as u64),
             ("queue_timeout_ms", self.queue_timeout_ms),
+            ("claude_isolation", u64::from(self.claude_isolation)),
             ("ledger_capacity", crate::ledger::CAPACITY as u64),
             ("cleanup_workers", 2),
             ("cleanup_capacity", 32),
@@ -133,5 +141,21 @@ mod tests {
             assert!(policy.validate().is_err(), "{field}");
         }
         assert!(Policy::default().validate().is_ok());
+    }
+
+    #[test]
+    fn claude_isolation_is_off_unless_the_owner_turns_it_on_and_is_reported() {
+        assert!(!Policy::default().claude_isolation);
+        assert_eq!(Policy::default().limits()["claude_isolation"], 0);
+        // An owner's file that says nothing about it leaves it off.
+        let silent: Policy = serde_json::from_str(r#"{"max_running":4}"#).unwrap();
+        assert!(!silent.claude_isolation);
+        let on: Policy = serde_json::from_str(r#"{"claude_isolation":true}"#).unwrap();
+        assert!(on.validate().is_ok() && on.claude_isolation);
+        assert_eq!(on.limits()["claude_isolation"], 1);
+        // It is a switch, not a number or a word.
+        for wrong in [r#"{"claude_isolation":1}"#, r#"{"claude_isolation":"yes"}"#] {
+            assert!(serde_json::from_str::<Policy>(wrong).is_err(), "{wrong}");
+        }
     }
 }

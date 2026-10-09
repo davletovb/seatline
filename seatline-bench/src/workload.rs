@@ -25,16 +25,30 @@ pub struct Spec {
 pub enum Method {
     Send,
     Status,
+    /// `prepare`: check readiness ahead of a send, accepting evidence up to
+    /// [`CACHED_MAX_AGE_MS`] old, as an application does when it sees the user
+    /// is about to ask.
+    Prepare,
+    /// `send_ready`: a send that checks readiness first, accepting the same
+    /// evidence, so it runs no sign-in probe when a `prepare` just made some.
+    SendReady,
 }
 
 impl Method {
+    /// The method's name on the wire.
     pub fn name(self) -> &'static str {
         match self {
             Self::Send => "send",
             Self::Status => "status",
+            Self::Prepare => "prepare",
+            Self::SendReady => "send_ready",
         }
     }
 }
+
+/// How old readiness evidence a `prepare` or a `send_ready` accepts: the most a
+/// request may ask for.
+pub const CACHED_MAX_AGE_MS: u64 = 30_000;
 
 /// How the application talks to the broker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,4 +145,13 @@ pub struct Broker {
     pub launches: u64,
     pub total_us: u64,
     pub phases_us: std::collections::BTreeMap<String, u64>,
+    /// From the provider's final result to the terminal update, for an
+    /// adapter that reports one: what the application waited after its answer
+    /// was complete. Absent from reports made before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_us: Option<u64>,
+    /// The token counts the provider reported (cached input, reasoning
+    /// output, and so on), as the broker recorded them. Counts only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<serde_json::Value>,
 }

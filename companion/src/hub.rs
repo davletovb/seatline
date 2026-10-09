@@ -11,6 +11,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
 use seatline_core::exchange::{Timeouts, Update};
+use seatline_core::process::Reaper;
 use seatline_core::protocol::ErrorCode;
 use seatline_core::telemetry::Sink;
 use seatline_core::turn::{Namespace, SessionPolicy, ToolPolicy, Turn, is_cleanup_group};
@@ -40,6 +41,10 @@ const MAX_PROVIDER_RUNNING: usize = 2;
 const MAX_SESSIONS: usize = 10_000;
 const MAX_APP_SESSIONS: usize = 2_000;
 const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+/// How long a hub that is ending waits for the processes its adapters left to
+/// exit on their own, once told to stop: a stop grace of Claude's (2 s) and a
+/// moment to kill.
+const REAPER_STOP_WAIT: Duration = Duration::from_secs(3);
 
 /// The hub's limits, by name, as telemetry reports a broker's configuration.
 pub fn limits() -> BTreeMap<&'static str, u64> {
@@ -173,6 +178,9 @@ impl seatline_core::exchange::Exchange for SessionGate {
     fn probe_span(&self) -> Option<seatline_core::telemetry::Span> {
         self.exchange.probe_span()
     }
+    fn result_at(&self) -> Option<Instant> {
+        self.exchange.result_at()
+    }
 }
 
 pub fn start(root: PathBuf) -> io::Result<SyncSender<Command>> {
@@ -289,6 +297,10 @@ impl Hub {
             self.tick();
             std::thread::sleep(Duration::from_millis(2));
         }
+        // A finished turn's process that its adapter left to exit on its own is
+        // stopped too, and reaped: the thread waiting for it ends with this
+        // process, and would leave it running.
+        Reaper::shared().stop_all(REAPER_STOP_WAIT);
     }
 
     fn authorized(&self, connection: u64) -> bool {
@@ -298,11 +310,14 @@ impl Hub {
         })
     }
 
+    /// Whether nothing is queued or running, or still leaving: a turn that
+    /// finished at its provider's result can have a process left to exit.
     fn quiet(&self) -> bool {
         self.queue.is_empty()
             && self.active.is_empty()
             && self.ledger_jobs.is_empty()
             && self.cleanup.is_empty()
+            && Reaper::shared().waiting() == 0
     }
 
     fn command(&mut self, command: Command) {
@@ -1073,7 +1088,10 @@ impl Hub {
             };
             let provider: Box<dyn Provider> = match request.provider.as_str() {
                 "codex" => Box::new(codex::Codex::installed(&layout)),
-                "claude" => Box::new(claude::Claude::installed(&layout)),
+                "claude" => Box::new(
+                    claude::Claude::installed(&layout)
+                        .with_isolated_launch(self.policy.claude_isolation),
+                ),
                 "gemini" => Box::new(gemini::Gemini::installed(&layout)),
                 "grok" => Box::new(grok::Grok::installed(&layout)),
                 _ => {
@@ -2424,6 +2442,97 @@ mod tests {
             assert!(!json.contains(private), "{private} leaked into {json}");
         }
         assert_eq!(hub.telemetry.in_flight(), 0);
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    /// A turn whose adapter says when it read the provider's final result,
+    /// and reports the counts the provider gave.
+    struct ReportsItsResult {
+        exchange: Scripted,
+        result: Instant,
+    }
+    impl Exchange for ReportsItsResult {
+        fn next(&mut self, deadline: Instant) -> Option<Update> {
+            self.exchange.next(deadline)
+        }
+        fn cancel(&mut self, grace: Duration) {
+            self.exchange.cancel(grace);
+        }
+        fn result_at(&self) -> Option<Instant> {
+            Some(self.result)
+        }
+    }
+    struct ReportingFixture;
+    impl Provider for ReportingFixture {
+        fn id(&self) -> &str {
+            "codex"
+        }
+        fn capabilities(&self) -> Capabilities {
+            codex::CAPABILITIES
+        }
+        fn timeouts(&self) -> Timeouts {
+            Fixture.timeouts()
+        }
+        fn supports_persistent_session(&self) -> bool {
+            true
+        }
+        fn status(&self) -> Box<dyn Exchange> {
+            Fixture.status()
+        }
+        fn send(&self, _: Turn) -> Box<dyn Exchange> {
+            Box::new(ReportsItsResult {
+                exchange: Scripted::new([
+                    Update::Session("raw-native-handle".into()),
+                    Update::Started,
+                    Update::Delta("answer".into()),
+                    Update::Usage(seatline_core::turn::Usage {
+                        input_tokens: Some(1_000),
+                        output_tokens: Some(300),
+                        cached_input_tokens: Some(800),
+                        cache_write_input_tokens: Some(50),
+                        reasoning_output_tokens: Some(250),
+                    }),
+                    Update::Completed,
+                ]),
+                result: Instant::now(),
+            })
+        }
+    }
+
+    #[test]
+    fn a_persistent_turns_result_time_and_usage_reach_its_record_through_the_session_gate() {
+        use seatline_core::telemetry::UsageRecord;
+        let (mut hub, mut output, memory) = telemetry_setup();
+        // A persistent turn runs behind the hub's session gate, which has to
+        // pass the adapter's report on, or the record loses it.
+        install_provider(&mut hub, "first", Box::new(ReportingFixture));
+        request(&mut hub, 1, "a", "send", turn(None));
+        settle(&mut hub);
+        let events = drain(&mut output[0]);
+        assert!(events.iter().any(|v| v["event"]["type"] == "session"));
+        let records = requests(&memory);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].outcome, Outcome::Completed);
+        assert!(records[0].tail_us.is_some(), "{:?}", records[0]);
+        assert_eq!(
+            records[0].usage,
+            Some(UsageRecord {
+                input_tokens: Some(1_000),
+                cached_input_tokens: Some(800),
+                cache_write_input_tokens: Some(50),
+                output_tokens: Some(300),
+                reasoning_output_tokens: Some(250),
+            })
+        );
+        // The application is told the totals it always was, and nothing more.
+        let usage = events
+            .iter()
+            .find(|v| v["event"]["type"] == "usage")
+            .expect("the usage reached the application");
+        assert_eq!(
+            usage["event"]["usage"],
+            json!({"input_tokens": 1_000, "output_tokens": 300})
+        );
         std::fs::remove_dir_all(&hub.root).unwrap();
     }
 

@@ -93,6 +93,19 @@ pub trait Exchange {
     fn probe_span(&self) -> Option<crate::telemetry::Span> {
         None
     }
+
+    /// When the provider reported its final result, as the adapter saw it, for
+    /// [`crate::telemetry`]: the last line of a turn, such as Claude's `result`
+    /// or Codex's `turn.completed`, whether the turn succeeded or failed. The
+    /// terminal update comes later, once the provider's process is gone and the
+    /// adapter has finished its own wrap-up, and the difference is the tail an
+    /// application waits through after its answer is complete. An adapter that
+    /// leaves a finished process to exit on its own ([`crate::process::Reaper`])
+    /// ends the turn at the result, and its tail is next to nothing. The default
+    /// says the adapter reports none.
+    fn result_at(&self) -> Option<Instant> {
+        None
+    }
 }
 
 /// How long the host lets a provider's requests take.

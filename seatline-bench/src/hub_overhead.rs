@@ -42,6 +42,7 @@ pub fn command(args: &[String]) -> io::Result<()> {
         live: None,
         scratch: crate::lab::default_scratch(),
         keep: false,
+        policy: None,
     };
     crate::require(&settings.fake_provider, "fake provider")?;
     crate::require(&settings.companion, "companion")?;

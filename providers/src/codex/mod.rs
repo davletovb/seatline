@@ -413,6 +413,7 @@ impl Provider for Codex {
             held: None,
             outcome: None,
             finish_by: None,
+            result_at: None,
             probe_span: None,
         };
         let probe_began = request.check_sign_in.then(Instant::now);
@@ -811,6 +812,8 @@ struct Turn {
     outcome: Option<Result<(), ErrorBody>>,
     /// When to stop waiting for Codex to exit after the turn ended.
     finish_by: Option<Instant>,
+    /// When Codex's final turn event was read: for telemetry.
+    result_at: Option<Instant>,
     /// The sign-in probe, when the request asked for one: for telemetry.
     probe_span: Option<Span>,
 }
@@ -1003,6 +1006,7 @@ impl Turn {
         } else {
             self.finish_grace
         };
+        self.result_at.get_or_insert_with(Instant::now);
         self.outcome = Some(outcome);
         self.finish_by = Some(after(finish));
     }
@@ -1024,6 +1028,10 @@ impl Turn {
 impl Exchange for Turn {
     fn probe_span(&self) -> Option<Span> {
         self.probe_span
+    }
+
+    fn result_at(&self) -> Option<Instant> {
+        self.result_at
     }
 
     fn next(&mut self, deadline: Instant) -> Option<Update> {

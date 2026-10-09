@@ -26,7 +26,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::process::{Event, Exit, Process};
+use crate::process::{Event, Exit, Process, Reaper};
 
 /// How long past its deadline a call keeps consuming output that arrives
 /// without giving it anything to return. A provider that never stops writing,
@@ -278,6 +278,48 @@ impl LineStream {
         };
     }
 
+    /// Ends the stream by leaving its process to `reaper`, which waits up to
+    /// `exit_grace` for it to exit on its own and then stops it: for a caller
+    /// that has all it needs from the process and would only wait for it to
+    /// leave. What the process writes from now on is discarded.
+    ///
+    /// Gives the stream back, with nothing lost, if the process has already
+    /// exited or been told to stop, if lines it wrote are still waiting to be
+    /// delivered, or if the reaper cannot take another process. (Boxed, as the
+    /// way back is the rare one.)
+    pub fn release(
+        self,
+        reaper: &Reaper,
+        exit_grace: Duration,
+        stop_grace: Duration,
+    ) -> Result<(), Box<Self>> {
+        if !matches!(self.state, State::Reading) || !self.ready.is_empty() {
+            return Err(Box::new(self));
+        }
+        let Self {
+            process,
+            lines,
+            ready,
+            stderr_bytes,
+            stderr_tail,
+            stderr_tail_limit,
+            state,
+        } = self;
+        reaper
+            .release(process, exit_grace, stop_grace)
+            .map_err(|process| {
+                Box::new(Self {
+                    process: *process,
+                    lines,
+                    ready,
+                    stderr_bytes,
+                    stderr_tail,
+                    stderr_tail_limit,
+                    state,
+                })
+            })
+    }
+
     /// Bytes the process wrote to stderr, all discarded.
     pub fn stderr_bytes(&self) -> u64 {
         self.stderr_bytes
@@ -468,5 +510,89 @@ mod tests {
             split_text("abcdefgh", 4).collect::<Vec<_>>(),
             ["abcd", "efgh"]
         );
+    }
+
+    #[cfg(unix)]
+    fn shell_stream(script: &str) -> LineStream {
+        let process =
+            Process::spawn(&crate::process::ProcessSpec::new("/bin/sh").args(["-c", script]))
+                .expect("start a shell");
+        LineStream::new(process, 1024)
+    }
+
+    #[cfg(unix)]
+    fn next_line(stream: &mut LineStream) -> Output {
+        stream
+            .next(Instant::now() + Duration::from_secs(10))
+            .expect("the process wrote or ended in time")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stream_whose_process_is_still_running_can_be_left_to_a_reaper() {
+        let mut stream = shell_stream("echo answer; sleep 0.3");
+        assert_eq!(next_line(&mut stream), Output::Line("answer".to_owned()));
+        let reaper = Reaper::new(1);
+        let released = Instant::now();
+        assert!(
+            stream
+                .release(&reaper, Duration::from_secs(30), Duration::from_secs(5))
+                .is_ok()
+        );
+        assert!(released.elapsed() < Duration::from_millis(250));
+        assert_eq!(reaper.waiting(), 1);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while reaper.waiting() > 0 {
+            assert!(Instant::now() < deadline, "the reaper never finished");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stream_with_lines_still_to_deliver_is_not_released() {
+        // Both lines are one write, so the second is read with the first.
+        let mut stream = shell_stream("printf 'first\\nsecond\\n'; sleep 30");
+        assert_eq!(next_line(&mut stream), Output::Line("first".to_owned()));
+        let mut stream = *stream
+            .release(
+                &Reaper::new(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+            .expect_err("a line it wrote was still to be delivered");
+        assert_eq!(next_line(&mut stream), Output::Line("second".to_owned()));
+        stream.cancel(Duration::from_millis(100));
+        assert!(matches!(next_line(&mut stream), Output::Stopped(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stream_that_cannot_be_released_is_given_back_whole() {
+        // The process has exited and its end has been delivered.
+        let mut stream = shell_stream("echo answer");
+        assert_eq!(next_line(&mut stream), Output::Line("answer".to_owned()));
+        assert!(matches!(next_line(&mut stream), Output::Final(_)));
+        let mut stream = *stream
+            .release(
+                &Reaper::new(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+            .expect_err("a process that has ended is not released");
+        assert!(matches!(next_line(&mut stream), Output::Final(_)));
+
+        // A reaper with no room gives the running process back.
+        let mut stream = shell_stream("echo answer; sleep 30");
+        assert_eq!(next_line(&mut stream), Output::Line("answer".to_owned()));
+        let mut stream = *stream
+            .release(
+                &Reaper::new(0),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+            .expect_err("there is no room");
+        stream.cancel(Duration::from_millis(100));
+        assert!(matches!(next_line(&mut stream), Output::Stopped(_)));
     }
 }

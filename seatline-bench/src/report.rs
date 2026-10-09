@@ -39,6 +39,10 @@ pub struct Parameters {
     pub warmup: usize,
     /// Pause between a paced application's requests.
     pub gap_ms: u64,
+    /// The owner's `scheduling.json` every scratch broker ran with, when the
+    /// run was given one (`--policy`); its absence is the broker's defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,7 +99,7 @@ fn ms(us: u64) -> String {
     format!("{:.1}", us as f64 / 1000.0)
 }
 
-const SHOWN: [(&str, &str); 10] = [
+const SHOWN: [(&str, &str); 11] = [
     ("client_prepare_us", "prepare"),
     ("client_submit_to_first_text_us", "submit→text"),
     ("client_start_to_first_text_us", "start→text"),
@@ -105,6 +109,7 @@ const SHOWN: [(&str, &str); 10] = [
     ("broker_provider_init_us", "init"),
     ("broker_first_text_us", "text wait"),
     ("broker_completion_us", "completion"),
+    ("broker_tail_us", "tail"),
     ("broker_cleanup_us", "cleanup"),
 ];
 
@@ -136,6 +141,9 @@ pub fn markdown(report: &Report) -> String {
         "{} measured requests per application after {} warm-up; p50 / p95 in milliseconds.\n",
         report.parameters.samples, report.parameters.warmup
     );
+    if let Some(policy) = &report.parameters.policy {
+        let _ = writeln!(out, "Owner policy every broker ran with: `{policy}`.\n");
+    }
     for scenario in &report.scenarios {
         let _ = writeln!(out, "### `{}` — {}\n", scenario.name, scenario.state);
         let _ = writeln!(out, "{}\n", scenario.description);
@@ -214,9 +222,18 @@ pub fn markdown(report: &Report) -> String {
 /// every metric both measured. A positive change is slower.
 pub fn compare(before: &Report, after: &Report) -> String {
     let mut out = String::new();
+    // Which owner policy a side ran with, when it was given one: a comparison
+    // of a setting on against the same setting off is the point of the option.
+    let policy = |report: &Report| {
+        report
+            .parameters
+            .policy
+            .as_ref()
+            .map_or(String::new(), |policy| format!(", policy `{policy}`"))
+    };
     let _ = writeln!(
         out,
-        "before: {} (`{}`, {})  \nafter: {} (`{}`, {})\n",
+        "before: {} (`{}`, {}{})  \nafter: {} (`{}`, {}{})\n",
         before.label,
         before
             .environment
@@ -224,6 +241,7 @@ pub fn compare(before: &Report, after: &Report) -> String {
             .as_deref()
             .map_or("unknown", |r| &r[..r.len().min(12)]),
         builds(&before.environment),
+        policy(before),
         after.label,
         after
             .environment
@@ -231,6 +249,7 @@ pub fn compare(before: &Report, after: &Report) -> String {
             .as_deref()
             .map_or("unknown", |r| &r[..r.len().min(12)]),
         builds(&after.environment),
+        policy(after),
     );
     if before.environment.os != after.environment.os
         || before.environment.arch != after.environment.arch
@@ -334,6 +353,7 @@ mod tests {
                 samples: prepare.len(),
                 warmup: 0,
                 gap_ms: 0,
+                policy: None,
             },
             scenarios: vec![Scenario {
                 name: "cold-broker".into(),
@@ -390,6 +410,26 @@ mod tests {
         assert!(!compare(&unknown, &unknown).contains("not a like-for-like"));
         // The same profile on both sides is a like-for-like comparison.
         assert!(!compare(&release_broker, &release_broker).contains("not a like-for-like"));
+    }
+
+    #[test]
+    fn a_sample_saved_before_the_tail_and_usage_were_recorded_still_loads() {
+        // The shape of a broker's account in a report made before slice I: none
+        // of the two newer fields. Reports are kept as evidence and compared
+        // against later ones, so they must keep loading.
+        let before = serde_json::json!({
+            "outcome": "completed",
+            "probes": 0,
+            "launches": 1,
+            "total_us": 6200,
+            "phases_us": {"queue_wait": 12, "completion": 5200}
+        });
+        let broker: crate::workload::Broker = serde_json::from_value(before).unwrap();
+        assert!(broker.tail_us.is_none() && broker.usage.is_none());
+        // And a sample that has neither writes neither, so old and new reports
+        // of the same run differ only by what they add.
+        let written = serde_json::to_value(&broker).unwrap();
+        assert!(written.get("tail_us").is_none() && written.get("usage").is_none());
     }
 
     #[test]

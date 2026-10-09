@@ -38,6 +38,10 @@ pub struct Settings {
     pub scratch: PathBuf,
     /// Keep the scratch directories, for looking at what a run left.
     pub keep: bool,
+    /// The owner's `scheduling.json`, written into every scratch broker's data
+    /// directory, or `None` for the broker's defaults. How a run is made with
+    /// a setting on and then off.
+    pub policy: Option<Vec<u8>>,
 }
 
 /// The variables that make the harness stand in for the companion when a
@@ -142,14 +146,18 @@ impl Lab {
         Ok(lab)
     }
 
-    /// The fake `codex`: a link to the fake provider binary under that name,
+    /// The fake `codex`: a copy of the fake provider binary under that name,
     /// whose behavior is chosen by the first word of each question.
+    ///
+    /// A copy, not a link: a link shares the binary's identity with every other
+    /// run that links it, so one run's install changes the change time the
+    /// provider's readiness evidence is tied to, and a `prepare` would find its
+    /// evidence expired by a stranger. The copy is finished and closed before
+    /// anything is started, so nothing can be told the file is busy.
     fn install_fake_codex(&self) -> io::Result<()> {
         let name = if cfg!(windows) { "codex.exe" } else { "codex" };
         let target = self.providers.join(name);
-        if std::fs::hard_link(&self.settings.fake_provider, &target).is_err() {
-            std::fs::copy(&self.settings.fake_provider, &target)?;
-        }
+        std::fs::copy(&self.settings.fake_provider, &target)?;
         std::fs::write(
             self.providers.join("codex-scenario"),
             "exec=by-prompt\nlogin=signed-in\n",
@@ -203,6 +211,9 @@ impl Lab {
             if !status.success() {
                 return Err(io::Error::other(format!("could not authorize {app}")));
             }
+        }
+        if let Some(policy) = &self.settings.policy {
+            std::fs::write(root.join("scheduling.json"), policy)?;
         }
         Ok(Instance {
             telemetry: root.with_extension("telemetry.jsonl"),

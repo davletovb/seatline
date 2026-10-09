@@ -5,8 +5,14 @@
 //! through stream-json on stdin/stdout. It runs one turn per process, and
 //! knows no conversations: a persistent turn reports the native session it
 //! runs in as an opaque handle, and resumes one it is given.
+//!
+//! A turn that succeeded and keeps no session ends when Claude prints its final
+//! result, not when Claude exits: the process spends about half a second more
+//! uploading its own usage analytics and removing its own session files, and is left to do
+//! that in the background ([`seatline_core::process::Reaper`]).
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -15,9 +21,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::{Cleanup, Exchange, Provider, Scripted, Timeouts, Update};
-use seatline_core::discovery::{CachedSearchPath, SearchPath};
+use seatline_core::discovery::{CachedSearchPath, FileStamp, SearchPath};
 use seatline_core::exchange::SessionLoss;
-use seatline_core::process::{Event, Exit, Process, ProcessSpec};
+use seatline_core::process::{Event, Exit, Process, ProcessSpec, Reaper};
 use seatline_core::prompt;
 use seatline_core::protocol::Failure as ErrorBody;
 use seatline_core::protocol::{
@@ -28,7 +34,7 @@ use seatline_core::search::{
 };
 use seatline_core::stream::{BUSY_LIMIT, LineStream, Output};
 use seatline_core::telemetry::Span;
-use seatline_core::turn::{SessionPolicy, ToolPolicy, Turn as TurnRequest};
+use seatline_core::turn::{ReasoningEffort, SessionPolicy, ToolPolicy, Turn as TurnRequest};
 use seatline_platform::discovery;
 use seatline_platform::environment;
 use seatline_platform::forget;
@@ -63,7 +69,10 @@ pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 pub struct Limits {
     pub timeouts: Timeouts,
     pub probe: Duration,
-    /// How long Claude may linger after its terminal `result` event.
+    /// How long Claude may linger after its terminal `result` event: for a
+    /// turn that keeps a session, how long the turn waits for it to save the
+    /// session and leave; for one that keeps none, how long it is left to leave
+    /// on its own, in the background, before it is stopped.
     pub finish: Duration,
 }
 
@@ -82,12 +91,16 @@ pub const LIMITS: Limits = Limits {
 /// (`provider_prompt`). A context turn is a plain turn: Claude gets no tools
 /// at all (`--tools ""`), MCP stays blocked, and the host refuses context with
 /// search, so page text can't make Claude act, only inform its answer.
+///
+/// An explicit reasoning effort goes to `claude --effort`, for `low` to `max`;
+/// Claude has no `none`, so that one is refused (see [`effort_level`]). Whether
+/// the installed CLI and the chosen model accept a level is theirs to say.
 pub const CAPABILITIES: Capabilities = Capabilities {
     streaming: Capability::Supported,
     continuation: Capability::Supported,
     web_search: Capability::Supported,
     model_selection: Capability::Supported,
-    reasoning_effort: Capability::Unsupported,
+    reasoning_effort: Capability::Supported,
     service_tier: Capability::Unsupported,
     cancellation: Capability::Supported,
     tool_isolation: Capability::Supported,
@@ -197,11 +210,70 @@ impl Launch {
     }
 }
 
+/// Whether turns are started without the user's own customizations, and what
+/// has been learned about the installed Claude since.
+///
+/// An owner who asks for it has every turn that gives Claude no tools started
+/// with `--safe-mode`: the user's hooks, plugins, skills and `CLAUDE.md` are not
+/// loaded, which would otherwise cost time at every start and has no place in a
+/// turn an application wrote. A turn that leaves the provider's own
+/// configuration in charge ([`ToolPolicy::ProviderDefault`]) keeps them. Claude
+/// still reads its settings for authentication and network configuration, and
+/// still takes the model and effort a turn names.
+///
+/// A Claude from before the option answers `unknown option` and runs nothing.
+/// The turn is then started again without it, once, and that executable is not
+/// tried with it again until it changes.
+struct Isolation {
+    enabled: bool,
+    /// The executable that did not know `--safe-mode`, as it was then.
+    unsupported: RefCell<Option<(PathBuf, FileStamp)>>,
+}
+
+impl Isolation {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            unsupported: RefCell::new(None),
+        }
+    }
+
+    /// Whether a turn with `tools`, run by `executable`, starts in safe mode.
+    fn applies(&self, executable: &Path, tools: ToolPolicy) -> bool {
+        self.enabled && tools != ToolPolicy::ProviderDefault && !self.is_unsupported(executable)
+    }
+
+    fn is_unsupported(&self, executable: &Path) -> bool {
+        self.unsupported
+            .borrow()
+            .as_ref()
+            .is_some_and(|(path, stamp)| {
+                // Replaced or upgraded since: it may know the option now.
+                path == executable
+                    && FileStamp::read(executable).ok().flatten().as_ref() == Some(stamp)
+            })
+    }
+
+    fn remember_unsupported(&self, executable: &Path) {
+        if let Ok(Some(stamp)) = FileStamp::read(executable) {
+            *self.unsupported.borrow_mut() = Some((executable.to_path_buf(), stamp));
+        }
+    }
+
+    fn forget(&self) {
+        self.unsupported.borrow_mut().take();
+    }
+}
+
 pub struct Claude {
     search: CachedSearchPath,
     launch: Rc<Launch>,
     limits: Limits,
     account_file: readiness::AccountFile,
+    isolation: Rc<Isolation>,
+    /// Waits for the processes of finished turns that keep no session: the
+    /// process-wide one, unless a test asks for its own.
+    reaper: Reaper,
 }
 
 impl Claude {
@@ -219,6 +291,8 @@ impl Claude {
             launch: Rc::new(Launch::new(work_dir, std::env::vars_os().collect())),
             limits: LIMITS,
             account_file: readiness::AccountFile::default(),
+            isolation: Rc::new(Isolation::new(false)),
+            reaper: Reaper::shared(),
         }
     }
 
@@ -237,6 +311,26 @@ impl Claude {
     #[must_use]
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Starts the turns that give Claude no tools without the user's own hooks,
+    /// plugins, skills and `CLAUDE.md` (`claude --safe-mode`). Off unless asked
+    /// for. A turn with [`ToolPolicy::ProviderDefault`] keeps them, and so does
+    /// every turn on a Claude that does not know the option.
+    #[must_use]
+    pub fn with_isolated_launch(mut self, enabled: bool) -> Self {
+        self.isolation = Rc::new(Isolation::new(enabled));
+        self
+    }
+
+    /// How many finished turns' processes this adapter alone may leave to exit
+    /// in the background at once, instead of sharing the process-wide bound
+    /// ([`seatline_core::process::SHARED_REAPER_CAPACITY`]). With none, every
+    /// turn waits for its own process.
+    #[must_use]
+    pub fn with_background_exits(mut self, capacity: usize) -> Self {
+        self.reaper = Reaper::new(capacity);
         self
     }
 
@@ -287,9 +381,14 @@ impl Provider for Claude {
         true
     }
 
+    fn refuses_reasoning_effort(&self, effort: ReasoningEffort) -> bool {
+        effort_level(effort).is_none()
+    }
+
     fn invalidate_readiness(&self) {
         self.search.invalidate();
         self.account_file.invalidate();
+        self.isolation.forget();
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -335,7 +434,10 @@ impl Provider for Claude {
     }
 
     fn send(&self, request: TurnRequest) -> Box<dyn Exchange> {
-        if request.reasoning_effort.is_some() {
+        if request
+            .reasoning_effort
+            .is_some_and(|effort| self.refuses_reasoning_effort(effort))
+        {
             return Box::new(Scripted::failed(crate::REASONING_EFFORT_UNSUPPORTED));
         }
         if request.service_tier.is_some() {
@@ -347,6 +449,7 @@ impl Provider for Claude {
         if request.validate().is_err() {
             return Box::new(Scripted::failed(crate::INVALID_TURN));
         }
+        let isolate = self.isolation.applies(&executable, request.tools);
 
         let mut turn = Turn {
             stage: Stage::Done,
@@ -357,7 +460,12 @@ impl Provider for Claude {
             session_policy: request.session,
             reported_session: None,
             finish_grace: self.limits.finish,
+            stop_grace: self.limits.timeouts.stop_grace,
+            reaper: self.reaper.clone(),
             model: request.model,
+            reasoning_effort: request.reasoning_effort,
+            isolation: Rc::clone(&self.isolation),
+            isolate,
             native_search: request.tools == ToolPolicy::NativeWebSearch,
             queue: VecDeque::new(),
             sources: SourceCollector::new(ID),
@@ -371,6 +479,7 @@ impl Provider for Claude {
             live: false,
             outcome: None,
             finish_by: None,
+            result_at: None,
             probe_span: None,
         };
         let probe_began = request.check_sign_in.then(Instant::now);
@@ -385,9 +494,26 @@ impl Provider for Claude {
                     give_up: after(self.limits.probe),
                 };
             }
-            Some(Err(_)) | None => turn.start(),
+            Some(Err(_)) | None => turn.start(false),
         }
         Box::new(turn)
+    }
+}
+
+/// The level `claude --effort` takes for `effort`, or `None` when Claude has no
+/// such level. Claude's lowest is `low`, and a value it does not know is not an
+/// error but a warning, after which it uses its own default: so `none` must
+/// never be passed on, or an explicit choice would be silently replaced.
+/// Written out level by level, so a new `ReasoningEffort` has to be decided
+/// here rather than reaching the command line by accident.
+fn effort_level(effort: ReasoningEffort) -> Option<&'static str> {
+    match effort {
+        ReasoningEffort::None => None,
+        ReasoningEffort::Low => Some("low"),
+        ReasoningEffort::Medium => Some("medium"),
+        ReasoningEffort::High => Some("high"),
+        ReasoningEffort::Xhigh => Some("xhigh"),
+        ReasoningEffort::Max => Some("max"),
     }
 }
 
@@ -574,6 +700,8 @@ fn claude_args(resume: Option<&str>, model: Option<&str>, native_search: bool) -
         model,
         native_search,
         seatline_core::turn::SessionPolicy::Persistent,
+        None,
+        false,
     )
 }
 
@@ -582,6 +710,8 @@ fn claude_args_for_session(
     model: Option<&str>,
     native_search: bool,
     session_policy: seatline_core::turn::SessionPolicy,
+    effort: Option<ReasoningEffort>,
+    isolate: bool,
 ) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "-p",
@@ -608,11 +738,22 @@ fn claude_args_for_session(
     if native_search {
         args.extend(["--allowedTools", "WebSearch"].map(OsString::from));
     }
+    if isolate {
+        // Leaves out what the user's own setup would load at every start:
+        // hooks, plugins, skills and CLAUDE.md. Settings that carry
+        // authentication or a proxy still apply.
+        args.push("--safe-mode".into());
+    }
     if session_policy == seatline_core::turn::SessionPolicy::Ephemeral {
         args.push("--no-session-persistence".into());
     }
     if let Some(model) = model {
         args.push(format!("--model={model}").into());
+    }
+    if let Some(level) = effort.and_then(effort_level) {
+        // One argument, like the model: the level can never be read as an
+        // option of its own. `send` has already refused a level Claude lacks.
+        args.push(format!("--effort={level}").into());
     }
     if let Some(session) = resume {
         args.extend([OsString::from("--resume"), OsString::from(session)]);
@@ -632,8 +773,17 @@ struct Turn {
     /// reported again.
     reported_session: Option<String>,
     finish_grace: Duration,
+    stop_grace: Duration,
+    reaper: Reaper,
     /// The model to answer with, or `None` for Claude's own default.
     model: Option<String>,
+    /// The effort to answer with, or `None` for Claude's own default.
+    reasoning_effort: Option<ReasoningEffort>,
+    isolation: Rc<Isolation>,
+    /// Whether the run in progress was started with `--safe-mode`. The question
+    /// is kept until Claude starts, so that a Claude that does not know the
+    /// option can be asked again without it.
+    isolate: bool,
     native_search: bool,
     queue: VecDeque<Update>,
     sources: SourceCollector,
@@ -655,6 +805,8 @@ struct Turn {
     live: bool,
     outcome: Option<Result<(), ErrorBody>>,
     finish_by: Option<Instant>,
+    /// When Claude's final `result` was read: for telemetry.
+    result_at: Option<Instant>,
     /// The sign-in probe, when the request asked for one: for telemetry.
     probe_span: Option<Span>,
 }
@@ -666,7 +818,10 @@ enum Stage {
 }
 
 impl Turn {
-    fn start(&mut self) {
+    /// Starts `claude -p` and hands it the question. `relaunch` says an earlier
+    /// run of this turn was rejected before it began, so the application has
+    /// already heard that a process was launched.
+    fn start(&mut self, relaunch: bool) {
         self.probe_over();
         let Ok(workspace) = self.launch.workspace() else {
             return self.end(Update::Failed(NO_WORKSPACE));
@@ -676,6 +831,8 @@ impl Turn {
             self.model.as_deref(),
             self.native_search,
             self.session_policy,
+            self.reasoning_effort,
+            self.isolate,
         );
         let input = serde_json::json!({
             "type": "user",
@@ -690,8 +847,12 @@ impl Turn {
             Ok(mut process) => {
                 let _ = process.write(input.as_bytes());
                 process.close_stdin();
-                self.prompt.clear();
-                self.queue.push_back(Update::Launched);
+                if !self.isolate {
+                    self.prompt.clear();
+                }
+                if !relaunch {
+                    self.queue.push_back(Update::Launched);
+                }
                 self.stage = Stage::Running(
                     LineStream::new(process, MAX_LINE_BYTES).keeping_stderr_tail(STDERR_TAIL_BYTES),
                 );
@@ -728,6 +889,7 @@ impl Turn {
                     return self.end(Update::Failed(MALFORMED_OUTPUT));
                 }
                 self.started = true;
+                self.prompt = String::new();
                 if self.session_policy == SessionPolicy::Persistent {
                     self.reported_session = Some(session.clone());
                     self.queue.push_back(Update::Session(session));
@@ -860,15 +1022,55 @@ impl Turn {
     }
 
     fn turn_ended(&mut self, outcome: Result<(), ErrorBody>) {
+        self.result_at.get_or_insert_with(Instant::now);
         self.outcome = Some(outcome);
         self.finish_by = Some(after(self.finish_grace));
     }
 
+    /// A turn that succeeded and keeps no session has nothing left to wait for
+    /// once Claude has said its last word: the answer and its usage are in
+    /// hand, and there is no transcript for the next turn to resume. What Claude
+    /// does between its `result` and its exit is its own wrap-up, about half a
+    /// second of which is uploading its own usage analytics, and the application should not
+    /// wait through it. So the process is left to leave on its own, in the
+    /// background, and the turn completes now.
+    ///
+    /// The process is not stopped to save that time. A signal is answered by
+    /// the same wrap-up and takes as long, and a kill skips it and leaves the
+    /// session bookkeeping Claude removes on a normal exit behind in the user's
+    /// own `~/.claude`. It is waited for off the turn's path, for the same
+    /// `finish` grace the turn would have waited, and then stopped.
+    ///
+    /// A turn that keeps a session waits for the process as before: Claude is
+    /// still writing the transcript the next turn resumes. So does a failed one,
+    /// and one the reaper has no room for. A cancelled turn is already stopping
+    /// its process, which the stream refuses to release.
+    fn release_finished(&mut self) {
+        if !matches!(self.outcome, Some(Ok(()))) || self.session_policy != SessionPolicy::Ephemeral
+        {
+            return;
+        }
+        match std::mem::replace(&mut self.stage, Stage::Done) {
+            Stage::Running(stream) => {
+                match stream.release(&self.reaper, self.finish_grace, self.stop_grace) {
+                    Ok(()) => self.queue.push_back(Update::Completed),
+                    Err(stream) => self.stage = Stage::Running(*stream),
+                }
+            }
+            other => self.stage = other,
+        }
+    }
+
     /// Claude exited. `session_gone` says it reported, on stderr before `init`,
-    /// that the session it was asked to resume doesn't exist.
-    fn ended(&mut self, exit: &Exit, session_gone: bool) {
+    /// that the session it was asked to resume doesn't exist; `effort_unknown`
+    /// that it does not know `--effort`, which a Claude from before the option
+    /// reports instead of starting. Nothing ran in either case.
+    fn ended(&mut self, exit: &Exit, session_gone: bool, effort_unknown: bool) {
         if self.cancelled {
             return self.end(Update::Stopped);
+        }
+        if effort_unknown {
+            return self.end(Update::Failed(crate::REASONING_EFFORT_UNSUPPORTED));
         }
         let lost = self.resume.is_some()
             && !self.saw_delta
@@ -903,6 +1105,10 @@ impl Exchange for Turn {
         self.probe_span
     }
 
+    fn result_at(&self) -> Option<Instant> {
+        self.result_at
+    }
+
     fn next(&mut self, deadline: Instant) -> Option<Update> {
         let busy_until = deadline.max(after(BUSY_LIMIT));
         loop {
@@ -916,7 +1122,7 @@ impl Exchange for Turn {
                 Stage::Done => return None,
                 Stage::Probing { process, give_up } if Instant::now() >= *give_up => {
                     process.kill();
-                    self.start();
+                    self.start(false);
                 }
                 Stage::Probing { process, give_up } => {
                     match process.next_event(deadline.min(*give_up)) {
@@ -924,7 +1130,7 @@ impl Exchange for Turn {
                             Authentication::Unauthenticated => {
                                 self.end(Update::Failed(NOT_SIGNED_IN));
                             }
-                            _ => self.start(),
+                            _ => self.start(false),
                         },
                         Some(Event::Stdout(_) | Event::Stderr(_)) => {}
                         None if Instant::now() >= *give_up => {}
@@ -945,13 +1151,30 @@ impl Exchange for Turn {
                         .finish_by
                         .map_or(deadline, |finish_by| deadline.min(finish_by));
                     match stream.next(wait) {
-                        Some(Output::Line(line)) => self.on_line(&line),
+                        Some(Output::Line(line)) => {
+                            self.on_line(&line);
+                            self.release_finished();
+                        }
                         Some(Output::Final(exit) | Output::Stopped(exit)) => {
-                            let session_gone = !self.started
-                                && output::names_unknown_session(&String::from_utf8_lossy(
-                                    stream.stderr_tail(),
-                                ));
-                            self.ended(&exit, session_gone);
+                            let stderr = String::from_utf8_lossy(stream.stderr_tail());
+                            let session_gone =
+                                !self.started && output::names_unknown_session(&stderr);
+                            let effort_unknown = !self.started
+                                && self.reasoning_effort.is_some()
+                                && output::names_unknown_option(&stderr, "--effort");
+                            let safe_mode_unknown = !self.started
+                                && self.isolate
+                                && !self.cancelled
+                                && output::names_unknown_option(&stderr, "--safe-mode");
+                            if safe_mode_unknown {
+                                // Nothing ran. Ask again without the option, once,
+                                // and do not offer it to this executable again.
+                                self.isolation.remember_unsupported(&self.executable);
+                                self.isolate = false;
+                                self.start(true);
+                                continue;
+                            }
+                            self.ended(&exit, session_gone, effort_unknown);
                         }
                         Some(Output::Error(_)) => {
                             let update = if self.cancelled {
@@ -1006,14 +1229,119 @@ mod tests {
     }
 
     #[test]
+    fn an_effort_is_one_argument_after_the_model_and_before_the_session() {
+        let args = claude_args_for_session(
+            Some("session-1"),
+            Some("sonnet"),
+            false,
+            SessionPolicy::Persistent,
+            Some(ReasoningEffort::Xhigh),
+            false,
+        );
+        let args: Vec<&str> = args.iter().map(|arg| arg.to_str().unwrap()).collect();
+        let model = args
+            .iter()
+            .position(|arg| *arg == "--model=sonnet")
+            .unwrap();
+        assert_eq!(args[model + 1], "--effort=xhigh", "{args:?}");
+        assert_eq!(&args[args.len() - 2..], ["--resume", "session-1"]);
+        assert_eq!(args.iter().filter(|arg| arg.contains("effort")).count(), 1);
+
+        // No choice, no option: Claude keeps its own default.
+        let default = claude_args(None, None, false);
+        assert!(
+            !default
+                .iter()
+                .any(|arg| arg.to_string_lossy().contains("effort"))
+        );
+    }
+
+    #[test]
+    fn every_effort_has_a_claude_level_except_none() {
+        for (effort, level) in [
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+            (ReasoningEffort::Xhigh, "xhigh"),
+            (ReasoningEffort::Max, "max"),
+        ] {
+            assert_eq!(effort_level(effort), Some(level));
+            // The word a client sends is the word Claude takes.
+            assert_eq!(effort.as_str(), level);
+        }
+        // Claude would only warn about it, and answer with its default.
+        assert_eq!(effort_level(ReasoningEffort::None), None);
+        let args = claude_args_for_session(
+            None,
+            None,
+            false,
+            SessionPolicy::Ephemeral,
+            Some(ReasoningEffort::None),
+            false,
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.to_string_lossy().contains("effort")),
+            "a level Claude lacks is never passed on"
+        );
+    }
+
+    #[test]
     fn ephemeral_turns_disable_claude_session_persistence() {
         let args = claude_args_for_session(
             None,
             None,
             false,
             seatline_core::turn::SessionPolicy::Ephemeral,
+            None,
+            false,
         );
         assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
+    }
+
+    #[test]
+    fn safe_mode_is_asked_for_only_when_a_turn_is_isolated() {
+        let flag = |isolate| {
+            claude_args_for_session(
+                Some("session-1"),
+                Some("sonnet"),
+                false,
+                SessionPolicy::Ephemeral,
+                Some(ReasoningEffort::Low),
+                isolate,
+            )
+            .iter()
+            .any(|arg| arg == "--safe-mode")
+        };
+        assert!(flag(true));
+        assert!(!flag(false));
+        // Still the safe stream-json arguments, with or without it.
+        let args = claude_args_for_session(None, None, true, SessionPolicy::Persistent, None, true);
+        let args: Vec<&str> = args.iter().map(|arg| arg.to_str().unwrap()).collect();
+        for expected in ["--strict-mcp-config", "--safe-mode", "WebSearch"] {
+            assert!(args.contains(&expected), "{expected}: {args:?}");
+        }
+    }
+
+    #[test]
+    fn only_an_enabled_isolation_that_the_executable_knows_applies_to_a_turn_without_tools() {
+        let executable = std::env::current_exe().unwrap();
+        let off = Isolation::new(false);
+        let on = Isolation::new(true);
+        for tools in [ToolPolicy::None, ToolPolicy::NativeWebSearch] {
+            assert!(!off.applies(&executable, tools));
+            assert!(on.applies(&executable, tools));
+        }
+        // The provider's own configuration is what such a turn asked for.
+        assert!(!on.applies(&executable, ToolPolicy::ProviderDefault));
+        // An executable that did not know the option is left alone, until it
+        // changes or what was learned is forgotten.
+        on.remember_unsupported(&executable);
+        assert!(!on.applies(&executable, ToolPolicy::None));
+        assert!(on.applies(&executable.with_extension("other"), ToolPolicy::None));
+        on.forget();
+        assert!(on.applies(&executable, ToolPolicy::None));
     }
 
     #[test]

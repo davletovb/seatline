@@ -15,7 +15,11 @@
 //!   can't block the caller;
 //! - [`Process::terminate`] asks the process to stop and kills it when the
 //!   grace period runs out, and [`Process::kill`] kills it at once;
-//! - dropping a [`Process`] kills and reaps it.
+//! - dropping a [`Process`] kills and reaps it;
+//! - a [`Reaper`] takes over a process whose owner has what it needed from it,
+//!   waits for it to exit on its own off the owner's path, and stops it only if
+//!   it does not within a grace period. Its helper threads end with the host
+//!   process, so a host that is about to exit calls [`Reaper::stop_all`].
 //!
 //! On POSIX the child leads a new process group. Stopping it signals the whole
 //! group, so the processes it started stop too, and when it exits on its own
@@ -28,7 +32,9 @@ use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -522,6 +528,200 @@ impl Drop for Process {
     }
 }
 
+/// Waits for finished processes to leave, so that their owners need not.
+///
+/// A provider's CLI can go on working after it has said all it has to say: it
+/// uploads its own usage analytics, removes its own bookkeeping files, and only then exits.
+/// An owner that needs nothing more from the process, because it has the answer
+/// and there is no session left to save, hands it to a reaper and goes on. The
+/// process is not stopped to make that quicker: a signal is answered by the
+/// same wrap-up, and a kill would skip it and leave the CLI's own files behind.
+/// A helper thread waits for it instead, up to a grace period. One that has not
+/// left by then is asked to stop and, if that is not enough, killed, as an
+/// owner that waited would have done.
+///
+/// A reaper waits for at most as many processes as its capacity, so that a
+/// burst of turns cannot pile up helper threads or processes: past that,
+/// [`Reaper::release`] gives the process back and its owner waits for it as it
+/// did before. Clones share the count.
+///
+/// Adapters share one, [`Reaper::shared`], so that the bound is on the whole
+/// process (every application a broker serves) and not on each adapter.
+///
+/// The helper threads are not joined by anything, and they end with the host
+/// process: a host that exits while one is waiting leaves its child behind,
+/// running, with nobody to stop it. A host that is about to exit, or that
+/// answers for what is still running (a broker asked to stop), therefore asks
+/// [`Reaper::waiting`] whether anything is left and ends it with
+/// [`Reaper::stop_all`] before it goes.
+#[derive(Debug, Clone)]
+pub struct Reaper {
+    waiting: Arc<AtomicUsize>,
+    /// How many times [`Reaper::stop_all`] has been called, so that a helper
+    /// thread can tell that it was called after its process was handed over.
+    stops: Arc<AtomicUsize>,
+    capacity: usize,
+}
+
+/// How often a helper thread looks up from waiting for its process to see
+/// whether it has been told to stop.
+const REAPER_POLL: Duration = Duration::from_millis(20);
+
+/// One place at a reaper, given back when the helper thread is done, however
+/// it ends.
+struct Place(Arc<AtomicUsize>);
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// How many finished processes the shared reaper waits for at once.
+pub const SHARED_REAPER_CAPACITY: usize = 8;
+
+impl Reaper {
+    /// The reaper the whole process shares, which waits for at most
+    /// [`SHARED_REAPER_CAPACITY`] processes at once whichever adapter handed
+    /// them over.
+    pub fn shared() -> Self {
+        static SHARED: OnceLock<Reaper> = OnceLock::new();
+        SHARED
+            .get_or_init(|| Reaper::new(SHARED_REAPER_CAPACITY))
+            .clone()
+    }
+
+    /// A reaper that waits for at most `capacity` processes at once. With
+    /// none, every process is given back.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            waiting: Arc::new(AtomicUsize::new(0)),
+            stops: Arc::new(AtomicUsize::new(0)),
+            capacity,
+        }
+    }
+
+    /// How many processes the helper threads are waiting for now.
+    pub fn waiting(&self) -> usize {
+        self.waiting.load(Ordering::Acquire)
+    }
+
+    /// Ends the wait for every process the reaper holds now: each is asked to
+    /// stop, given its stop grace, and killed if that is not enough, as when
+    /// its exit grace has run out. Waits up to `wait` for the helper threads to
+    /// be done and says whether they all were.
+    ///
+    /// It is for a host that is about to exit: the helper threads end with it,
+    /// and a process they were still waiting for would be left running. Only
+    /// the processes handed over before the call are stopped by it; one handed
+    /// over after is waited for as usual, so a host that goes on running (a
+    /// test, an embedding application with another runtime) loses nothing but
+    /// the rest of those processes' wait.
+    pub fn stop_all(&self, wait: Duration) -> bool {
+        self.stops.fetch_add(1, Ordering::AcqRel);
+        let now = Instant::now();
+        let give_up = now.checked_add(wait).unwrap_or(now);
+        while self.waiting() > 0 {
+            if Instant::now() >= give_up {
+                return false;
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+        true
+    }
+
+    /// Takes over `process`, which must not be needed any more: whatever it
+    /// still writes is discarded. A helper thread waits up to `exit_grace` for
+    /// it to exit and reaps it; if it has not, the thread asks it to stop,
+    /// gives it `stop_grace`, and kills it.
+    ///
+    /// Gives the process back, still running, when the reaper is already
+    /// waiting for as many as its capacity or the helper thread cannot start.
+    /// (Boxed, as the way back is the rare one and a process is large.)
+    pub fn release(
+        &self,
+        process: Process,
+        exit_grace: Duration,
+        stop_grace: Duration,
+    ) -> Result<(), Box<Process>> {
+        if !self.take_place() {
+            return Err(Box::new(process));
+        }
+        // The thread starts first and the process follows, so that a thread
+        // that cannot start leaves it with the caller. If it fails, the place
+        // goes back with the closure it was moved into.
+        let place = Place(Arc::clone(&self.waiting));
+        // Read before the thread starts, so that a stop that comes while it is
+        // starting is still a stop that came after the hand-over.
+        let stops = Arc::clone(&self.stops);
+        let handed_over_at = stops.load(Ordering::Acquire);
+        let (hand_over, receive) = mpsc::sync_channel::<Process>(1);
+        let spawned = thread::Builder::new()
+            .name("provider-reaper".to_owned())
+            .spawn(move || {
+                let _place = place;
+                if let Ok(process) = receive.recv() {
+                    let told_to_stop = || stops.load(Ordering::Acquire) != handed_over_at;
+                    wait_out(process, exit_grace, stop_grace, told_to_stop);
+                }
+            });
+        if spawned.is_err() {
+            return Err(Box::new(process));
+        }
+        hand_over.send(process).map_err(|error| Box::new(error.0))
+    }
+
+    /// Takes one of the places, if one is free. (A compare-and-swap loop of its
+    /// own: the library's `fetch_update` is being renamed, and this builds the
+    /// same on the oldest Rust the workspace supports and on the newest.)
+    fn take_place(&self) -> bool {
+        let mut waiting = self.waiting.load(Ordering::Acquire);
+        loop {
+            if waiting >= self.capacity {
+                return false;
+            }
+            match self.waiting.compare_exchange_weak(
+                waiting,
+                waiting + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(now) => waiting = now,
+            }
+        }
+    }
+}
+
+/// What a reaper's helper thread does with one process: waits for it to leave
+/// for up to `exit_grace`, or until `told_to_stop` says so, and then stops it.
+fn wait_out(
+    mut process: Process,
+    exit_grace: Duration,
+    stop_grace: Duration,
+    told_to_stop: impl Fn() -> bool,
+) {
+    process.close_stdin();
+    let now = Instant::now();
+    let give_up = now.checked_add(exit_grace).unwrap_or(now);
+    while !told_to_stop() {
+        let now = Instant::now();
+        let slice = now
+            .checked_add(REAPER_POLL)
+            .map_or(give_up, |slice| slice.min(give_up));
+        // Output nobody wants any more is read and dropped, so that a process
+        // that keeps writing is not held up by its own pipe.
+        if let Some(Event::Exited(_)) = process.next_event(slice) {
+            return;
+        }
+        if Instant::now() >= give_up {
+            break;
+        }
+    }
+    // It has not left: ask it to, and make it.
+    process.terminate(stop_grace);
+}
+
 /// Forwards `stream` in chunks until end of file, then reports it closed.
 /// Stops early once the [`Process`] is gone.
 fn read_output(mut stream: impl Read, wrap: fn(Vec<u8>) -> Output, sender: &SyncSender<Output>) {
@@ -872,5 +1072,271 @@ mod tests {
             matches!(killed.state, State::Reaped { status: Some(status), .. } if !status.success()),
             "the watch reaped the process"
         );
+    }
+
+    /// A process that has exited and been reaped no longer exists; one that has
+    /// only exited lingers as a zombie, which `kill` still finds.
+    #[cfg(unix)]
+    fn is_gone(pid: u32) -> bool {
+        use nix::errno::Errno;
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        kill(Pid::from_raw(i32::try_from(pid).expect("a pid")), None) == Err(Errno::ESRCH)
+    }
+
+    /// Waits until `reaper` waits for nothing, which is when its helper threads
+    /// are done with every process they were given.
+    #[cfg(unix)]
+    fn wait_until_idle(reaper: &Reaper) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while reaper.waiting() > 0 {
+            assert!(Instant::now() < deadline, "the reaper never finished");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn shell(script: &str) -> Process {
+        Process::spawn(&ProcessSpec::new("/bin/sh").args(["-c", script])).expect("start a shell")
+    }
+
+    /// Hands `process` over, which must be accepted.
+    #[cfg(unix)]
+    fn hand_over(reaper: &Reaper, process: Process, exit_grace: Duration, stop_grace: Duration) {
+        assert!(
+            reaper.release(process, exit_grace, stop_grace).is_ok(),
+            "the reaper had no room"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_shared_reaper_is_one_for_the_whole_process() {
+        // Only this test uses it in this test binary, so its count is its own.
+        let (one, other) = (Reaper::shared(), Reaper::shared());
+        assert_eq!(one.capacity, SHARED_REAPER_CAPACITY);
+        hand_over(
+            &one,
+            shell("sleep 0.3"),
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+        );
+        assert_eq!(other.waiting(), 1, "the two do not share a count");
+        wait_until_idle(&other);
+    }
+
+    #[test]
+    fn a_process_can_be_handed_to_another_thread() {
+        fn assert_send<T: Send>() {}
+        assert_send::<Process>();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_released_process_leaves_on_its_own_and_is_reaped_off_the_callers_path() {
+        let reaper = Reaper::new(2);
+        // It exits by itself 300 ms from now, after writing, and is given far
+        // longer than that.
+        let process = shell("echo done; sleep 0.3");
+        let pid = process.id();
+        let released = Instant::now();
+        hand_over(
+            &reaper,
+            process,
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+        );
+        assert!(
+            released.elapsed() < Duration::from_millis(250),
+            "release waited for the process"
+        );
+        assert_eq!(reaper.waiting(), 1);
+        wait_until_idle(&reaper);
+        assert!(
+            released.elapsed() >= Duration::from_millis(250),
+            "it was stopped before it left on its own: {:?}",
+            released.elapsed()
+        );
+        assert!(is_gone(pid), "left unreaped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_process_that_does_not_leave_is_asked_to_stop_and_then_killed() {
+        let reaper = Reaper::new(2);
+        // One that stops when asked, and one that ignores the request.
+        let obliging = shell("sleep 30");
+        let stubborn = shell("trap '' TERM; sleep 30");
+        let (obliging_pid, stubborn_pid) = (obliging.id(), stubborn.id());
+        let released = Instant::now();
+        for process in [obliging, stubborn] {
+            hand_over(
+                &reaper,
+                process,
+                Duration::from_millis(100),
+                Duration::from_millis(300),
+            );
+        }
+        wait_until_idle(&reaper);
+        assert!(released.elapsed() < Duration::from_secs(10));
+        assert!(is_gone(obliging_pid) && is_gone(stubborn_pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_process_that_keeps_writing_does_not_hold_a_reaper_up() {
+        let reaper = Reaper::new(1);
+        let process = shell("while :; do echo flood; echo flood >&2; done");
+        let pid = process.id();
+        hand_over(
+            &reaper,
+            process,
+            Duration::from_millis(200),
+            Duration::from_millis(200),
+        );
+        wait_until_idle(&reaper);
+        assert!(is_gone(pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reaper_gives_a_process_back_when_it_is_waiting_for_as_many_as_it_may() {
+        // No room at all: the process comes back running.
+        let mut returned = Reaper::new(0)
+            .release(
+                shell("sleep 30"),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+            .expect_err("a reaper with no capacity takes nothing");
+        assert!(!is_gone(returned.id()));
+        returned.kill();
+
+        let reaper = Reaper::new(1);
+        hand_over(
+            &reaper,
+            shell("sleep 30"),
+            Duration::from_millis(600),
+            Duration::from_millis(200),
+        );
+        let mut second = reaper
+            .release(
+                shell("sleep 30"),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+            .expect_err("it is full");
+        let pid = second.id();
+        assert!(!is_gone(pid), "the process it gave back was stopped");
+        second.kill();
+        drop(second);
+        assert!(is_gone(pid));
+
+        // A clone shares the count; once the first has left there is room again.
+        let clone = reaper.clone();
+        assert_eq!(clone.waiting(), 1);
+        wait_until_idle(&reaper);
+        hand_over(
+            &clone,
+            shell("exit 0"),
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+        );
+        wait_until_idle(&clone);
+    }
+
+    /// Long enough for a shell started just now to have set its `trap`: a
+    /// signal that comes before that kills it, whatever the script says.
+    #[cfg(unix)]
+    fn settle() {
+        thread::sleep(Duration::from_millis(150));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_all_ends_the_wait_for_every_process_and_leaves_none_behind() {
+        let reaper = Reaper::new(3);
+        // Both are given far longer than the test to leave on their own; one
+        // stops when asked, the other ignores the request.
+        let obliging = shell("sleep 30");
+        let stubborn = shell("trap '' TERM; sleep 30");
+        let (obliging_pid, stubborn_pid) = (obliging.id(), stubborn.id());
+        for process in [obliging, stubborn] {
+            hand_over(
+                &reaper,
+                process,
+                Duration::from_secs(60),
+                Duration::from_millis(300),
+            );
+        }
+        assert_eq!(reaper.waiting(), 2);
+        settle();
+        let asked = Instant::now();
+        assert!(
+            reaper.stop_all(Duration::from_secs(5)),
+            "they were not done"
+        );
+        assert!(
+            asked.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            asked.elapsed()
+        );
+        assert_eq!(reaper.waiting(), 0);
+        assert!(is_gone(obliging_pid) && is_gone(stubborn_pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_all_that_runs_out_of_patience_says_so_and_the_stop_goes_on() {
+        let reaper = Reaper::new(1);
+        let stubborn = shell("trap '' TERM; sleep 30");
+        let pid = stubborn.id();
+        hand_over(
+            &reaper,
+            stubborn,
+            Duration::from_secs(60),
+            Duration::from_millis(800),
+        );
+        settle();
+        assert!(
+            !reaper.stop_all(Duration::from_millis(100)),
+            "it was killed before its stop grace was over"
+        );
+        assert_eq!(reaper.waiting(), 1);
+        wait_until_idle(&reaper);
+        assert!(is_gone(pid));
+    }
+
+    #[test]
+    fn stop_all_with_nothing_to_stop_returns_at_once() {
+        let asked = Instant::now();
+        assert!(Reaper::new(1).stop_all(Duration::from_secs(5)));
+        assert!(asked.elapsed() < Duration::from_millis(500));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_process_handed_over_after_stop_all_is_waited_for_as_usual() {
+        // A host that goes on running (a test binary, an embedding application
+        // with another runtime) must not find its reaper shut for good.
+        let reaper = Reaper::new(1);
+        assert!(reaper.stop_all(Duration::from_secs(1)));
+        let process = shell("sleep 0.5");
+        let pid = process.id();
+        let released = Instant::now();
+        hand_over(
+            &reaper,
+            process,
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+        );
+        wait_until_idle(&reaper);
+        assert!(
+            released.elapsed() >= Duration::from_millis(450),
+            "an earlier stop_all stopped it: {:?}",
+            released.elapsed()
+        );
+        assert!(is_gone(pid));
     }
 }

@@ -1,0 +1,3104 @@
+{
+  "schema": 1,
+  "tool_version": "0.1.0-dev",
+  "mode": "live:claude",
+  "label": "claude live, launch isolation off (run 1)",
+  "environment": {
+    "os": "linux",
+    "arch": "x86_64",
+    "cpus": 4,
+    "harness_profile": "release",
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "revision": "ad026ce5dc4223110584cdcff9c0308cf7fbd843",
+    "dirty": true,
+    "companion_version": "Seatline companion 0.1.0-dev (protocol 1)",
+    "companion_profile": "release"
+  },
+  "broker": {
+    "arch": "x86_64",
+    "kind": "broker",
+    "limits": {
+      "active_poll_max_ms": 5,
+      "active_poll_min_ms": 1,
+      "claude_isolation": 0,
+      "cleanup_capacity": 32,
+      "cleanup_workers": 2,
+      "interactive_burst": 3,
+      "ledger_capacity": 32,
+      "listener_max_connections": 32,
+      "max_app_queue": 8,
+      "max_app_running": 2,
+      "max_app_sessions": 2000,
+      "max_cleanup_running": 2,
+      "max_connections": 32,
+      "max_generation_running": 6,
+      "max_provider_running": 2,
+      "max_queue": 64,
+      "max_readiness_running": 2,
+      "max_running": 8,
+      "max_sessions": 10000,
+      "prune_interval_ms": 60000,
+      "queue_timeout_ms": 30000,
+      "running_limits_per_class": 1
+    },
+    "os": "linux",
+    "protocol": 1,
+    "schema": 1,
+    "version": "0.1.0-dev"
+  },
+  "providers": {
+    "kind": "live",
+    "provider": "claude",
+    "version": "2.1.295 (Claude Code)"
+  },
+  "parameters": {
+    "samples": 10,
+    "warmup": 1,
+    "gap_ms": 40
+  },
+  "scenarios": [
+    {
+      "name": "cold-broker",
+      "state": "cold_broker_fresh_provider",
+      "status": "measured",
+      "description": "No broker is running. The application's client starts one, connects, and sends one request; the provider is a fresh process. Each sample uses a new broker and data directory. Preparation includes starting the broker.",
+      "apps": [
+        {
+          "app": "bench-a",
+          "role": "single",
+          "completed": 10,
+          "failed": 0,
+          "metrics_us": {
+            "broker_cleanup_us": {
+              "n": 10,
+              "min": 3,
+              "p50": 4,
+              "p95": 5,
+              "max": 5,
+              "mean": 4
+            },
+            "broker_completion_us": {
+              "n": 10,
+              "min": 407851,
+              "p50": 501879,
+              "p95": 620726,
+              "max": 620726,
+              "mean": 511960
+            },
+            "broker_first_text_us": {
+              "n": 10,
+              "min": 977600,
+              "p50": 1296308,
+              "p95": 2577816,
+              "max": 2577816,
+              "mean": 1386428
+            },
+            "broker_handshake_us": {
+              "n": 10,
+              "min": 131,
+              "p50": 149,
+              "p95": 253,
+              "max": 253,
+              "mean": 173
+            },
+            "broker_provider_init_us": {
+              "n": 10,
+              "min": 578607,
+              "p50": 614797,
+              "p95": 657402,
+              "max": 657402,
+              "mean": 614625
+            },
+            "broker_queue_wait_us": {
+              "n": 10,
+              "min": 12,
+              "p50": 13,
+              "p95": 40,
+              "max": 40,
+              "mean": 16
+            },
+            "broker_tail_us": {
+              "n": 10,
+              "min": 380697,
+              "p50": 475836,
+              "p95": 570783,
+              "max": 570783,
+              "mean": 481355
+            },
+            "broker_total_us": {
+              "n": 10,
+              "min": 2128395,
+              "p50": 2386086,
+              "p95": 3713466,
+              "max": 3713466,
+              "mean": 2513035
+            },
+            "client_connect_us": {
+              "n": 10,
+              "min": 2552,
+              "p50": 2639,
+              "p95": 5743,
+              "max": 5743,
+              "mean": 3000
+            },
+            "client_handshake_us": {
+              "n": 10,
+              "min": 272,
+              "p50": 662,
+              "p95": 1108,
+              "max": 1108,
+              "mean": 663
+            },
+            "client_prepare_us": {
+              "n": 10,
+              "min": 2840,
+              "p50": 3356,
+              "p95": 6067,
+              "max": 6067,
+              "mean": 3663
+            },
+            "client_start_to_first_text_us": {
+              "n": 10,
+              "min": 1621357,
+              "p50": 1915427,
+              "p95": 3215898,
+              "max": 3215898,
+              "mean": 2005095
+            },
+            "client_submit_to_complete_us": {
+              "n": 10,
+              "min": 2128961,
+              "p50": 2386513,
+              "p95": 3713843,
+              "max": 3713843,
+              "mean": 2513448
+            },
+            "client_submit_to_first_text_us": {
+              "n": 10,
+              "min": 1618001,
+              "p50": 1912174,
+              "p95": 3211890,
+              "max": 3211890,
+              "mean": 2001431
+            },
+            "client_submit_to_launched_us": {
+              "n": 10,
+              "min": 1859,
+              "p50": 2088,
+              "p95": 2363,
+              "max": 2363,
+              "mean": 2094
+            },
+            "client_submit_to_started_us": {
+              "n": 10,
+              "min": 578946,
+              "p50": 615147,
+              "p95": 657681,
+              "max": 657681,
+              "mean": 615025
+            },
+            "client_total_us": {
+              "n": 10,
+              "min": 2132361,
+              "p50": 2389829,
+              "p95": 3717896,
+              "max": 3717896,
+              "mean": 2517155
+            }
+          },
+          "samples": [
+            {
+              "id": "cold-broker-bench-a-1",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2899,
+              "handshake_us": 1108,
+              "prepare_us": 4008,
+              "submit_to_launched_us": 1859,
+              "submit_to_started_us": 634127,
+              "submit_to_first_text_us": 3211890,
+              "submit_to_complete_us": 3713843,
+              "total_us": 3717896,
+              "broker": {
+                "handshake_us": 248,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 3713466,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 501879,
+                  "first_text": 2577816,
+                  "provider_init": 633755,
+                  "queue_wait": 12
+                },
+                "tail_us": 470626,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-2",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2567,
+              "handshake_us": 272,
+              "prepare_us": 2840,
+              "submit_to_launched_us": 2177,
+              "submit_to_started_us": 657681,
+              "submit_to_first_text_us": 1781246,
+              "submit_to_complete_us": 2283722,
+              "total_us": 2286600,
+              "broker": {
+                "handshake_us": 138,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2283286,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 502381,
+                  "first_text": 1123486,
+                  "provider_init": 657402,
+                  "queue_wait": 13
+                },
+                "tail_us": 475836,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-3",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2552,
+              "handshake_us": 662,
+              "prepare_us": 3214,
+              "submit_to_launched_us": 1963,
+              "submit_to_started_us": 578946,
+              "submit_to_first_text_us": 1945116,
+              "submit_to_complete_us": 2444699,
+              "total_us": 2447955,
+              "broker": {
+                "handshake_us": 253,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2444356,
+                "phases_us": {
+                  "cleanup": 5,
+                  "completion": 499545,
+                  "first_text": 1366186,
+                  "provider_init": 578607,
+                  "queue_wait": 13
+                },
+                "tail_us": 477268,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-4",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2639,
+              "handshake_us": 634,
+              "prepare_us": 3274,
+              "submit_to_launched_us": 2077,
+              "submit_to_started_us": 583818,
+              "submit_to_first_text_us": 1788306,
+              "submit_to_complete_us": 2386513,
+              "total_us": 2389829,
+              "broker": {
+                "handshake_us": 178,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2386086,
+                "phases_us": {
+                  "cleanup": 3,
+                  "completion": 598118,
+                  "first_text": 1204550,
+                  "provider_init": 583398,
+                  "queue_wait": 17
+                },
+                "tail_us": 570783,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-5",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2677,
+              "handshake_us": 678,
+              "prepare_us": 3356,
+              "submit_to_launched_us": 2363,
+              "submit_to_started_us": 640562,
+              "submit_to_first_text_us": 1618001,
+              "submit_to_complete_us": 2128961,
+              "total_us": 2132361,
+              "broker": {
+                "handshake_us": 143,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2128395,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 510842,
+                  "first_text": 977600,
+                  "provider_init": 639932,
+                  "queue_wait": 17
+                },
+                "tail_us": 479469,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-6",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2831,
+              "handshake_us": 751,
+              "prepare_us": 3582,
+              "submit_to_launched_us": 2106,
+              "submit_to_started_us": 591824,
+              "submit_to_first_text_us": 1888272,
+              "submit_to_complete_us": 2362753,
+              "total_us": 2366376,
+              "broker": {
+                "handshake_us": 141,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2362348,
+                "phases_us": {
+                  "cleanup": 5,
+                  "completion": 474595,
+                  "first_text": 1296308,
+                  "provider_init": 591427,
+                  "queue_wait": 13
+                },
+                "tail_us": 447877,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-7",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2625,
+              "handshake_us": 873,
+              "prepare_us": 3499,
+              "submit_to_launched_us": 2088,
+              "submit_to_started_us": 630034,
+              "submit_to_first_text_us": 1952989,
+              "submit_to_complete_us": 2392096,
+              "total_us": 2395641,
+              "broker": {
+                "handshake_us": 149,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2391630,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 438981,
+                  "first_text": 1322949,
+                  "provider_init": 629680,
+                  "queue_wait": 16
+                },
+                "tail_us": 407349,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-8",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2625,
+              "handshake_us": 628,
+              "prepare_us": 3253,
+              "submit_to_launched_us": 2160,
+              "submit_to_started_us": 618531,
+              "submit_to_first_text_us": 1912174,
+              "submit_to_complete_us": 2320042,
+              "total_us": 2323336,
+              "broker": {
+                "handshake_us": 131,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2319636,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 407851,
+                  "first_text": 1293651,
+                  "provider_init": 618090,
+                  "queue_wait": 40
+                },
+                "tail_us": 380697,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-9",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 2845,
+              "handshake_us": 701,
+              "prepare_us": 3546,
+              "submit_to_launched_us": 2028,
+              "submit_to_started_us": 615147,
+              "submit_to_first_text_us": 1960514,
+              "submit_to_complete_us": 2581274,
+              "total_us": 2584870,
+              "broker": {
+                "handshake_us": 186,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2580935,
+                "phases_us": {
+                  "cleanup": 5,
+                  "completion": 620726,
+                  "first_text": 1345394,
+                  "provider_init": 614797,
+                  "queue_wait": 13
+                },
+                "tail_us": 570445,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "cold-broker-bench-a-10",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 5743,
+              "handshake_us": 324,
+              "prepare_us": 6067,
+              "submit_to_launched_us": 2124,
+              "submit_to_started_us": 599582,
+              "submit_to_first_text_us": 1955810,
+              "submit_to_complete_us": 2520582,
+              "total_us": 2526694,
+              "broker": {
+                "handshake_us": 163,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2520216,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 564686,
+                  "first_text": 1356347,
+                  "provider_init": 599166,
+                  "queue_wait": 13
+                },
+                "tail_us": 533201,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "counts": {
+        "requests_total": 11,
+        "broker_probes": 0,
+        "broker_launches": 10
+      }
+    },
+    {
+      "name": "warm-send",
+      "state": "warm_broker_fresh_provider",
+      "status": "measured",
+      "description": "A broker is already running. Each request is made on a new connection, as the shipped client does, and runs a fresh provider process. No sign-in probe.",
+      "apps": [
+        {
+          "app": "bench-a",
+          "role": "single",
+          "completed": 10,
+          "failed": 0,
+          "metrics_us": {
+            "broker_cleanup_us": {
+              "n": 10,
+              "min": 4,
+              "p50": 4,
+              "p95": 9,
+              "max": 9,
+              "mean": 4
+            },
+            "broker_completion_us": {
+              "n": 10,
+              "min": 448050,
+              "p50": 475556,
+              "p95": 689872,
+              "max": 689872,
+              "mean": 508441
+            },
+            "broker_first_text_us": {
+              "n": 10,
+              "min": 969887,
+              "p50": 1284250,
+              "p95": 1956227,
+              "max": 1956227,
+              "mean": 1334899
+            },
+            "broker_handshake_us": {
+              "n": 10,
+              "min": 140,
+              "p50": 185,
+              "p95": 315,
+              "max": 315,
+              "mean": 209
+            },
+            "broker_provider_init_us": {
+              "n": 10,
+              "min": 518477,
+              "p50": 574120,
+              "p95": 664374,
+              "max": 664374,
+              "mean": 581701
+            },
+            "broker_queue_wait_us": {
+              "n": 10,
+              "min": 8,
+              "p50": 11,
+              "p95": 28,
+              "max": 28,
+              "mean": 14
+            },
+            "broker_tail_us": {
+              "n": 10,
+              "min": 421871,
+              "p50": 449203,
+              "p95": 667723,
+              "max": 667723,
+              "mean": 481849
+            },
+            "broker_total_us": {
+              "n": 10,
+              "min": 2117574,
+              "p50": 2382040,
+              "p95": 3001437,
+              "max": 3001437,
+              "mean": 2425061
+            },
+            "client_connect_us": {
+              "n": 10,
+              "min": 46,
+              "p50": 52,
+              "p95": 70,
+              "max": 70,
+              "mean": 54
+            },
+            "client_handshake_us": {
+              "n": 10,
+              "min": 232,
+              "p50": 303,
+              "p95": 505,
+              "max": 505,
+              "mean": 335
+            },
+            "client_prepare_us": {
+              "n": 10,
+              "min": 288,
+              "p50": 353,
+              "p95": 565,
+              "max": 565,
+              "mean": 390
+            },
+            "client_start_to_first_text_us": {
+              "n": 10,
+              "min": 1579254,
+              "p50": 1855000,
+              "p95": 2554368,
+              "max": 2554368,
+              "mean": 1917392
+            },
+            "client_submit_to_complete_us": {
+              "n": 10,
+              "min": 2118057,
+              "p50": 2382491,
+              "p95": 3001883,
+              "max": 3001883,
+              "mean": 2425472
+            },
+            "client_submit_to_first_text_us": {
+              "n": 10,
+              "min": 1578935,
+              "p50": 1854648,
+              "p95": 2553803,
+              "max": 2553803,
+              "mean": 1917002
+            },
+            "client_submit_to_launched_us": {
+              "n": 10,
+              "min": 1743,
+              "p50": 2017,
+              "p95": 3221,
+              "max": 3221,
+              "mean": 2232
+            },
+            "client_submit_to_started_us": {
+              "n": 10,
+              "min": 518788,
+              "p50": 574470,
+              "p95": 664774,
+              "max": 664774,
+              "mean": 582075
+            },
+            "client_total_us": {
+              "n": 10,
+              "min": 2118410,
+              "p50": 2382880,
+              "p95": 3002488,
+              "max": 3002488,
+              "mean": 2425901
+            }
+          },
+          "samples": [
+            {
+              "id": "warm-send-bench-a-1",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 50,
+              "handshake_us": 303,
+              "prepare_us": 353,
+              "submit_to_launched_us": 2017,
+              "submit_to_started_us": 569291,
+              "submit_to_first_text_us": 1871288,
+              "submit_to_complete_us": 2382491,
+              "total_us": 2382880,
+              "broker": {
+                "handshake_us": 182,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2382040,
+                "phases_us": {
+                  "cleanup": 5,
+                  "completion": 511255,
+                  "first_text": 1301872,
+                  "provider_init": 568892,
+                  "queue_wait": 16
+                },
+                "tail_us": 489075,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-2",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 59,
+              "handshake_us": 505,
+              "prepare_us": 565,
+              "submit_to_launched_us": 2168,
+              "submit_to_started_us": 597530,
+              "submit_to_first_text_us": 2553803,
+              "submit_to_complete_us": 3001883,
+              "total_us": 3002488,
+              "broker": {
+                "handshake_us": 315,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 3001437,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 448050,
+                  "first_text": 1956227,
+                  "provider_init": 597138,
+                  "queue_wait": 18
+                },
+                "tail_us": 421871,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-3",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 54,
+              "handshake_us": 233,
+              "prepare_us": 288,
+              "submit_to_launched_us": 1949,
+              "submit_to_started_us": 597288,
+              "submit_to_first_text_us": 1922903,
+              "submit_to_complete_us": 2398640,
+              "total_us": 2398994,
+              "broker": {
+                "handshake_us": 140,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2398155,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 475556,
+                  "first_text": 1325672,
+                  "provider_init": 596915,
+                  "queue_wait": 8
+                },
+                "tail_us": 449203,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-4",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 57,
+              "handshake_us": 232,
+              "prepare_us": 290,
+              "submit_to_launched_us": 2408,
+              "submit_to_started_us": 518788,
+              "submit_to_first_text_us": 1741043,
+              "submit_to_complete_us": 2255488,
+              "total_us": 2255814,
+              "broker": {
+                "handshake_us": 151,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2255097,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 514362,
+                  "first_text": 1222244,
+                  "provider_init": 518477,
+                  "queue_wait": 10
+                },
+                "tail_us": 482861,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-5",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 51,
+              "handshake_us": 404,
+              "prepare_us": 455,
+              "submit_to_launched_us": 1743,
+              "submit_to_started_us": 562201,
+              "submit_to_first_text_us": 1846486,
+              "submit_to_complete_us": 2383302,
+              "total_us": 2383791,
+              "broker": {
+                "handshake_us": 185,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2382901,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 536772,
+                  "first_text": 1284250,
+                  "provider_init": 561865,
+                  "queue_wait": 10
+                },
+                "tail_us": 514733,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-6",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 52,
+              "handshake_us": 407,
+              "prepare_us": 459,
+              "submit_to_launched_us": 2281,
+              "submit_to_started_us": 574470,
+              "submit_to_first_text_us": 2067152,
+              "submit_to_complete_us": 2522938,
+              "total_us": 2523434,
+              "broker": {
+                "handshake_us": 278,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2522537,
+                "phases_us": {
+                  "cleanup": 9,
+                  "completion": 455732,
+                  "first_text": 1492662,
+                  "provider_init": 574120,
+                  "queue_wait": 14
+                },
+                "tail_us": 426766,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-7",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 70,
+              "handshake_us": 363,
+              "prepare_us": 433,
+              "submit_to_launched_us": 2644,
+              "submit_to_started_us": 540196,
+              "submit_to_first_text_us": 1841957,
+              "submit_to_complete_us": 2291108,
+              "total_us": 2291576,
+              "broker": {
+                "handshake_us": 212,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2290777,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 449342,
+                  "first_text": 1301662,
+                  "provider_init": 539741,
+                  "queue_wait": 28
+                },
+                "tail_us": 427074,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-8",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 48,
+              "handshake_us": 303,
+              "prepare_us": 352,
+              "submit_to_launched_us": 1951,
+              "submit_to_started_us": 587173,
+              "submit_to_first_text_us": 1854648,
+              "submit_to_complete_us": 2319132,
+              "total_us": 2319521,
+              "broker": {
+                "handshake_us": 207,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2318818,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 464492,
+                  "first_text": 1267503,
+                  "provider_init": 586808,
+                  "queue_wait": 11
+                },
+                "tail_us": 438170,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-9",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 46,
+              "handshake_us": 273,
+              "prepare_us": 319,
+              "submit_to_launched_us": 3221,
+              "submit_to_started_us": 609046,
+              "submit_to_first_text_us": 1578935,
+              "submit_to_complete_us": 2118057,
+              "total_us": 2118410,
+              "broker": {
+                "handshake_us": 181,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2117574,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 538985,
+                  "first_text": 969887,
+                  "provider_init": 608682,
+                  "queue_wait": 16
+                },
+                "tail_us": 501018,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-bench-a-10",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 62,
+              "handshake_us": 327,
+              "prepare_us": 389,
+              "submit_to_launched_us": 1942,
+              "submit_to_started_us": 664774,
+              "submit_to_first_text_us": 1891809,
+              "submit_to_complete_us": 2581687,
+              "total_us": 2582105,
+              "broker": {
+                "handshake_us": 239,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2581276,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 689872,
+                  "first_text": 1227017,
+                  "provider_init": 664374,
+                  "queue_wait": 9
+                },
+                "tail_us": 667723,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "counts": {
+        "requests_total": 11,
+        "broker_probes": 0,
+        "broker_launches": 10
+      }
+    },
+    {
+      "name": "warm-send-probe",
+      "state": "warm_broker_fresh_provider",
+      "status": "measured",
+      "description": "As `warm-send`, but each request asks the adapter to check the sign-in first, which runs the provider's own status command before the turn.",
+      "apps": [
+        {
+          "app": "bench-a",
+          "role": "single",
+          "completed": 10,
+          "failed": 0,
+          "metrics_us": {
+            "broker_cleanup_us": {
+              "n": 10,
+              "min": 3,
+              "p50": 4,
+              "p95": 5,
+              "max": 5,
+              "mean": 4
+            },
+            "broker_completion_us": {
+              "n": 10,
+              "min": 430140,
+              "p50": 545094,
+              "p95": 670258,
+              "max": 670258,
+              "mean": 556570
+            },
+            "broker_first_text_us": {
+              "n": 10,
+              "min": 969863,
+              "p50": 1285599,
+              "p95": 2366099,
+              "max": 2366099,
+              "mean": 1364526
+            },
+            "broker_handshake_us": {
+              "n": 10,
+              "min": 147,
+              "p50": 205,
+              "p95": 265,
+              "max": 265,
+              "mean": 212
+            },
+            "broker_provider_init_us": {
+              "n": 10,
+              "min": 555795,
+              "p50": 568460,
+              "p95": 669408,
+              "max": 669408,
+              "mean": 595536
+            },
+            "broker_queue_wait_us": {
+              "n": 10,
+              "min": 9,
+              "p50": 9,
+              "p95": 21,
+              "max": 21,
+              "mean": 11
+            },
+            "broker_sign_in_probe_us": {
+              "n": 10,
+              "min": 185016,
+              "p50": 210522,
+              "p95": 246037,
+              "max": 246037,
+              "mean": 216978
+            },
+            "broker_tail_us": {
+              "n": 10,
+              "min": 403695,
+              "p50": 523159,
+              "p95": 628369,
+              "max": 628369,
+              "mean": 527722
+            },
+            "broker_total_us": {
+              "n": 10,
+              "min": 2352950,
+              "p50": 2643899,
+              "p95": 3640282,
+              "max": 3640282,
+              "mean": 2733627
+            },
+            "client_connect_us": {
+              "n": 10,
+              "min": 47,
+              "p50": 55,
+              "p95": 69,
+              "max": 69,
+              "mean": 57
+            },
+            "client_handshake_us": {
+              "n": 10,
+              "min": 235,
+              "p50": 350,
+              "p95": 474,
+              "max": 474,
+              "mean": 378
+            },
+            "client_prepare_us": {
+              "n": 10,
+              "min": 287,
+              "p50": 401,
+              "p95": 531,
+              "max": 531,
+              "mean": 436
+            },
+            "client_start_to_first_text_us": {
+              "n": 10,
+              "min": 1771962,
+              "p50": 2110866,
+              "p95": 3111752,
+              "max": 3111752,
+              "mean": 2177864
+            },
+            "client_submit_to_complete_us": {
+              "n": 10,
+              "min": 2353365,
+              "p50": 2644188,
+              "p95": 3640680,
+              "max": 3640680,
+              "mean": 2733998
+            },
+            "client_submit_to_first_text_us": {
+              "n": 10,
+              "min": 1771561,
+              "p50": 2110335,
+              "p95": 3111232,
+              "max": 3111232,
+              "mean": 2177428
+            },
+            "client_submit_to_launched_us": {
+              "n": 10,
+              "min": 185831,
+              "p50": 211549,
+              "p95": 246887,
+              "max": 246887,
+              "mean": 217871
+            },
+            "client_submit_to_started_us": {
+              "n": 10,
+              "min": 745049,
+              "p50": 801725,
+              "p95": 896667,
+              "max": 896667,
+              "mean": 812894
+            },
+            "client_total_us": {
+              "n": 10,
+              "min": 2353807,
+              "p50": 2644590,
+              "p95": 3641239,
+              "max": 3641239,
+              "mean": 2734474
+            }
+          },
+          "samples": [
+            {
+              "id": "warm-send-probe-bench-a-1",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 68,
+              "handshake_us": 282,
+              "prepare_us": 350,
+              "submit_to_launched_us": 206816,
+              "submit_to_started_us": 875925,
+              "submit_to_first_text_us": 2129598,
+              "submit_to_complete_us": 2674720,
+              "total_us": 2675103,
+              "broker": {
+                "handshake_us": 174,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 1,
+                "total_us": 2674340,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 545094,
+                  "first_text": 1253727,
+                  "provider_init": 669408,
+                  "queue_wait": 9,
+                  "sign_in_probe": 206098
+                },
+                "tail_us": 523159,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-probe-bench-a-2",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 68,
+              "handshake_us": 437,
+              "prepare_us": 505,
+              "submit_to_launched_us": 211549,
+              "submit_to_started_us": 809278,
+              "submit_to_first_text_us": 2094919,
+              "submit_to_complete_us": 2763487,
+              "total_us": 2764035,
+              "broker": {
+                "handshake_us": 260,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 1,
+                "total_us": 2763027,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 668590,
+                  "first_text": 1285599,
+                  "provider_init": 598291,
+                  "queue_wait": 21,
+                  "sign_in_probe": 210522
+                },
+                "tail_us": 626460,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-probe-bench-a-3",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 56,
+              "handshake_us": 299,
+              "prepare_us": 356,
+              "submit_to_launched_us": 245167,
+              "submit_to_started_us": 896667,
+              "submit_to_first_text_us": 2340038,
+              "submit_to_complete_us": 3010218,
+              "total_us": 3010610,
+              "broker": {
+                "handshake_us": 187,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 1,
+                "total_us": 3009865,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 670258,
+                  "first_text": 1443306,
+                  "provider_init": 652147,
+                  "queue_wait": 13,
+                  "sign_in_probe": 244137
+                },
+                "tail_us": 628369,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-probe-bench-a-4",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 47,
+              "handshake_us": 474,
+              "prepare_us": 521,
+              "submit_to_launched_us": 207911,
+              "submit_to_started_us": 767782,
+              "submit_to_first_text_us": 1843770,
+              "submit_to_complete_us": 2436931,
+              "total_us": 2437488,
+              "broker": {
+                "handshake_us": 265,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 1,
+                "total_us": 2436619,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 593160,
+                  "first_text": 1076036,
+                  "provider_init": 560477,
+                  "queue_wait": 9,
+                  "sign_in_probe": 206933
+                },
+                "tail_us": 571053,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-probe-bench-a-5",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 69,
+              "handshake_us": 461,
+              "prepare_us": 531,
+              "submit_to_launched_us": 222248,
+              "submit_to_started_us": 784471,
+              "submit_to_first_text_us": 2110335,
+              "submit_to_complete_us": 2603839,
+              "total_us": 2604413,
+              "broker": {
+                "handshake_us": 247,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 1,
+                "total_us": 2603390,
+                "phases_us": {
+                  "cleanup": 5,
+                  "completion": 493441,
+                  "first_text": 1325768,
+                  "provider_init": 562697,
+                  "queue_wait": 9,
+                  "sign_in_probe": 221470
+                },
+                "tail_us": 471183,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-probe-bench-a-6",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 54,
+              "handshake_us": 473,
+              "prepare_us": 527,
+              "submit_to_launched_us": 207767,
+              "submit_to_started_us": 855892,
+              "submit_to_first_text_us": 2119886,
+              "submit_to_complete_us": 2683013,
+              "total_us": 2683580,
+              "broker": {
+                "handshake_us": 171,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 1,
+                "total_us": 2682668,
+                "phases_us": {
+                  "cleanup": 3,
+                  "completion": 563129,
+                  "first_text": 1264038,
+                  "provider_init": 648805,
+                  "queue_wait": 9,
+                  "sign_in_probe": 206684
+                },
+                "tail_us": 540861,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-probe-bench-a-7",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 55,
+              "handshake_us": 465,
+              "prepare_us": 520,
+              "submit_to_launched_us": 185831,
+              "submit_to_started_us": 745049,
+              "submit_to_first_text_us": 3111232,
+              "submit_to_complete_us": 3640680,
+              "total_us": 3641239,
+              "broker": {
+                "handshake_us": 226,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 1,
+                "total_us": 3640282,
+                "phases_us": {
+                  "cleanup": 3,
+                  "completion": 529498,
+                  "first_text": 2366099,
+                  "provider_init": 559657,
+                  "queue_wait": 9,
+                  "sign_in_probe": 185016
+                },
+                "tail_us": 497969,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-probe-bench-a-8",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 52,
+              "handshake_us": 235,
+              "prepare_us": 287,
+              "submit_to_launched_us": 221974,
+              "submit_to_started_us": 789866,
+              "submit_to_first_text_us": 2099433,
+              "submit_to_complete_us": 2529547,
+              "total_us": 2529876,
+              "broker": {
+                "handshake_us": 147,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 1,
+                "total_us": 2529236,
+                "phases_us": {
+                  "cleanup": 5,
+                  "completion": 430140,
+                  "first_text": 1309471,
+                  "provider_init": 568460,
+                  "queue_wait": 9,
+                  "sign_in_probe": 221151
+                },
+                "tail_us": 403695,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-probe-bench-a-9",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 58,
+              "handshake_us": 306,
+              "prepare_us": 365,
+              "submit_to_launched_us": 246887,
+              "submit_to_started_us": 802290,
+              "submit_to_first_text_us": 2153510,
+              "submit_to_complete_us": 2644188,
+              "total_us": 2644590,
+              "broker": {
+                "handshake_us": 205,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 1,
+                "total_us": 2643899,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 490686,
+                  "first_text": 1351361,
+                  "provider_init": 555795,
+                  "queue_wait": 16,
+                  "sign_in_probe": 246037
+                },
+                "tail_us": 464258,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "warm-send-probe-bench-a-10",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 51,
+              "handshake_us": 350,
+              "prepare_us": 401,
+              "submit_to_launched_us": 222562,
+              "submit_to_started_us": 801725,
+              "submit_to_first_text_us": 1771561,
+              "submit_to_complete_us": 2353365,
+              "total_us": 2353807,
+              "broker": {
+                "handshake_us": 240,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 1,
+                "total_us": 2352950,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 581706,
+                  "first_text": 969863,
+                  "provider_init": 579623,
+                  "queue_wait": 13,
+                  "sign_in_probe": 221741
+                },
+                "tail_us": 550221,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "counts": {
+        "requests_total": 11,
+        "broker_probes": 10,
+        "broker_launches": 10
+      }
+    },
+    {
+      "name": "prepared-send",
+      "state": "prepared_broker_fresh_provider",
+      "status": "measured",
+      "description": "A broker is running and the application has prepared the provider: each measured request is a `send_ready` that accepts readiness evidence up to 30 s old, made by a `prepare` just before it, so it runs no sign-in probe. The provider is a fresh process. The `prepare` before each send is not measured. Compare with `warm-send-probe`, which pays the probe in every request, and with `warm-send`, which asks no readiness question at all.",
+      "apps": [
+        {
+          "app": "bench-a",
+          "role": "single",
+          "completed": 10,
+          "failed": 0,
+          "metrics_us": {
+            "broker_cleanup_us": {
+              "n": 10,
+              "min": 5,
+              "p50": 6,
+              "p95": 13,
+              "max": 13,
+              "mean": 7
+            },
+            "broker_completion_us": {
+              "n": 10,
+              "min": 485414,
+              "p50": 530219,
+              "p95": 715915,
+              "max": 715915,
+              "mean": 552009
+            },
+            "broker_first_text_us": {
+              "n": 10,
+              "min": 1258709,
+              "p50": 1298804,
+              "p95": 1440921,
+              "max": 1440921,
+              "mean": 1327181
+            },
+            "broker_handshake_us": {
+              "n": 10,
+              "min": 76,
+              "p50": 127,
+              "p95": 216,
+              "max": 216,
+              "mean": 131
+            },
+            "broker_provider_init_us": {
+              "n": 10,
+              "min": 509086,
+              "p50": 630511,
+              "p95": 729313,
+              "max": 729313,
+              "mean": 633263
+            },
+            "broker_queue_wait_us": {
+              "n": 10,
+              "min": 7,
+              "p50": 8,
+              "p95": 14,
+              "max": 14,
+              "mean": 9
+            },
+            "broker_tail_us": {
+              "n": 10,
+              "min": 463372,
+              "p50": 498777,
+              "p95": 689376,
+              "max": 689376,
+              "mean": 524442
+            },
+            "broker_total_us": {
+              "n": 10,
+              "min": 2346985,
+              "p50": 2500721,
+              "p95": 2702827,
+              "max": 2702827,
+              "mean": 2512470
+            },
+            "client_connect_us": {
+              "n": 10,
+              "min": 11,
+              "p50": 37,
+              "p95": 72,
+              "max": 72,
+              "mean": 37
+            },
+            "client_handshake_us": {
+              "n": 10,
+              "min": 155,
+              "p50": 240,
+              "p95": 1662,
+              "max": 1662,
+              "mean": 393
+            },
+            "client_prepare_us": {
+              "n": 10,
+              "min": 194,
+              "p50": 268,
+              "p95": 1705,
+              "max": 1705,
+              "mean": 430
+            },
+            "client_start_to_first_text_us": {
+              "n": 10,
+              "min": 1817413,
+              "p50": 1908971,
+              "p95": 2098342,
+              "max": 2098342,
+              "mean": 1961317
+            },
+            "client_submit_to_complete_us": {
+              "n": 10,
+              "min": 2347331,
+              "p50": 2501157,
+              "p95": 2703167,
+              "max": 2703167,
+              "mean": 2512885
+            },
+            "client_submit_to_first_text_us": {
+              "n": 10,
+              "min": 1817061,
+              "p50": 1908601,
+              "p95": 2098071,
+              "max": 2098071,
+              "mean": 1960886
+            },
+            "client_submit_to_launched_us": {
+              "n": 10,
+              "min": 1813,
+              "p50": 1999,
+              "p95": 2347,
+              "max": 2347,
+              "mean": 2051
+            },
+            "client_submit_to_started_us": {
+              "n": 10,
+              "min": 509412,
+              "p50": 630854,
+              "p95": 729678,
+              "max": 729678,
+              "mean": 633644
+            },
+            "client_total_us": {
+              "n": 10,
+              "min": 2347740,
+              "p50": 2501558,
+              "p95": 2703437,
+              "max": 2703437,
+              "mean": 2513356
+            }
+          },
+          "samples": [
+            {
+              "id": "prepared-send-bench-a-1",
+              "app": "bench-a",
+              "method": "send_ready",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 16,
+              "handshake_us": 248,
+              "prepare_us": 264,
+              "submit_to_launched_us": 2273,
+              "submit_to_started_us": 614629,
+              "submit_to_first_text_us": 1873265,
+              "submit_to_complete_us": 2358737,
+              "total_us": 2359032,
+              "broker": {
+                "handshake_us": 164,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2358356,
+                "phases_us": {
+                  "cleanup": 13,
+                  "completion": 485414,
+                  "first_text": 1258709,
+                  "provider_init": 614211,
+                  "queue_wait": 9
+                },
+                "tail_us": 463372,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "prepared-send-bench-a-2",
+              "app": "bench-a",
+              "method": "send_ready",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 72,
+              "handshake_us": 279,
+              "prepare_us": 352,
+              "submit_to_launched_us": 1999,
+              "submit_to_started_us": 509412,
+              "submit_to_first_text_us": 1817061,
+              "submit_to_complete_us": 2347331,
+              "total_us": 2347740,
+              "broker": {
+                "handshake_us": 105,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2346985,
+                "phases_us": {
+                  "cleanup": 6,
+                  "completion": 530219,
+                  "first_text": 1307666,
+                  "provider_init": 509086,
+                  "queue_wait": 8
+                },
+                "tail_us": 498777,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "prepared-send-bench-a-3",
+              "app": "bench-a",
+              "method": "send_ready",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 54,
+              "handshake_us": 316,
+              "prepare_us": 370,
+              "submit_to_launched_us": 2214,
+              "submit_to_started_us": 614351,
+              "submit_to_first_text_us": 1908601,
+              "submit_to_complete_us": 2501157,
+              "total_us": 2501558,
+              "broker": {
+                "handshake_us": 216,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2500721,
+                "phases_us": {
+                  "cleanup": 6,
+                  "completion": 592541,
+                  "first_text": 1294229,
+                  "provider_init": 613932,
+                  "queue_wait": 13
+                },
+                "tail_us": 555072,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "prepared-send-bench-a-4",
+              "app": "bench-a",
+              "method": "send_ready",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 11,
+              "handshake_us": 231,
+              "prepare_us": 242,
+              "submit_to_launched_us": 1891,
+              "submit_to_started_us": 645845,
+              "submit_to_first_text_us": 1987274,
+              "submit_to_complete_us": 2703167,
+              "total_us": 2703437,
+              "broker": {
+                "handshake_us": 131,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2702827,
+                "phases_us": {
+                  "cleanup": 6,
+                  "completion": 715915,
+                  "first_text": 1341384,
+                  "provider_init": 645515,
+                  "queue_wait": 7
+                },
+                "tail_us": 689376,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "prepared-send-bench-a-5",
+              "app": "bench-a",
+              "method": "send_ready",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 43,
+              "handshake_us": 1662,
+              "prepare_us": 1705,
+              "submit_to_launched_us": 2094,
+              "submit_to_started_us": 698237,
+              "submit_to_first_text_us": 1976394,
+              "submit_to_complete_us": 2542918,
+              "total_us": 2544664,
+              "broker": {
+                "handshake_us": 76,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2542572,
+                "phases_us": {
+                  "cleanup": 6,
+                  "completion": 566561,
+                  "first_text": 1278088,
+                  "provider_init": 697910,
+                  "queue_wait": 7
+                },
+                "tail_us": 540483,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "prepared-send-bench-a-6",
+              "app": "bench-a",
+              "method": "send_ready",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 27,
+              "handshake_us": 240,
+              "prepare_us": 268,
+              "submit_to_launched_us": 1873,
+              "submit_to_started_us": 630854,
+              "submit_to_first_text_us": 1908530,
+              "submit_to_complete_us": 2401224,
+              "total_us": 2401531,
+              "broker": {
+                "handshake_us": 169,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2400816,
+                "phases_us": {
+                  "cleanup": 5,
+                  "completion": 492847,
+                  "first_text": 1277445,
+                  "provider_init": 630511,
+                  "queue_wait": 8
+                },
+                "tail_us": 473847,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "prepared-send-bench-a-7",
+              "app": "bench-a",
+              "method": "send_ready",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 40,
+              "handshake_us": 350,
+              "prepare_us": 391,
+              "submit_to_launched_us": 2347,
+              "submit_to_started_us": 600643,
+              "submit_to_first_text_us": 1899604,
+              "submit_to_complete_us": 2418532,
+              "total_us": 2418969,
+              "broker": {
+                "handshake_us": 127,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2418037,
+                "phases_us": {
+                  "cleanup": 8,
+                  "completion": 519040,
+                  "first_text": 1298804,
+                  "provider_init": 600173,
+                  "queue_wait": 12
+                },
+                "tail_us": 496433,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "prepared-send-bench-a-8",
+              "app": "bench-a",
+              "method": "send_ready",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 39,
+              "handshake_us": 155,
+              "prepare_us": 194,
+              "submit_to_launched_us": 2021,
+              "submit_to_started_us": 660741,
+              "submit_to_first_text_us": 2067092,
+              "submit_to_complete_us": 2617171,
+              "total_us": 2617407,
+              "broker": {
+                "handshake_us": 90,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2616734,
+                "phases_us": {
+                  "cleanup": 6,
+                  "completion": 550046,
+                  "first_text": 1406276,
+                  "provider_init": 660392,
+                  "queue_wait": 14
+                },
+                "tail_us": 523610,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "prepared-send-bench-a-9",
+              "app": "bench-a",
+              "method": "send_ready",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 37,
+              "handshake_us": 234,
+              "prepare_us": 271,
+              "submit_to_launched_us": 1813,
+              "submit_to_started_us": 729678,
+              "submit_to_first_text_us": 2098071,
+              "submit_to_complete_us": 2604002,
+              "total_us": 2604311,
+              "broker": {
+                "handshake_us": 93,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2603518,
+                "phases_us": {
+                  "cleanup": 8,
+                  "completion": 505901,
+                  "first_text": 1368288,
+                  "provider_init": 729313,
+                  "queue_wait": 8
+                },
+                "tail_us": 473796,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "prepared-send-bench-a-10",
+              "app": "bench-a",
+              "method": "send_ready",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 32,
+              "handshake_us": 219,
+              "prepare_us": 251,
+              "submit_to_launched_us": 1985,
+              "submit_to_started_us": 632051,
+              "submit_to_first_text_us": 2072977,
+              "submit_to_complete_us": 2634619,
+              "total_us": 2634916,
+              "broker": {
+                "handshake_us": 143,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2634142,
+                "phases_us": {
+                  "cleanup": 8,
+                  "completion": 561606,
+                  "first_text": 1440921,
+                  "provider_init": 631594,
+                  "queue_wait": 13
+                },
+                "tail_us": 529659,
+                "usage": {
+                  "cache_write": 0,
+                  "cached_input": 2658,
+                  "input": 2660,
+                  "output": 4
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "counts": {
+        "requests_total": 22,
+        "broker_probes": 0,
+        "broker_launches": 10
+      }
+    },
+    {
+      "name": "warm-status",
+      "state": "warm_broker_fresh_provider",
+      "status": "measured",
+      "description": "A running broker answering `status` requests: the readiness check on its own.",
+      "apps": [
+        {
+          "app": "bench-a",
+          "role": "single",
+          "completed": 10,
+          "failed": 0,
+          "metrics_us": {
+            "broker_cleanup_us": {
+              "n": 10,
+              "min": 2,
+              "p50": 3,
+              "p95": 4,
+              "max": 4,
+              "mean": 2
+            },
+            "broker_completion_us": {
+              "n": 10,
+              "min": 93,
+              "p50": 98,
+              "p95": 211,
+              "max": 211,
+              "mean": 116
+            },
+            "broker_handshake_us": {
+              "n": 10,
+              "min": 144,
+              "p50": 174,
+              "p95": 303,
+              "max": 303,
+              "mean": 189
+            },
+            "broker_queue_wait_us": {
+              "n": 10,
+              "min": 7,
+              "p50": 10,
+              "p95": 18,
+              "max": 18,
+              "mean": 11
+            },
+            "broker_sign_in_probe_us": {
+              "n": 10,
+              "min": 201565,
+              "p50": 239275,
+              "p95": 274050,
+              "max": 274050,
+              "mean": 245836
+            },
+            "broker_total_us": {
+              "n": 10,
+              "min": 201674,
+              "p50": 239430,
+              "p95": 274157,
+              "max": 274157,
+              "mean": 245966
+            },
+            "client_connect_us": {
+              "n": 10,
+              "min": 33,
+              "p50": 45,
+              "p95": 47,
+              "max": 47,
+              "mean": 43
+            },
+            "client_handshake_us": {
+              "n": 10,
+              "min": 254,
+              "p50": 297,
+              "p95": 760,
+              "max": 760,
+              "mean": 344
+            },
+            "client_prepare_us": {
+              "n": 10,
+              "min": 298,
+              "p50": 342,
+              "p95": 806,
+              "max": 806,
+              "mean": 388
+            },
+            "client_submit_to_complete_us": {
+              "n": 10,
+              "min": 202070,
+              "p50": 239889,
+              "p95": 274536,
+              "max": 274536,
+              "mean": 246390
+            },
+            "client_total_us": {
+              "n": 10,
+              "min": 202895,
+              "p50": 240301,
+              "p95": 274906,
+              "max": 274906,
+              "mean": 246807
+            }
+          },
+          "samples": [
+            {
+              "id": "warm-status-bench-a-1",
+              "app": "bench-a",
+              "method": "status",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 47,
+              "handshake_us": 290,
+              "prepare_us": 337,
+              "submit_to_complete_us": 273323,
+              "total_us": 273682,
+              "broker": {
+                "handshake_us": 213,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 0,
+                "total_us": 272785,
+                "phases_us": {
+                  "cleanup": 3,
+                  "completion": 98,
+                  "queue_wait": 15,
+                  "sign_in_probe": 272669
+                }
+              }
+            },
+            {
+              "id": "warm-status-bench-a-2",
+              "app": "bench-a",
+              "method": "status",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 45,
+              "handshake_us": 311,
+              "prepare_us": 357,
+              "submit_to_complete_us": 234890,
+              "total_us": 235277,
+              "broker": {
+                "handshake_us": 193,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 0,
+                "total_us": 234408,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 211,
+                  "queue_wait": 16,
+                  "sign_in_probe": 234177
+                }
+              }
+            },
+            {
+              "id": "warm-status-bench-a-3",
+              "app": "bench-a",
+              "method": "status",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 46,
+              "handshake_us": 280,
+              "prepare_us": 326,
+              "submit_to_complete_us": 272830,
+              "total_us": 273186,
+              "broker": {
+                "handshake_us": 164,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 0,
+                "total_us": 272400,
+                "phases_us": {
+                  "cleanup": 3,
+                  "completion": 117,
+                  "queue_wait": 9,
+                  "sign_in_probe": 272271
+                }
+              }
+            },
+            {
+              "id": "warm-status-bench-a-4",
+              "app": "bench-a",
+              "method": "status",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 46,
+              "handshake_us": 760,
+              "prepare_us": 806,
+              "submit_to_complete_us": 202070,
+              "total_us": 202895,
+              "broker": {
+                "handshake_us": 303,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 0,
+                "total_us": 201674,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 93,
+                  "queue_wait": 14,
+                  "sign_in_probe": 201565
+                }
+              }
+            },
+            {
+              "id": "warm-status-bench-a-5",
+              "app": "bench-a",
+              "method": "status",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 33,
+              "handshake_us": 349,
+              "prepare_us": 382,
+              "submit_to_complete_us": 239889,
+              "total_us": 240301,
+              "broker": {
+                "handshake_us": 156,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 0,
+                "total_us": 239430,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 133,
+                  "queue_wait": 18,
+                  "sign_in_probe": 239275
+                }
+              }
+            },
+            {
+              "id": "warm-status-bench-a-6",
+              "app": "bench-a",
+              "method": "status",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 45,
+              "handshake_us": 297,
+              "prepare_us": 342,
+              "submit_to_complete_us": 274536,
+              "total_us": 274906,
+              "broker": {
+                "handshake_us": 179,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 0,
+                "total_us": 274157,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 93,
+                  "queue_wait": 12,
+                  "sign_in_probe": 274050
+                }
+              }
+            },
+            {
+              "id": "warm-status-bench-a-7",
+              "app": "bench-a",
+              "method": "status",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 43,
+              "handshake_us": 254,
+              "prepare_us": 298,
+              "submit_to_complete_us": 235228,
+              "total_us": 235552,
+              "broker": {
+                "handshake_us": 165,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 0,
+                "total_us": 234829,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 103,
+                  "queue_wait": 10,
+                  "sign_in_probe": 234714
+                }
+              }
+            },
+            {
+              "id": "warm-status-bench-a-8",
+              "app": "bench-a",
+              "method": "status",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 41,
+              "handshake_us": 330,
+              "prepare_us": 372,
+              "submit_to_complete_us": 232971,
+              "total_us": 233369,
+              "broker": {
+                "handshake_us": 174,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 0,
+                "total_us": 232616,
+                "phases_us": {
+                  "cleanup": 3,
+                  "completion": 118,
+                  "queue_wait": 7,
+                  "sign_in_probe": 232488
+                }
+              }
+            },
+            {
+              "id": "warm-status-bench-a-9",
+              "app": "bench-a",
+              "method": "status",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 41,
+              "handshake_us": 309,
+              "prepare_us": 351,
+              "submit_to_complete_us": 247779,
+              "total_us": 248187,
+              "broker": {
+                "handshake_us": 205,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 0,
+                "total_us": 247419,
+                "phases_us": {
+                  "cleanup": 2,
+                  "completion": 97,
+                  "queue_wait": 8,
+                  "sign_in_probe": 247312
+                }
+              }
+            },
+            {
+              "id": "warm-status-bench-a-10",
+              "app": "bench-a",
+              "method": "status",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 47,
+              "handshake_us": 263,
+              "prepare_us": 311,
+              "submit_to_complete_us": 250391,
+              "total_us": 250720,
+              "broker": {
+                "handshake_us": 144,
+                "outcome": "completed",
+                "probes": 1,
+                "launches": 0,
+                "total_us": 249949,
+                "phases_us": {
+                  "cleanup": 3,
+                  "completion": 98,
+                  "queue_wait": 7,
+                  "sign_in_probe": 249841
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "counts": {
+        "requests_total": 11,
+        "broker_probes": 10,
+        "broker_launches": 0
+      }
+    },
+    {
+      "name": "resumed-context",
+      "state": "resumed_context",
+      "status": "measured",
+      "description": "A running broker. Each request continues the provider-side conversation the previous one started, in a fresh provider process. Resuming a conversation is not reusing a process.",
+      "apps": [
+        {
+          "app": "bench-a",
+          "role": "single",
+          "completed": 10,
+          "failed": 0,
+          "metrics_us": {
+            "broker_cleanup_us": {
+              "n": 10,
+              "min": 3,
+              "p50": 5,
+              "p95": 7,
+              "max": 7,
+              "mean": 5
+            },
+            "broker_completion_us": {
+              "n": 10,
+              "min": 449200,
+              "p50": 501193,
+              "p95": 638737,
+              "max": 638737,
+              "mean": 517235
+            },
+            "broker_first_text_us": {
+              "n": 10,
+              "min": 1296859,
+              "p50": 1359923,
+              "p95": 1403987,
+              "max": 1403987,
+              "mean": 1358896
+            },
+            "broker_handshake_us": {
+              "n": 10,
+              "min": 166,
+              "p50": 205,
+              "p95": 313,
+              "max": 313,
+              "mean": 224
+            },
+            "broker_provider_init_us": {
+              "n": 10,
+              "min": 541929,
+              "p50": 587108,
+              "p95": 649167,
+              "max": 649167,
+              "mean": 592065
+            },
+            "broker_queue_wait_us": {
+              "n": 10,
+              "min": 9,
+              "p50": 10,
+              "p95": 24,
+              "max": 24,
+              "mean": 12
+            },
+            "broker_tail_us": {
+              "n": 10,
+              "min": 416951,
+              "p50": 469379,
+              "p95": 601597,
+              "max": 601597,
+              "mean": 486841
+            },
+            "broker_total_us": {
+              "n": 10,
+              "min": 2361246,
+              "p50": 2458760,
+              "p95": 2541996,
+              "max": 2541996,
+              "mean": 2468215
+            },
+            "client_connect_us": {
+              "n": 10,
+              "min": 45,
+              "p50": 54,
+              "p95": 65,
+              "max": 65,
+              "mean": 53
+            },
+            "client_handshake_us": {
+              "n": 10,
+              "min": 286,
+              "p50": 338,
+              "p95": 545,
+              "max": 545,
+              "mean": 379
+            },
+            "client_prepare_us": {
+              "n": 10,
+              "min": 352,
+              "p50": 384,
+              "p95": 591,
+              "max": 591,
+              "mean": 433
+            },
+            "client_start_to_first_text_us": {
+              "n": 10,
+              "min": 1884747,
+              "p50": 1942638,
+              "p95": 2014991,
+              "max": 2014991,
+              "mean": 1952048
+            },
+            "client_submit_to_complete_us": {
+              "n": 10,
+              "min": 2361791,
+              "p50": 2459248,
+              "p95": 2542513,
+              "max": 2542513,
+              "mean": 2468683
+            },
+            "client_submit_to_first_text_us": {
+              "n": 10,
+              "min": 1884395,
+              "p50": 1942128,
+              "p95": 2014400,
+              "max": 2014400,
+              "mean": 1951615
+            },
+            "client_submit_to_launched_us": {
+              "n": 10,
+              "min": 1863,
+              "p50": 2073,
+              "p95": 4078,
+              "max": 4078,
+              "mean": 2214
+            },
+            "client_submit_to_started_us": {
+              "n": 10,
+              "min": 542372,
+              "p50": 587378,
+              "p95": 649624,
+              "max": 649624,
+              "mean": 592418
+            },
+            "client_total_us": {
+              "n": 10,
+              "min": 2362181,
+              "p50": 2459682,
+              "p95": 2542919,
+              "max": 2542919,
+              "mean": 2469157
+            }
+          },
+          "samples": [
+            {
+              "id": "resumed-context-bench-a-1",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 45,
+              "handshake_us": 326,
+              "prepare_us": 371,
+              "submit_to_launched_us": 1879,
+              "submit_to_started_us": 627947,
+              "submit_to_first_text_us": 2004857,
+              "submit_to_complete_us": 2536957,
+              "total_us": 2537369,
+              "broker": {
+                "handshake_us": 200,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2536561,
+                "phases_us": {
+                  "cleanup": 5,
+                  "completion": 532047,
+                  "first_text": 1376844,
+                  "provider_init": 627656,
+                  "queue_wait": 9
+                },
+                "tail_us": 495143,
+                "usage": {
+                  "cache_write": 600,
+                  "cached_input": 2138,
+                  "input": 2740,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "resumed-context-bench-a-2",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 55,
+              "handshake_us": 454,
+              "prepare_us": 510,
+              "submit_to_launched_us": 2073,
+              "submit_to_started_us": 582091,
+              "submit_to_first_text_us": 1942128,
+              "submit_to_complete_us": 2410035,
+              "total_us": 2410599,
+              "broker": {
+                "handshake_us": 289,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2409648,
+                "phases_us": {
+                  "cleanup": 3,
+                  "completion": 467942,
+                  "first_text": 1359923,
+                  "provider_init": 581770,
+                  "queue_wait": 10
+                },
+                "tail_us": 441851,
+                "usage": {
+                  "cache_write": 640,
+                  "cached_input": 2138,
+                  "input": 2780,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "resumed-context-bench-a-3",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 58,
+              "handshake_us": 302,
+              "prepare_us": 360,
+              "submit_to_launched_us": 2145,
+              "submit_to_started_us": 542372,
+              "submit_to_first_text_us": 1912570,
+              "submit_to_complete_us": 2361791,
+              "total_us": 2362181,
+              "broker": {
+                "handshake_us": 205,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2361246,
+                "phases_us": {
+                  "cleanup": 4,
+                  "completion": 449200,
+                  "first_text": 1370089,
+                  "provider_init": 541929,
+                  "queue_wait": 24
+                },
+                "tail_us": 416951,
+                "usage": {
+                  "cache_write": 680,
+                  "cached_input": 2138,
+                  "input": 2820,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "resumed-context-bench-a-4",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 45,
+              "handshake_us": 545,
+              "prepare_us": 591,
+              "submit_to_launched_us": 2139,
+              "submit_to_started_us": 649624,
+              "submit_to_first_text_us": 2014400,
+              "submit_to_complete_us": 2515782,
+              "total_us": 2516406,
+              "broker": {
+                "handshake_us": 313,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2515177,
+                "phases_us": {
+                  "cleanup": 5,
+                  "completion": 501193,
+                  "first_text": 1364799,
+                  "provider_init": 649167,
+                  "queue_wait": 13
+                },
+                "tail_us": 469379,
+                "usage": {
+                  "cache_write": 720,
+                  "cached_input": 2138,
+                  "input": 2860,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "resumed-context-bench-a-5",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 46,
+              "handshake_us": 338,
+              "prepare_us": 384,
+              "submit_to_launched_us": 1898,
+              "submit_to_started_us": 611943,
+              "submit_to_first_text_us": 1958781,
+              "submit_to_complete_us": 2442116,
+              "total_us": 2442545,
+              "broker": {
+                "handshake_us": 213,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2441761,
+                "phases_us": {
+                  "cleanup": 5,
+                  "completion": 485514,
+                  "first_text": 1344516,
+                  "provider_init": 611717,
+                  "queue_wait": 9
+                },
+                "tail_us": 459442,
+                "usage": {
+                  "cache_write": 760,
+                  "cached_input": 2138,
+                  "input": 2900,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "resumed-context-bench-a-6",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 52,
+              "handshake_us": 319,
+              "prepare_us": 372,
+              "submit_to_launched_us": 1863,
+              "submit_to_started_us": 555387,
+              "submit_to_first_text_us": 1903625,
+              "submit_to_complete_us": 2542513,
+              "total_us": 2542919,
+              "broker": {
+                "handshake_us": 191,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2541996,
+                "phases_us": {
+                  "cleanup": 6,
+                  "completion": 638737,
+                  "first_text": 1348321,
+                  "provider_init": 554922,
+                  "queue_wait": 10
+                },
+                "tail_us": 601597,
+                "usage": {
+                  "cache_write": 800,
+                  "cached_input": 2138,
+                  "input": 2940,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "resumed-context-bench-a-7",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 56,
+              "handshake_us": 534,
+              "prepare_us": 590,
+              "submit_to_launched_us": 4078,
+              "submit_to_started_us": 566881,
+              "submit_to_first_text_us": 1908087,
+              "submit_to_complete_us": 2488929,
+              "total_us": 2489569,
+              "broker": {
+                "handshake_us": 257,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2488400,
+                "phases_us": {
+                  "cleanup": 5,
+                  "completion": 580704,
+                  "first_text": 1341165,
+                  "provider_init": 566511,
+                  "queue_wait": 15
+                },
+                "tail_us": 561675,
+                "usage": {
+                  "cache_write": 840,
+                  "cached_input": 2138,
+                  "input": 2980,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "resumed-context-bench-a-8",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 55,
+              "handshake_us": 347,
+              "prepare_us": 402,
+              "submit_to_launched_us": 1877,
+              "submit_to_started_us": 608350,
+              "submit_to_first_text_us": 1991027,
+              "submit_to_complete_us": 2512447,
+              "total_us": 2512889,
+              "broker": {
+                "handshake_us": 239,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2511991,
+                "phases_us": {
+                  "cleanup": 5,
+                  "completion": 521388,
+                  "first_text": 1382463,
+                  "provider_init": 608120,
+                  "queue_wait": 15
+                },
+                "tail_us": 489668,
+                "usage": {
+                  "cache_write": 880,
+                  "cached_input": 2138,
+                  "input": 3020,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "resumed-context-bench-a-9",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 54,
+              "handshake_us": 344,
+              "prepare_us": 398,
+              "submit_to_launched_us": 2108,
+              "submit_to_started_us": 592210,
+              "submit_to_first_text_us": 1996281,
+              "submit_to_complete_us": 2459248,
+              "total_us": 2459682,
+              "broker": {
+                "handshake_us": 166,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2458760,
+                "phases_us": {
+                  "cleanup": 6,
+                  "completion": 462999,
+                  "first_text": 1403987,
+                  "provider_init": 591757,
+                  "queue_wait": 11
+                },
+                "tail_us": 436680,
+                "usage": {
+                  "cache_write": 920,
+                  "cached_input": 2138,
+                  "input": 3060,
+                  "output": 4
+                }
+              }
+            },
+            {
+              "id": "resumed-context-bench-a-10",
+              "app": "bench-a",
+              "method": "send",
+              "measured": true,
+              "via": "wire",
+              "outcome": "completed",
+              "connect_us": 65,
+              "handshake_us": 286,
+              "prepare_us": 352,
+              "submit_to_launched_us": 2083,
+              "submit_to_started_us": 587378,
+              "submit_to_first_text_us": 1884395,
+              "submit_to_complete_us": 2417017,
+              "total_us": 2417417,
+              "broker": {
+                "handshake_us": 173,
+                "outcome": "completed",
+                "probes": 0,
+                "launches": 1,
+                "total_us": 2416615,
+                "phases_us": {
+                  "cleanup": 7,
+                  "completion": 532632,
+                  "first_text": 1296859,
+                  "provider_init": 587108,
+                  "queue_wait": 9
+                },
+                "tail_us": 496027,
+                "usage": {
+                  "cache_write": 960,
+                  "cached_input": 2138,
+                  "input": 3100,
+                  "output": 4
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "counts": {
+        "requests_total": 12,
+        "broker_probes": 0,
+        "broker_launches": 10
+      }
+    }
+  ],
+  "limitations": [
+    "Broker marks are taken when its hub thread observes an update, so they include the hub's polling interval (5 ms when idle) and cannot resolve differences smaller than that; client timings include the socket and the application's own scheduling.",
+    "Only compare results from the same machine, build profile and mode; a shared or virtualized machine adds noise of its own. `compare` warns when these differ.",
+    "`prepare`, in the `client_prepare_us` metric, is connecting and the handshake. A provider's own readiness check is measured by `warm-status`, by the sign-in probe in `warm-send-probe`, and by `prepared-send`, which prepares first and so runs no probe in the send.",
+    "Resumed context continues a conversation in a fresh provider process; it is not process reuse, which is unsupported until a persistent-provider adapter exists (E-02).",
+    "A scenario's first request after warm-up is still the first of its kind in this run's broker; a genuinely cold machine (empty page cache, first start after installation) is not reproduced.",
+    "With 10 measured requests per application the 95th percentile is the maximum; use 20 or more before quoting it.",
+    "A live run includes the provider's start-up, the network and the model, which Seatline cannot see. Only the broker's `queue_wait`, `cleanup` and handshake phases are purely local; compare with the fake-provider run of the same scenario to estimate the rest."
+  ]
+}

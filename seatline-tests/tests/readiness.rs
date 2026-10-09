@@ -3,7 +3,9 @@ mod support;
 
 use seatline_core::protocol::{Authentication, Availability, ProviderState};
 use seatline_core::readiness::{Freshness, Source};
-use seatline_core::turn::{Message, Role, SessionPolicy, SignInClassification, ToolPolicy, Turn};
+use seatline_core::turn::{
+    Message, ReasoningEffort, Role, SessionPolicy, SignInClassification, ToolPolicy, Turn,
+};
 use seatline_providers::{Provider, Update, readiness::Ready};
 use std::ffi::OsString;
 use std::time::Duration;
@@ -300,6 +302,69 @@ fn all_providers_prepare_without_generating_then_reuse_verified_readiness() {
             2
         );
     }
+}
+
+#[test]
+fn a_checked_claude_send_runs_one_readiness_check_and_one_generation_with_the_effort() {
+    let _fixture = fixture_lifetime();
+    let fake = FakeClaude::install(FIXTURES, "answers", "signed-in");
+    independent_executable(&fake.dir, FakeClaude::file_name());
+    // Its own home, so the machine's real Claude files cannot change the
+    // fingerprints between the check and the launch.
+    let home = fake.dir.join("isolated-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let ready = Ready::new(fake.adapter_with_env([(
+        OsString::from(if cfg!(windows) { "USERPROFILE" } else { "HOME" }),
+        home.into_os_string(),
+    )]));
+    let turn = |effort| Turn {
+        system: None,
+        messages: vec![Message {
+            role: Role::User,
+            text: "hello".into(),
+        }],
+        model: None,
+        reasoning_effort: effort,
+        service_tier: None,
+        tools: ToolPolicy::None,
+        session: SessionPolicy::Ephemeral,
+        continuation: None,
+        cleanup_group: None,
+        check_sign_in: false,
+    };
+    for (effort, option) in [
+        (Some(ReasoningEffort::Low), Some("--effort=low")),
+        (Some(ReasoningEffort::Max), Some("--effort=max")),
+        (None, None),
+    ] {
+        let mut send = ready.send_with_readiness(turn(effort), CACHED);
+        let updates = run_to_end(send.as_mut());
+        assert_eq!(updates.last(), Some(&Update::Completed), "{updates:?}");
+        let run = fake
+            .invocations()
+            .into_iter()
+            .rfind(|line| line.starts_with("-p "))
+            .unwrap();
+        assert_eq!(
+            run.split(' ').find(|arg| arg.starts_with("--effort")),
+            option,
+            "{run}"
+        );
+    }
+    // The first send checked readiness; the other two reused that evidence.
+    let lines = fake.invocations();
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.starts_with("auth "))
+            .count(),
+        1,
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines.iter().filter(|line| line.starts_with("-p ")).count(),
+        3
+    );
 }
 
 #[test]
