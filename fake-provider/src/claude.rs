@@ -119,6 +119,15 @@ fn print_mode(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCod
         return Ok(ExitCode::from(2));
     }
 
+    // A Claude from before `--effort` does what its command-line parser does
+    // with any option it does not know: say so, and exit before starting.
+    if behavior == "no-effort-option" {
+        if let Some(option) = args.iter().find(|arg| arg.starts_with("--effort")) {
+            let _ = writeln!(io::stderr(), "error: unknown option '{option}'");
+            return Ok(ExitCode::from(1));
+        }
+    }
+
     let Some(tools) = args
         .iter()
         .position(|arg| arg == "--tools")

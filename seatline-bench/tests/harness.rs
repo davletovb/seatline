@@ -145,6 +145,25 @@ fn warm_scenarios_count_processes_the_way_the_fake_provider_did() {
     }
     assert!(metric(app, "broker_sign_in_probe_us").is_null());
 
+    // The adapter read the provider's last line before the terminal update, so
+    // each request has a tail, and each sample carries the counts the fake
+    // reported, which the real broker wrote and the harness joined in.
+    assert_eq!(metric(app, "broker_tail_us")["n"], 3);
+    for sample in app["samples"].as_array().unwrap() {
+        assert_eq!(
+            sample["broker"]["usage"],
+            serde_json::json!({
+                "input": 12,
+                "cached_input": 0,
+                "cache_write": 0,
+                "output": 7,
+                "reasoning_output": 0
+            }),
+            "{sample}"
+        );
+        assert!(sample["broker"]["tail_us"].is_u64(), "{sample}");
+    }
+
     // Through the shipped adapter: the same work, but connecting and the
     // handshake cannot be told apart from outside, so they are not reported.
     let adapter = scenario(&report, "warm-send-adapter");
@@ -189,6 +208,8 @@ fn warm_scenarios_count_processes_the_way_the_fake_provider_did() {
     assert_eq!(status["counts"]["fake_turns"], 0);
     assert_eq!(status["counts"]["fake_probes"], 4);
     assert!(metric(&status["apps"][0], "client_submit_to_first_text_us").is_null());
+    // A readiness check runs no turn, so there is no result to wait after.
+    assert!(metric(&status["apps"][0], "broker_tail_us").is_null());
 
     // The broker said what it ran with.
     assert_eq!(report["broker"]["limits"]["max_provider_running"], 2);

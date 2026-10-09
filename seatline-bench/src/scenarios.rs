@@ -548,6 +548,11 @@ fn broker_of(record: &Value, handshakes: &HashMap<u64, u64>) -> Broker {
         launches: record["launches"].as_u64().unwrap_or(0),
         total_us: record["total_us"].as_u64().unwrap_or(0),
         phases_us: phases,
+        tail_us: record["tail_us"].as_u64(),
+        usage: record
+            .get("usage")
+            .filter(|usage| usage.is_object())
+            .cloned(),
     }
 }
 
@@ -730,6 +735,12 @@ pub fn metrics(measured: &[Sample]) -> BTreeMap<String, Summary> {
         "broker_total_us".into(),
         done.iter()
             .filter_map(|s| Some(s.broker.as_ref()?.total_us))
+            .collect(),
+    );
+    add(
+        "broker_tail_us".into(),
+        done.iter()
+            .filter_map(|s| s.broker.as_ref()?.tail_us)
             .collect(),
     );
     for phase in [

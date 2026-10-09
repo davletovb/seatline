@@ -107,7 +107,10 @@ pub struct Capabilities {
     pub web_search: Capability,
     pub model_selection: Capability,
     /// The adapter can honor an explicit reasoning budget. The model itself
-    /// may still reject a budget it does not support.
+    /// may still reject a budget it does not support. This is one flag for the
+    /// adapter, not a list of levels: an adapter whose CLI takes only some
+    /// (Claude has no `none`) refuses the others with
+    /// `REASONING_EFFORT_UNSUPPORTED` before it launches anything.
     #[serde(default = "unknown_capability")]
     pub reasoning_effort: Capability,
     /// The adapter can forward an explicit Standard/Fast tier. Availability

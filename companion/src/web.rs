@@ -236,6 +236,23 @@ fn release_broker(
     while events.try_recv().is_ok() {}
 }
 
+/// A WebSocket to the relay, over TCP with or without TLS.
+type RelaySocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Connects to the relay with Nagle's algorithm off.
+///
+/// Every event is sent as its own small encrypted frame. With Nagle on, a
+/// frame written while the one before it is still unacknowledged waits for that
+/// acknowledgement, which a relay may hold back for its delayed-ACK timer, so
+/// streamed text reached the browser in lumps instead of as it arrived. The
+/// option is set on the TCP socket before any TLS handshake.
+async fn connect_relay(
+    endpoint: &str,
+) -> Result<(RelaySocket, tungstenite::handshake::client::Response), tungstenite::Error> {
+    tokio_tungstenite::connect_async_with_config(endpoint, None, true).await
+}
+
 async fn connection(
     root: &Path,
     app: &str,
@@ -245,8 +262,7 @@ async fn connection(
     key: &Aes256Gcm,
     timing: Timing,
 ) -> Result<Infallible, End> {
-    let connecting =
-        tokio::time::timeout(timing.connect, tokio_tungstenite::connect_async(endpoint));
+    let connecting = tokio::time::timeout(timing.connect, connect_relay(endpoint));
     let (mut socket, _) = match connecting.await {
         Err(_) => return Err(End::retry("relay did not answer in time")),
         Ok(Err(tungstenite::Error::Http(response))) => {
@@ -546,6 +562,23 @@ mod tests {
         )
         .await
         .ok()
+    }
+
+    #[tokio::test]
+    async fn the_relay_connection_does_not_hold_small_frames_back_for_acknowledgements() {
+        let (endpoint, _) = relay(|mut socket| async move {
+            // Keep the connection open until the helper's side is dropped.
+            while socket.next().await.is_some() {}
+        })
+        .await;
+        let (socket, _) = connect_relay(&endpoint).await.unwrap();
+        let tokio_tungstenite::MaybeTlsStream::Plain(tcp) = socket.get_ref() else {
+            panic!("a ws:// endpoint is plain TCP");
+        };
+        assert!(
+            tcp.nodelay().unwrap(),
+            "streamed events would wait for the relay's delayed acknowledgements"
+        );
     }
 
     #[tokio::test]

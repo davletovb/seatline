@@ -119,9 +119,23 @@ as unknown. Codex supports the override and passes it directly in argv as
 `-c 'model_reasoning_effort="low"'` for that invocation only. The model may
 reject a budget it does not support. This capability describes the adapter's
 override support, not every budget's compatibility with every model or CLI
-version. Other adapters currently refuse explicit effort with
-`REASONING_EFFORT_UNSUPPORTED` before launching anything, including readiness
-probes on checked-send paths.
+version.
+
+Claude supports `low`, `medium`, `high`, `xhigh` and `max`, passed as one
+argument, `--effort=<level>`, for that invocation only. Claude has no `none`,
+and a level its CLI does not know is not an error there but a warning, after
+which it answers with its own default, which would silently replace the choice.
+So `none` is refused with `REASONING_EFFORT_UNSUPPORTED` before anything
+launches, readiness probes on checked-send paths included, although the
+capability is `Supported`: the capability is one flag for the adapter, not a
+list of levels, so an application offers `none` for Codex only. A Claude CLI
+from before `--effort` exits with `error: unknown option` before it starts; that
+is reported as the same non-retryable `REASONING_EFFORT_UNSUPPORTED` (one
+process was started and nothing ran) rather than as a vague process failure.
+Whether the installed CLI and the chosen model use a level is theirs to say.
+
+Gemini and Grok refuse explicit effort with `REASONING_EFFORT_UNSUPPORTED`
+before launching anything, including readiness probes on checked-send paths.
 Applications own whether this comes from a saved setting and which default
 they choose; Seatline does not impose a writing-specific budget.
 
@@ -201,8 +215,11 @@ The broker records nothing about requests unless `SEATLINE_TELEMETRY_FILE`
 names a file when it starts (a broker that is already running must restart; it
 exits when idle). It then appends one JSON line per request with durations
 for each phase (queue wait, sign-in probe, provider initialization, first text,
-completion, cleanup) and per connection for the handshake, and no prompt,
-answer, token, account name, path or session handle. The file is created
+completion, cleanup), the tail from the provider's final result to the
+terminal update and the token counts the provider reported (how many of the
+input came from its prompt cache, how many of the output were reasoning), and
+per connection for the handshake, and no prompt, answer, credential, account
+name, path or session handle. The file is created
 readable only by its owner (one that already exists is tightened to that),
 written off the request path through a bounded queue, and stops growing at
 16 MiB. See [phase telemetry](../docs/telemetry.md)

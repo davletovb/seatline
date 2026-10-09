@@ -142,6 +142,13 @@ pub fn parse(line: &str) -> Result<Line, Malformed> {
                         output_tokens: event
                             .pointer("/usage/output_tokens")
                             .and_then(Value::as_u64),
+                        cached_input_tokens: event
+                            .pointer("/usage/cache_read_input_tokens")
+                            .and_then(Value::as_u64),
+                        cache_write_input_tokens: event
+                            .pointer("/usage/cache_creation_input_tokens")
+                            .and_then(Value::as_u64),
+                        reasoning_output_tokens: None,
                     },
                 }
             }
@@ -225,6 +232,14 @@ pub fn names_unknown_session(message: &str) -> bool {
     ]
     .iter()
     .any(|phrase| lower.contains(phrase))
+}
+
+/// Whether Claude's message says its command line does not know `option` (given
+/// in lower case). Claude's CLI reports this on stderr and exits before it
+/// starts anything: `error: unknown option '--effort=low'`.
+pub fn names_unknown_option(message: &str, option: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("unknown option") && lower.contains(option)
 }
 
 /// Classifies a failed `result` by specific phrases, never bare words such as
@@ -418,6 +433,25 @@ mod tests {
         }
     }
     #[test]
+    fn an_unknown_option_is_told_from_other_complaints() {
+        for message in [
+            "error: unknown option '--effort=low'\n",
+            "Error: Unknown option '--effort' (Did you mean --model?)",
+        ] {
+            assert!(names_unknown_option(message, "--effort"), "{message}");
+        }
+        for message in [
+            // Another option, a value Claude merely warns about, and silence.
+            "error: unknown option '--safe-mode'",
+            "Warning: Unknown --effort value 'bogus' - ignoring it",
+            "error: option '--effort <level>' argument missing",
+            "",
+        ] {
+            assert!(!names_unknown_option(message, "--effort"), "{message}");
+        }
+    }
+
+    #[test]
     fn usage_includes_cache_creation_and_cache_reads() {
         let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"abc-123","usage":{"input_tokens":10,"cache_creation_input_tokens":4,"cache_read_input_tokens":6,"output_tokens":3}}"#;
         assert!(matches!(
@@ -425,7 +459,11 @@ mod tests {
             Ok(Line::ResultSuccess {
                 usage: Usage {
                     input_tokens: Some(20),
-                    output_tokens: Some(3)
+                    output_tokens: Some(3),
+                    // What the total is made of, as Claude reports it.
+                    cached_input_tokens: Some(6),
+                    cache_write_input_tokens: Some(4),
+                    reasoning_output_tokens: None,
                 },
                 ..
             })

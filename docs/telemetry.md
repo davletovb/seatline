@@ -76,12 +76,29 @@ The span up to the terminal update belongs to the phase the request was in; late
 
 The outcome is how the **scheduler** ended the turn, with one exception: when the hub ends a request itself by sending its client a terminal update, and then stops the exchange (a session-ledger failure sends `failed` with `SESSION_LIMIT_REACHED` or `SESSION_STORE_FAILED`), the record carries what the client was told. The scheduler's own verdict there can be `cancelled`, or even `completed` if the exchange had finished before the hub acted, and neither is what the client saw.
 
+## Beside the phases: the tail and the usage
+
+Two more fields explain a slow request without being phases. Neither changes the phases, which still tile the request, and a record without them reads as it always did.
+
+| Field | What it is |
+| --- | --- |
+| `tail_us` | From the moment the adapter read the provider's **final result** (Claude's `result`, Codex's `turn.completed`, the closing line of Antigravity and Grok), whether it succeeded or failed, to the terminal update. It is inside `completion` (and so overlaps it) and is not a phase. |
+| `usage` | The counts the provider reported, as it counts them: `input`, `cached_input` (served from its prompt cache), `cache_write` (written to it), `output` and `reasoning_output` (the part of `output` the model spent reasoning). Only counts the provider reported are present, and a reported zero is kept. The last report of the turn is the one recorded. |
+
+**Reading the tail.** An application that waits for `Completed` waits through it: the provider's process leaving, up to the adapter's finish grace (five seconds for Claude, Antigravity and Grok, and for a Codex turn that is persistent or failed; a successful ephemeral Codex turn is stopped at once, so its tail is short), and the adapter's own wrap-up (Antigravity removes its transcripts first). Seconds of tail mean the answer was complete long before the application heard so. Whether to end a provider's process sooner is a decision this field exists to inform (tracker I-05), not one it makes.
+
+**Reading the usage.** `cached_input` close to `input` means the start of the prompt is being served from the provider's cache. A `cached_input` of zero on request after request means either that start changes every turn (an application that puts what varies before what is fixed), so the whole prompt is paid for each time, or that the prompt is shorter than the least a provider will cache; the prompt's own length, `input`, tells the two apart. A large `reasoning_output` next to a long `first_text` is the model thinking, which Seatline cannot shorten and a lower reasoning effort or a faster model can.
+
+The usage detail stays in the telemetry file and in-process hosts. It is **not** on the companion wire: a client sees the same two totals it always did.
+
 ## Unsupported and missing phases
 
 | Phase or surface | Status |
 | --- | --- |
 | `sign_in_probe` on `send` | **Legacy sends: Codex and Claude only.** Explicit `send_ready`/`send_ready_with_policy` can run a readiness probe on every adapter and reports its span; cached/shared sends run no new probe. Gemini and Grok run no inline sign-in probe on the legacy send path (their turns fail with an authentication error instead), so the phase is absent for them, as it is for any send that does not ask for `check_sign_in`. |
 | `sign_in_probe` on `status` | Every provider: a fresh status/readiness/preparation check is the probe; cached/shared readiness counts zero new probes. `probes` counts a status request as one check even when the provider was not found and nothing was spawned, so it counts readiness checks, not processes. |
+| `tail_us` | Every adapter reports when it read the provider's final result. It is absent when the provider's process ended without one (a crash, malformed output, a cancel before the result), for readiness checks and cleanup, and for any request refused before it ran. |
+| `usage` | Codex: all five counts. Claude: `input` (its input, cache reads and cache writes together), `cached_input`, `cache_write` and `output`; Claude reports no reasoning split. Antigravity: `input` and `output`. Grok: none. Only when the provider's final line carried them. |
 | `launched` and `provider_init` | Gemini and Grok start their process while the exchange is built, so `launched` is observed right after `built` and the whole synchronous start is inside `provider_init`. Codex and Claude launch after any probe. |
 | `first_text` granularity | Codex reports each agent message whole, so its first text is the first complete message. Claude reports text as it streams; Gemini and Grok report it as their adapters do. |
 | `cleanup` | Only the time to drop the exchange. Per-turn file cleanup an adapter does *before* its terminal update, such as Gemini deleting its transcripts, is inside `completion`, not `cleanup` (slice F-02 moves it). Grok removes its per-turn workspace on a background thread, which is in neither. |
@@ -107,7 +124,8 @@ One JSON object per line. `schema` is `1`; adding a field does not change it, re
              "started":9100,"first_text":9300,"terminal":9600,"released":9650},
  "phases_us":{"queue_wait":13,"sign_in_probe":5080,"provider_init":3807,"first_text":200,
               "completion":300,"cleanup":50},
- "total_us":9650}
+ "total_us":9650,"tail_us":240,
+ "usage":{"input":1200,"cached_input":1024,"cache_write":0,"output":84,"reasoning_output":60}}
 
 {"kind":"dropped","schema":1,"count":4}
 ```
@@ -120,17 +138,19 @@ A request is identified by `(connection, request)`: the broker's own number for 
 
 ## What is never recorded
 
-Prompts, answer text, tokens and credentials, account names, file system paths, provider output and error text, and native session handles never enter a timeline or a record. A record holds only:
+Prompts, answer text, credentials (tokens and keys), account names, file system paths, provider output and error text, and native session handles never enter a timeline or a record. A record holds only:
 
 - the **app name** and **request ID**, which the local administrator and the application chose: an application that turns telemetry on should not put private data in request IDs;
 - the static **provider** and **method** names (a method the broker does not serve is recorded as `unknown`, never as what the client sent), and **failure reasons** from the fixed list in `companion/src/wire.rs`;
-- numbers: durations, counts and the broker's limits.
+- numbers: durations, counts and the broker's limits. The counts include how many tokens a provider reported using (`usage`), which show how much was sent and cached, never what it said. They are keyed without the word "token", the one a credential check looks for.
 
 Three tests pin this: a hub test sends a request whose prompt, answer and native session handle are all recognizable and asserts that none appears in the record; another sends a made-up method and asserts it is not echoed; and an IPC test asserts the app's credential is not in the file.
 
 ## Cost
 
 **Disabled** (the default): a turn carries `timeline: None`. The scheduler's per-update cost is one `Option` check; no clock is read and nothing is allocated. In the hub, each telemetry call starts with `if !enabled() { return }` and builds no lookup key. The one thing that is not conditional: Codex and Claude read the clock twice around a sign-in probe they run, because the adapter cannot know whether anyone is listening; that is two reads against a process spawn.
+
+**Both:** each adapter reads the clock once when it sees the provider's final result, because it cannot know whether anyone is listening: one `Instant::now()` per turn, which is the same thing it already does around a sign-in probe.
 
 **Enabled:** an update that sets a mark that is not yet set reads the clock (`Instant::now`) once; every other update only asks the timeline whether it wants it. Each request allocates its record's strings once, and records leave through the bounded queue.
 

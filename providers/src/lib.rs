@@ -22,9 +22,9 @@
 use std::io;
 
 pub use seatline_core::exchange::{Exchange, Scripted, Timeouts, Update};
-use seatline_core::protocol::{Capabilities, ErrorCode, Failure};
+use seatline_core::protocol::{Capabilities, Capability, ErrorCode, Failure};
 pub use seatline_core::stream::BUSY_LIMIT;
-use seatline_core::turn::Turn;
+use seatline_core::turn::{ReasoningEffort, Turn};
 
 pub mod claude;
 pub mod codex;
@@ -122,6 +122,16 @@ pub trait Provider {
     /// handle. Only such modes accept a persistent [`Turn`].
     fn supports_persistent_session(&self) -> bool {
         false
+    }
+
+    /// Whether a turn that names `effort` is refused without launching
+    /// anything. The default follows [`Capabilities::reasoning_effort`]. An
+    /// adapter whose CLI takes only some levels refuses the others here, so a
+    /// checked send turns them away before any readiness probe, as it does for
+    /// an adapter that takes none.
+    fn refuses_reasoning_effort(&self, effort: ReasoningEffort) -> bool {
+        let _ = effort;
+        self.capabilities().reasoning_effort == Capability::Unsupported
     }
 
     /// Starts checking availability, authentication, and capabilities. The

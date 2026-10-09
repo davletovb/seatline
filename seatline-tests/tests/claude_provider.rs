@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use seatline_core::exchange::SessionLoss;
 use seatline_core::protocol::{Authentication, Availability, Capability, ErrorCode};
-use seatline_core::turn::{Message, Role, SessionPolicy, ToolPolicy, Turn};
+use seatline_core::turn::{Message, ReasoningEffort, Role, SessionPolicy, ToolPolicy, Turn};
 use seatline_providers::claude::Claude;
 use seatline_providers::{Provider, Update};
 use serde_json::Value;
@@ -131,6 +131,141 @@ fn a_chosen_model_goes_to_claude_as_one_argument() {
         .cloned()
         .collect();
     assert!(!default[0].contains("--model"), "{}", default[0]);
+}
+
+#[test]
+fn a_saved_effort_choice_is_one_argument_and_does_not_leak_to_the_next_turn() {
+    let claude = FakeClaude::install(FIXTURES, "answers", "signed-in");
+    let adapter = claude.adapter();
+    assert_eq!(
+        adapter.capabilities().reasoning_effort,
+        Capability::Supported
+    );
+    for effort in [
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::Xhigh,
+        ReasoningEffort::Max,
+    ] {
+        let updates = run_to_end(
+            adapter
+                .send(Turn {
+                    model: Some("sonnet".to_owned()),
+                    reasoning_effort: Some(effort),
+                    session: SessionPolicy::Ephemeral,
+                    check_sign_in: false,
+                    ..ask("hi")
+                })
+                .as_mut(),
+        );
+        assert_eq!(updates.last(), Some(&Update::Completed), "{updates:?}");
+        let run = prints(&claude).last().unwrap().clone();
+        let efforts: Vec<&str> = run
+            .split(' ')
+            .filter(|arg| arg.contains("effort"))
+            .collect();
+        assert_eq!(efforts, [format!("--effort={}", effort.as_str())], "{run}");
+        // The model and the session policy travel with it, unchanged.
+        assert!(run.contains("--model=sonnet"), "{run}");
+        assert!(run.contains("--no-session-persistence"), "{run}");
+    }
+    let before = prints(&claude).len();
+    run_to_end(
+        adapter
+            .send(Turn {
+                check_sign_in: false,
+                ..ask("default")
+            })
+            .as_mut(),
+    );
+    let runs = prints(&claude);
+    assert_eq!(runs.len(), before + 1);
+    assert!(
+        !runs.last().unwrap().contains("effort"),
+        "{}",
+        runs.last().unwrap()
+    );
+}
+
+#[test]
+fn an_effort_claude_has_no_level_for_is_refused_before_anything_runs() {
+    let claude = FakeClaude::install(FIXTURES, "answers", "signed-in");
+    let updates = run_to_end(
+        claude
+            .adapter()
+            .send(Turn {
+                reasoning_effort: Some(ReasoningEffort::None),
+                ..ask("hi")
+            })
+            .as_mut(),
+    );
+    // Claude would only warn about an unknown level and answer with its
+    // default, silently replacing the choice, so the adapter says no.
+    assert_eq!(
+        failure(&updates),
+        (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+    );
+    assert!(matches!(updates.last(), Some(Update::Failed(error)) if !error.retryable));
+    // Not even the sign-in probe ran.
+    assert!(
+        claude.invocations().is_empty(),
+        "{:?}",
+        claude.invocations()
+    );
+}
+
+#[test]
+fn a_claude_from_before_the_effort_option_says_so_instead_of_failing_vaguely() {
+    let claude = FakeClaude::install(FIXTURES, "no-effort-option", "signed-in");
+    let adapter = claude.adapter();
+    let updates = run_to_end(
+        adapter
+            .send(Turn {
+                reasoning_effort: Some(ReasoningEffort::Low),
+                check_sign_in: false,
+                ..ask("hi")
+            })
+            .as_mut(),
+    );
+    // One run, which that Claude rejected before it started anything: the
+    // choice is unsupported there, and asking again will not change that.
+    assert_eq!(
+        failure(&updates),
+        (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+    );
+    assert!(matches!(updates.last(), Some(Update::Failed(error)) if !error.retryable));
+    assert!(!updates.contains(&Update::Started), "{updates:?}");
+    assert_eq!(prints(&claude).len(), 1);
+
+    // The same Claude still answers a turn that asks for no effort.
+    let updates = run_to_end(
+        adapter
+            .send(Turn {
+                check_sign_in: false,
+                ..ask("hi again")
+            })
+            .as_mut(),
+    );
+    assert_eq!(updates.last(), Some(&Update::Completed), "{updates:?}");
+
+    // Asking for an effort is not what makes an early exit that. A Claude that
+    // dies before it starts for another reason stays an ordinary failure.
+    claude.set("resume-crashes", "signed-in");
+    let updates = run_to_end(
+        adapter
+            .send(Turn {
+                continuation: Some("session-1".to_owned()),
+                reasoning_effort: Some(ReasoningEffort::Low),
+                check_sign_in: false,
+                ..ask("resume")
+            })
+            .as_mut(),
+    );
+    assert_eq!(
+        failure(&updates),
+        (ErrorCode::ProviderFailed, "PROCESS_EXITED")
+    );
 }
 
 #[test]

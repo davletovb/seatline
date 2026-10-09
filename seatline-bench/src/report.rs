@@ -95,7 +95,7 @@ fn ms(us: u64) -> String {
     format!("{:.1}", us as f64 / 1000.0)
 }
 
-const SHOWN: [(&str, &str); 10] = [
+const SHOWN: [(&str, &str); 11] = [
     ("client_prepare_us", "prepare"),
     ("client_submit_to_first_text_us", "submit→text"),
     ("client_start_to_first_text_us", "start→text"),
@@ -105,6 +105,7 @@ const SHOWN: [(&str, &str); 10] = [
     ("broker_provider_init_us", "init"),
     ("broker_first_text_us", "text wait"),
     ("broker_completion_us", "completion"),
+    ("broker_tail_us", "tail"),
     ("broker_cleanup_us", "cleanup"),
 ];
 
@@ -390,6 +391,26 @@ mod tests {
         assert!(!compare(&unknown, &unknown).contains("not a like-for-like"));
         // The same profile on both sides is a like-for-like comparison.
         assert!(!compare(&release_broker, &release_broker).contains("not a like-for-like"));
+    }
+
+    #[test]
+    fn a_sample_saved_before_the_tail_and_usage_were_recorded_still_loads() {
+        // The shape of a broker's account in a report made before slice I: none
+        // of the two newer fields. Reports are kept as evidence and compared
+        // against later ones, so they must keep loading.
+        let before = serde_json::json!({
+            "outcome": "completed",
+            "probes": 0,
+            "launches": 1,
+            "total_us": 6200,
+            "phases_us": {"queue_wait": 12, "completion": 5200}
+        });
+        let broker: crate::workload::Broker = serde_json::from_value(before).unwrap();
+        assert!(broker.tail_us.is_none() && broker.usage.is_none());
+        // And a sample that has neither writes neither, so old and new reports
+        // of the same run differ only by what they add.
+        let written = serde_json::to_value(&broker).unwrap();
+        assert!(written.get("tail_us").is_none() && written.get("usage").is_none());
     }
 
     #[test]

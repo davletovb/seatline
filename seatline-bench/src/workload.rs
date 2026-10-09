@@ -131,4 +131,13 @@ pub struct Broker {
     pub launches: u64,
     pub total_us: u64,
     pub phases_us: std::collections::BTreeMap<String, u64>,
+    /// From the provider's final result to the terminal update, for an
+    /// adapter that reports one: what the application waited after its answer
+    /// was complete. Absent from reports made before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_us: Option<u64>,
+    /// The token counts the provider reported (cached input, reasoning
+    /// output, and so on), as the broker recorded them. Counts only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<serde_json::Value>,
 }

@@ -86,7 +86,7 @@ fn unsupported_service_tiers_are_refused_before_direct_or_readiness_processes() 
 
 #[test]
 fn adapters_refuse_an_effort_choice_they_cannot_honor_without_launching() {
-    for kind in [Kind::Claude, Kind::Gemini, Kind::Grok] {
+    for kind in [Kind::Gemini, Kind::Grok] {
         for missing in [false, true] {
             let rig = if missing {
                 Rig::without_executable(kind)
@@ -129,6 +129,52 @@ fn adapters_refuse_an_effort_choice_they_cannot_honor_without_launching() {
                 assert_eq!(rig.command_lines(), "");
                 rig.assert_nothing_left();
             }
+        }
+    }
+}
+
+#[test]
+fn claude_takes_every_effort_but_none_and_refuses_that_one_before_any_probe_or_launch() {
+    for missing in [false, true] {
+        let rig = if missing {
+            Rig::without_executable(Kind::Claude)
+        } else {
+            Rig::new(Kind::Claude, Behaviour::Answers)
+        };
+        assert_eq!(
+            rig.provider.capabilities().reasoning_effort,
+            Capability::Supported
+        );
+        let ready = Ready::boxed(match &rig.fixture {
+            Fixture::Claude(fake) => Box::new(fake.adapter()),
+            _ => unreachable!(),
+        });
+        let request = Turn {
+            reasoning_effort: Some(ReasoningEffort::None),
+            ..rig.ask("hi")
+        };
+        // Claude has no such level. Neither a status probe nor a generation may
+        // launch, even when readiness would fail because the executable is
+        // absent: the answer to a level it lacks does not depend on the machine.
+        for mut exchange in [
+            rig.provider.send(request.clone()),
+            ready.send_with_readiness(request.clone(), Freshness::Fresh),
+            ready.send_with_readiness_policy(
+                request,
+                Freshness::Fresh,
+                SignInPolicy::try_from(vec![
+                    seatline_core::turn::SignInClassification::Subscription,
+                ])
+                .unwrap(),
+            ),
+        ] {
+            let updates = run_to_end(exchange.as_mut());
+            assert_eq!(
+                failure(&updates),
+                (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+            );
+            assert_eq!(rig.command_lines(), "");
+            rig.assert_nothing_left();
         }
     }
 }

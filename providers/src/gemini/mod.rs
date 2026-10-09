@@ -514,6 +514,7 @@ impl Provider for Gemini {
             sources: SourceCollector::new(ID),
             outcome: None,
             finish_by: None,
+            result_at: None,
             done: false,
         })
     }
@@ -890,6 +891,8 @@ struct Turn {
     sources: SourceCollector,
     outcome: Option<Result<(), ErrorBody>>,
     finish_by: Option<Instant>,
+    /// When Antigravity's final result was read: for telemetry.
+    result_at: Option<Instant>,
     done: bool,
 }
 
@@ -1078,10 +1081,14 @@ impl Turn {
                 } else {
                     Ok(())
                 };
+                self.result_at.get_or_insert_with(Instant::now);
                 self.outcome = Some(outcome);
                 self.finish_by = Some(private_fs::after(FINISH_GRACE));
             }
-            Ok(Line::ResultFailed(error)) => self.fail(error),
+            Ok(Line::ResultFailed(error)) => {
+                self.result_at.get_or_insert_with(Instant::now);
+                self.fail(error)
+            }
             Ok(Line::Ignored) => {}
         }
     }
@@ -1229,6 +1236,10 @@ impl Turn {
 }
 
 impl Exchange for Turn {
+    fn result_at(&self) -> Option<Instant> {
+        self.result_at
+    }
+
     fn next(&mut self, deadline: Instant) -> Option<Update> {
         let busy_until = deadline.max(private_fs::after(BUSY_LIMIT));
         loop {

@@ -166,6 +166,7 @@ pub fn parse(line: &str) -> Result<Line, Malformed> {
                         output_tokens: result
                             .pointer("/usage/output_tokens")
                             .and_then(Value::as_u64),
+                        ..Usage::default()
                     },
                 }
             } else {

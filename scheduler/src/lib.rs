@@ -65,6 +65,18 @@ struct Running {
     timeline: Option<Timeline>,
 }
 
+/// What `ask` reports about `exchange` for telemetry, or nothing if there is no
+/// exchange or the adapter panics answering.
+fn report<T>(
+    exchange: Option<&dyn Exchange>,
+    ask: impl FnOnce(&dyn Exchange) -> Option<T>,
+) -> Option<T> {
+    let exchange = exchange?;
+    catch_unwind(AssertUnwindSafe(|| ask(exchange)))
+        .ok()
+        .flatten()
+}
+
 impl Running {
     fn timeout(&self, now: Instant) -> Option<TimeoutKind> {
         let limits = self.timeouts?;
@@ -118,22 +130,25 @@ impl Running {
     }
 
     /// Closes the timeline of a turn that is being removed: its terminal mark
-    /// if it never saw one, the probe its exchange measured, and the time its
-    /// exchange took to drop, which is when its process is killed and reaped.
+    /// if it never saw one, the probe and the final result its exchange
+    /// measured, and the time its exchange took to drop, which is when its
+    /// process is killed and reaped.
     fn finish_timeline(&mut self) -> Option<Timeline> {
         let mut timeline = self.timeline.take()?;
         timeline.terminal(Instant::now());
         // Like every other call into an adapter, behind the panic boundary: this
         // runs after the turn has left `running`, so a panic escaping here
         // would leave nothing to report the turn's end. Telemetry is an extra,
-        // so a probe report that panics is simply dropped.
-        let probe = self.exchange.as_ref().and_then(|exchange| {
-            catch_unwind(AssertUnwindSafe(|| exchange.probe_span()))
-                .ok()
-                .flatten()
-        });
+        // so a report that panics is simply dropped, and each is asked on its
+        // own, so that one broken report does not take the other with it.
+        let exchange = self.exchange.as_deref();
+        let probe = report(exchange, |exchange| exchange.probe_span());
+        let result = report(exchange, |exchange| exchange.result_at());
         if let Some(span) = probe {
             timeline.set_probe(span);
+        }
+        if let Some(at) = result {
+            timeline.set_result(at);
         }
         self.drop_exchange();
         timeline.released(Instant::now());
@@ -952,6 +967,109 @@ mod tests {
         assert!(!supervisor.contains(id));
         let timeline = supervisor.take_timeline(id).expect("a timeline");
         assert_eq!(timeline.probes(), 0, "the broken report is dropped");
+        assert!(timeline.marks().released.is_some());
+    }
+
+    /// Reports the result it says it saw, and usage with its answer.
+    struct Reports(VecDeque<Update>, Instant);
+
+    impl Exchange for Reports {
+        fn next(&mut self, _deadline: Instant) -> Option<Update> {
+            self.0.pop_front()
+        }
+
+        fn cancel(&mut self, _grace: Duration) {}
+
+        fn result_at(&self) -> Option<Instant> {
+            Some(self.1)
+        }
+    }
+
+    #[test]
+    fn the_result_an_exchange_saw_and_the_usage_it_reported_reach_the_timeline() {
+        use seatline_core::turn::Usage;
+        let mut scheduler = Scheduler::new();
+        let result = Instant::now();
+        // The terminal update is observed at least this long after the result.
+        std::thread::sleep(Duration::from_millis(2));
+        let usage = Usage {
+            input_tokens: Some(100),
+            output_tokens: Some(20),
+            cached_input_tokens: Some(80),
+            reasoning_output_tokens: Some(12),
+            ..Usage::default()
+        };
+        let id = scheduler.start_timed(
+            Box::new(Reports(
+                VecDeque::from([
+                    Update::Launched,
+                    Update::Started,
+                    Update::Delta("hi".into()),
+                    Update::Usage(usage),
+                    Update::Completed,
+                ]),
+                result,
+            )),
+            Some(limits()),
+            Duration::ZERO,
+            timeline(),
+        );
+        let _ = scheduler.poll(Duration::from_millis(1));
+        let timeline = scheduler.take_timeline(id).expect("a timeline");
+        assert_eq!(timeline.usage(), Some(usage));
+        assert!(
+            timeline.tail_us().is_some_and(|tail| tail >= 2_000),
+            "{:?}",
+            timeline.tail_us()
+        );
+        assert_ordered(&timeline);
+        assert_eq!(timeline.phases().sum(), timeline.total_us());
+    }
+
+    /// Reports its probe, but panics when asked for its result.
+    struct PanicsReportingItsResult(VecDeque<Update>, Span);
+
+    impl Exchange for PanicsReportingItsResult {
+        fn next(&mut self, _deadline: Instant) -> Option<Update> {
+            self.0.pop_front()
+        }
+
+        fn cancel(&mut self, _grace: Duration) {}
+
+        fn probe_span(&self) -> Option<Span> {
+            Some(self.1)
+        }
+
+        fn result_at(&self) -> Option<Instant> {
+            panic!("a broken result report")
+        }
+    }
+
+    #[test]
+    fn a_result_report_that_panics_drops_itself_and_not_the_probe_or_the_turn() {
+        let mut supervisor = Supervisor::new();
+        let mut probe = Span::begin(Instant::now());
+        probe.finish(Instant::now());
+        let id = supervisor.start_timed(
+            Box::new(PanicsReportingItsResult(
+                VecDeque::from([Update::Started, Update::Completed]),
+                probe,
+            )),
+            Some(limits()),
+            Duration::ZERO,
+            timeline(),
+        );
+        let events = supervisor.poll(Duration::from_millis(1));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Event::Ended { turn_id, reason: EndReason::Completed } if *turn_id == id
+            )),
+            "{events:?}"
+        );
+        let timeline = supervisor.take_timeline(id).expect("a timeline");
+        assert_eq!(timeline.probes(), 1, "the probe report is kept");
+        assert_eq!(timeline.tail_us(), None, "the broken report is dropped");
         assert!(timeline.marks().released.is_some());
     }
 

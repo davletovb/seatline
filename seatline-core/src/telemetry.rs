@@ -39,12 +39,24 @@
 //! the polling interval cannot be resolved. All instants are
 //! [`Instant`]s, so every duration is monotonic; no wall-clock time is stored.
 //!
+//! # Beside the phases
+//!
+//! Two more things explain a slow request without being phases. The *tail* is
+//! the time from the provider's final result, as the adapter saw it, to the
+//! terminal update: the process exiting and the adapter's own wrap-up, which an
+//! application waits through after its answer is complete (see
+//! [`Exchange::result_at`](crate::exchange::Exchange::result_at)). The *usage*
+//! is the counts of tokens the provider reported, including how many of the
+//! input came from its prompt cache and how many of the output were reasoning,
+//! which tell a slow model from a prompt that is never cached.
+//!
 //! # What is never recorded
 //!
-//! Prompts, answer text, tokens, account names, file paths, provider error
-//! text and native session handles never enter a timeline or a record. A record
-//! holds identifiers the application chose (the request ID and the app name),
-//! static provider and failure-reason names, and durations.
+//! Prompts, answer text, credentials (tokens and keys), account names, file
+//! paths, provider error text and native session handles never enter a
+//! timeline or a record. A record holds identifiers the application chose (the
+//! request ID and the app name), static provider and failure-reason names,
+//! durations, and counts: how many tokens a provider reported, never which.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -53,6 +65,7 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::exchange::Update;
+use crate::turn::Usage;
 
 /// The version of the record format. It changes only when a field is removed
 /// or its meaning changes; adding a field does not.
@@ -123,6 +136,10 @@ pub struct Timeline {
     stop_requested: Option<Instant>,
     terminal: Option<Instant>,
     released: Option<Instant>,
+    /// When the adapter saw the provider's final result.
+    result: Option<Instant>,
+    /// The last usage the provider reported.
+    usage: Option<Usage>,
 }
 
 impl Timeline {
@@ -142,6 +159,8 @@ impl Timeline {
             stop_requested: None,
             terminal: None,
             released: None,
+            result: None,
+            usage: None,
         }
     }
 
@@ -167,11 +186,20 @@ impl Timeline {
         self.probe.get_or_insert(span);
     }
 
-    /// Whether `update` would set a mark that is not set yet. A host that
-    /// reads the clock for [`Timeline::observe`] can ask first, so that a
-    /// flood of progress, or every delta after the first, costs no clock read.
+    /// When the exchange's adapter saw the provider's final result, as it
+    /// reported it. Only the first report counts.
+    pub fn set_result(&mut self, at: Instant) {
+        self.result.get_or_insert(at);
+    }
+
+    /// Whether `update` would set a mark that is not set yet, or carries usage.
+    /// A host that reads the clock for [`Timeline::observe`] can ask first, so
+    /// that a flood of progress, or every delta after the first, costs no clock
+    /// read. A turn reports usage once or twice, so asking for it costs nothing
+    /// worth avoiding.
     pub fn wants(&self, update: &Update) -> bool {
         match update {
+            Update::Usage(_) => true,
             Update::Launched => self.launched.is_none(),
             Update::Started => self.started.is_none(),
             Update::Delta(text) => !text.is_empty() && self.first_text.is_none(),
@@ -204,6 +232,8 @@ impl Timeline {
             Update::Completed | Update::Failed(_) | Update::Stopped => {
                 self.terminal.get_or_insert(at);
             }
+            // Counts only grow, so the last report is the turn's total.
+            Update::Usage(usage) => self.usage = Some(*usage),
             _ => {}
         }
     }
@@ -247,6 +277,19 @@ impl Timeline {
     /// Provider processes this request launched for its turn.
     pub fn launches(&self) -> u8 {
         u8::from(self.launched.is_some())
+    }
+
+    /// What the provider reported using, if it did.
+    pub fn usage(&self) -> Option<Usage> {
+        self.usage
+    }
+
+    /// From the provider's final result to the terminal update, in
+    /// microseconds: the tail an application waits through after its answer is
+    /// complete. Absent when the adapter reported no result, or the request
+    /// ended without a terminal update.
+    pub fn tail_us(&self) -> Option<u64> {
+        Some(micros(self.result?, self.terminal?))
     }
 
     /// Every mark, as microseconds since `received`.
@@ -463,6 +506,40 @@ pub struct Identity {
     pub method: String,
 }
 
+/// The token counts a provider reported for a request. Counts only, never the
+/// tokens: a count shows how much was sent and cached, not what it said. The
+/// keys leave the word out, because it is the one a credential check looks for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct UsageRecord {
+    #[serde(rename = "input", skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// Of the input, those served from the provider's prompt cache.
+    #[serde(rename = "cached_input", skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    /// Of the input, those written to the provider's prompt cache.
+    #[serde(rename = "cache_write", skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens: Option<u64>,
+    #[serde(rename = "output", skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    /// Of the output, those the model spent reasoning.
+    #[serde(rename = "reasoning_output", skip_serializing_if = "Option::is_none")]
+    pub reasoning_output_tokens: Option<u64>,
+}
+
+impl UsageRecord {
+    /// The counts of `usage`, or `None` when it reported none at all.
+    pub fn of(usage: Usage) -> Option<Self> {
+        let record = Self {
+            input_tokens: usage.input_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            cache_write_input_tokens: usage.cache_write_input_tokens,
+            output_tokens: usage.output_tokens,
+            reasoning_output_tokens: usage.reasoning_output_tokens,
+        };
+        (record != Self::default()).then_some(record)
+    }
+}
+
 /// One request's phases, outcome and counts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RequestRecord {
@@ -486,6 +563,13 @@ pub struct RequestRecord {
     pub marks_us: Marks,
     pub phases_us: Phases,
     pub total_us: u64,
+    /// From the provider's final result to the terminal update. It overlaps
+    /// `completion`, and is not a phase: the phases still tile `total_us`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail_us: Option<u64>,
+    /// What the provider reported using, when it reported anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageRecord>,
 }
 
 impl RequestRecord {
@@ -510,6 +594,8 @@ impl RequestRecord {
             marks_us: timeline.marks(),
             phases_us: timeline.phases(),
             total_us: timeline.total_us(),
+            tail_us: timeline.tail_us(),
+            usage: timeline.usage().and_then(UsageRecord::of),
         }
     }
 }
@@ -1006,6 +1092,105 @@ mod tests {
         assert_eq!(object["kind"], "request");
         assert_eq!(object["outcome"], "completed");
         assert_eq!(object["schema"], SCHEMA);
+    }
+
+    fn identity() -> Identity {
+        Identity {
+            connection: 7,
+            request: "req-1".into(),
+            app: "app-a".into(),
+            provider: "claude".into(),
+            method: "send".into(),
+        }
+    }
+
+    #[test]
+    fn the_tail_and_usage_sit_beside_the_phases_without_changing_them() {
+        let clock = Clock::new();
+        let plain = full_send(&clock);
+
+        let mut timeline = full_send(&clock);
+        // The adapter saw the provider's last line at 1_100; the terminal update
+        // was observed at 1_300, so 200 microseconds went to the process
+        // leaving and the adapter's wrap-up.
+        timeline.set_result(clock.at(1_100));
+        timeline.observe(
+            &Update::Usage(Usage {
+                input_tokens: Some(900),
+                output_tokens: Some(10),
+                ..Usage::default()
+            }),
+            clock.at(1_100),
+        );
+        timeline.observe(
+            &Update::Usage(Usage {
+                input_tokens: Some(1_000),
+                output_tokens: Some(40),
+                cached_input_tokens: Some(800),
+                cache_write_input_tokens: Some(0),
+                reasoning_output_tokens: Some(25),
+            }),
+            clock.at(1_150),
+        );
+        // A second report of the result moves nothing.
+        timeline.set_result(clock.at(1_250));
+        assert_eq!(timeline.tail_us(), Some(200));
+        assert_eq!(timeline.phases(), plain.phases());
+        assert_eq!(timeline.marks(), plain.marks());
+        assert_eq!(timeline.phases().sum(), timeline.total_us());
+
+        let record = RequestRecord::new(identity(), &timeline, Outcome::Completed, None);
+        let json = serde_json::to_value(Record::Request(Box::new(record))).unwrap();
+        assert_eq!(json["tail_us"], 200);
+        // The last report is the total, and only counts that were reported
+        // appear; a zero the provider reported is a fact, so it stays.
+        assert_eq!(
+            json["usage"],
+            serde_json::json!({
+                "input": 1_000,
+                "cached_input": 800,
+                "cache_write": 0,
+                "output": 40,
+                "reasoning_output": 25
+            })
+        );
+    }
+
+    #[test]
+    fn without_a_result_or_usage_a_record_has_neither() {
+        let clock = Clock::new();
+        // No result reported: no tail, even though the request ended.
+        let mut timeline = full_send(&clock);
+        assert_eq!(timeline.tail_us(), None);
+        // A result but no terminal update: nothing to measure to.
+        let mut unfinished = Timeline::new(Kind::Send, clock.at(0));
+        unfinished.set_result(clock.at(10));
+        assert_eq!(unfinished.tail_us(), None);
+        // A usage report with no counts is no usage.
+        timeline.observe(&Update::Usage(Usage::default()), clock.at(1_200));
+        assert_eq!(UsageRecord::of(Usage::default()), None);
+        let record = RequestRecord::new(identity(), &timeline, Outcome::Completed, None);
+        let json = serde_json::to_value(Record::Request(Box::new(record))).unwrap();
+        assert!(json.get("tail_us").is_none(), "{json}");
+        assert!(json.get("usage").is_none(), "{json}");
+    }
+
+    #[test]
+    fn a_result_after_the_terminal_update_is_a_zero_tail_and_never_negative() {
+        let clock = Clock::new();
+        let mut timeline = full_send(&clock);
+        timeline.set_result(clock.at(5_000));
+        assert_eq!(timeline.tail_us(), Some(0));
+    }
+
+    #[test]
+    fn usage_is_always_wanted_and_progress_never_is() {
+        // `wants` is what lets the scheduler skip the clock for a flood of
+        // updates; usage is the one update with no mark that it always wants,
+        // and a progress update never.
+        let timeline = Timeline::new(Kind::Send, Instant::now());
+        assert!(timeline.wants(&Update::Usage(Usage::default())));
+        assert!(!timeline.wants(&Update::Activity));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 //! The sign-in probe as phase telemetry sees it (B-01): Codex and Claude report
-//! the stretch they spent probing; adapters without a probe report none. Marks
-//! are compared by order only, never against a wall-clock threshold.
+//! the stretch they spent probing; adapters without a probe report none. Every
+//! adapter also reports when it read the provider's final result and what the
+//! provider said it used (I-01). Marks are compared by order only, never
+//! against a wall-clock threshold.
 
 mod support;
 
@@ -8,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use seatline_core::exchange::Exchange;
 use seatline_core::telemetry::{Kind, Timeline};
-use seatline_core::turn::{Message, Role, SessionPolicy, ToolPolicy, Turn};
+use seatline_core::turn::{Message, Role, SessionPolicy, ToolPolicy, Turn, Usage};
 use seatline_providers::{Provider, Update};
 use seatline_scheduler::{EndReason, Event, Scheduler};
 use support::{FIXTURES, FakeClaude, FakeCodex, FakeGemini, FakeGrok, run_to_end};
@@ -231,4 +233,75 @@ fn adapters_without_a_sign_in_probe_report_none() {
     let mut exchange = grok.adapter().send(turn);
     run_to_end(exchange.as_mut());
     assert!(exchange.probe_span().is_none());
+}
+
+#[test]
+fn every_adapter_reports_when_it_read_the_providers_result_and_what_it_used() {
+    // Codex: the fake reports its counts the way Codex 0.156 does.
+    let codex = FakeCodex::install(FIXTURES, "answers", "signed-in");
+    let (reason, timeline) = timed(|| codex.adapter().send(ask(false)), Kind::Send);
+    assert_eq!(reason, EndReason::Completed);
+    assert!(timeline.tail_us().is_some());
+    assert_eq!(
+        timeline.usage(),
+        Some(Usage {
+            input_tokens: Some(12),
+            output_tokens: Some(7),
+            cached_input_tokens: Some(0),
+            cache_write_input_tokens: Some(0),
+            reasoning_output_tokens: Some(0),
+        })
+    );
+    assert_ordered(&timeline);
+
+    // Claude: the fake's result line carries no usage, so there is none.
+    let claude = FakeClaude::install(FIXTURES, "answers", "signed-in");
+    let (reason, timeline) = timed(|| claude.adapter().send(ask(false)), Kind::Send);
+    assert_eq!(reason, EndReason::Completed);
+    assert!(timeline.tail_us().is_some());
+    assert_eq!(timeline.usage(), None);
+
+    // A turn that failed has a result too, and a tail after it: what an
+    // application waits after being refused is as real as after an answer.
+    claude.set("fails-rate", "signed-in");
+    let (reason, timeline) = timed(|| claude.adapter().send(ask(false)), Kind::Send);
+    assert!(matches!(reason, EndReason::Failed(_)), "{reason:?}");
+    assert!(timeline.tail_us().is_some());
+
+    // A Claude that ends without ever sending one reports no result at all,
+    // so there is nothing to measure a tail from.
+    claude.set("no-result", "signed-in");
+    let (reason, timeline) = timed(|| claude.adapter().send(ask(false)), Kind::Send);
+    assert!(matches!(reason, EndReason::Failed(_)), "{reason:?}");
+    assert_eq!(timeline.tail_us(), None);
+
+    // Antigravity (Gemini): totals only.
+    let gemini = FakeGemini::install(FIXTURES);
+    let turn = Turn {
+        model: Some("gemini-test".to_owned()),
+        tools: ToolPolicy::None,
+        session: SessionPolicy::Ephemeral,
+        ..ask(false)
+    };
+    let (reason, timeline) = timed(|| gemini.adapter().send(turn.clone()), Kind::Send);
+    assert_eq!(reason, EndReason::Completed);
+    assert!(timeline.tail_us().is_some());
+    assert_eq!(
+        timeline.usage(),
+        Some(Usage {
+            input_tokens: Some(17),
+            output_tokens: Some(9),
+            ..Usage::default()
+        })
+    );
+
+    // Grok.
+    let grok = FakeGrok::install(FIXTURES);
+    let turn = Turn {
+        model: Some("grok-4.6".to_owned()),
+        ..turn
+    };
+    let (reason, timeline) = timed(|| grok.adapter().send(turn.clone()), Kind::Send);
+    assert_eq!(reason, EndReason::Completed);
+    assert!(timeline.tail_us().is_some());
 }

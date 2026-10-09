@@ -28,7 +28,7 @@ use seatline_core::search::{
 };
 use seatline_core::stream::{BUSY_LIMIT, LineStream, Output};
 use seatline_core::telemetry::Span;
-use seatline_core::turn::{SessionPolicy, ToolPolicy, Turn as TurnRequest};
+use seatline_core::turn::{ReasoningEffort, SessionPolicy, ToolPolicy, Turn as TurnRequest};
 use seatline_platform::discovery;
 use seatline_platform::environment;
 use seatline_platform::forget;
@@ -82,12 +82,16 @@ pub const LIMITS: Limits = Limits {
 /// (`provider_prompt`). A context turn is a plain turn: Claude gets no tools
 /// at all (`--tools ""`), MCP stays blocked, and the host refuses context with
 /// search, so page text can't make Claude act, only inform its answer.
+///
+/// An explicit reasoning effort goes to `claude --effort`, for `low` to `max`;
+/// Claude has no `none`, so that one is refused (see [`effort_level`]). Whether
+/// the installed CLI and the chosen model accept a level is theirs to say.
 pub const CAPABILITIES: Capabilities = Capabilities {
     streaming: Capability::Supported,
     continuation: Capability::Supported,
     web_search: Capability::Supported,
     model_selection: Capability::Supported,
-    reasoning_effort: Capability::Unsupported,
+    reasoning_effort: Capability::Supported,
     service_tier: Capability::Unsupported,
     cancellation: Capability::Supported,
     tool_isolation: Capability::Supported,
@@ -287,6 +291,10 @@ impl Provider for Claude {
         true
     }
 
+    fn refuses_reasoning_effort(&self, effort: ReasoningEffort) -> bool {
+        effort_level(effort).is_none()
+    }
+
     fn invalidate_readiness(&self) {
         self.search.invalidate();
         self.account_file.invalidate();
@@ -335,7 +343,10 @@ impl Provider for Claude {
     }
 
     fn send(&self, request: TurnRequest) -> Box<dyn Exchange> {
-        if request.reasoning_effort.is_some() {
+        if request
+            .reasoning_effort
+            .is_some_and(|effort| self.refuses_reasoning_effort(effort))
+        {
             return Box::new(Scripted::failed(crate::REASONING_EFFORT_UNSUPPORTED));
         }
         if request.service_tier.is_some() {
@@ -358,6 +369,7 @@ impl Provider for Claude {
             reported_session: None,
             finish_grace: self.limits.finish,
             model: request.model,
+            reasoning_effort: request.reasoning_effort,
             native_search: request.tools == ToolPolicy::NativeWebSearch,
             queue: VecDeque::new(),
             sources: SourceCollector::new(ID),
@@ -371,6 +383,7 @@ impl Provider for Claude {
             live: false,
             outcome: None,
             finish_by: None,
+            result_at: None,
             probe_span: None,
         };
         let probe_began = request.check_sign_in.then(Instant::now);
@@ -388,6 +401,23 @@ impl Provider for Claude {
             Some(Err(_)) | None => turn.start(),
         }
         Box::new(turn)
+    }
+}
+
+/// The level `claude --effort` takes for `effort`, or `None` when Claude has no
+/// such level. Claude's lowest is `low`, and a value it does not know is not an
+/// error but a warning, after which it uses its own default: so `none` must
+/// never be passed on, or an explicit choice would be silently replaced.
+/// Written out level by level, so a new `ReasoningEffort` has to be decided
+/// here rather than reaching the command line by accident.
+fn effort_level(effort: ReasoningEffort) -> Option<&'static str> {
+    match effort {
+        ReasoningEffort::None => None,
+        ReasoningEffort::Low => Some("low"),
+        ReasoningEffort::Medium => Some("medium"),
+        ReasoningEffort::High => Some("high"),
+        ReasoningEffort::Xhigh => Some("xhigh"),
+        ReasoningEffort::Max => Some("max"),
     }
 }
 
@@ -574,6 +604,7 @@ fn claude_args(resume: Option<&str>, model: Option<&str>, native_search: bool) -
         model,
         native_search,
         seatline_core::turn::SessionPolicy::Persistent,
+        None,
     )
 }
 
@@ -582,6 +613,7 @@ fn claude_args_for_session(
     model: Option<&str>,
     native_search: bool,
     session_policy: seatline_core::turn::SessionPolicy,
+    effort: Option<ReasoningEffort>,
 ) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "-p",
@@ -614,6 +646,11 @@ fn claude_args_for_session(
     if let Some(model) = model {
         args.push(format!("--model={model}").into());
     }
+    if let Some(level) = effort.and_then(effort_level) {
+        // One argument, like the model: the level can never be read as an
+        // option of its own. `send` has already refused a level Claude lacks.
+        args.push(format!("--effort={level}").into());
+    }
     if let Some(session) = resume {
         args.extend([OsString::from("--resume"), OsString::from(session)]);
     }
@@ -634,6 +671,8 @@ struct Turn {
     finish_grace: Duration,
     /// The model to answer with, or `None` for Claude's own default.
     model: Option<String>,
+    /// The effort to answer with, or `None` for Claude's own default.
+    reasoning_effort: Option<ReasoningEffort>,
     native_search: bool,
     queue: VecDeque<Update>,
     sources: SourceCollector,
@@ -655,6 +694,8 @@ struct Turn {
     live: bool,
     outcome: Option<Result<(), ErrorBody>>,
     finish_by: Option<Instant>,
+    /// When Claude's final `result` was read: for telemetry.
+    result_at: Option<Instant>,
     /// The sign-in probe, when the request asked for one: for telemetry.
     probe_span: Option<Span>,
 }
@@ -676,6 +717,7 @@ impl Turn {
             self.model.as_deref(),
             self.native_search,
             self.session_policy,
+            self.reasoning_effort,
         );
         let input = serde_json::json!({
             "type": "user",
@@ -860,15 +902,21 @@ impl Turn {
     }
 
     fn turn_ended(&mut self, outcome: Result<(), ErrorBody>) {
+        self.result_at.get_or_insert_with(Instant::now);
         self.outcome = Some(outcome);
         self.finish_by = Some(after(self.finish_grace));
     }
 
     /// Claude exited. `session_gone` says it reported, on stderr before `init`,
-    /// that the session it was asked to resume doesn't exist.
-    fn ended(&mut self, exit: &Exit, session_gone: bool) {
+    /// that the session it was asked to resume doesn't exist; `effort_unknown`
+    /// that it does not know `--effort`, which a Claude from before the option
+    /// reports instead of starting. Nothing ran in either case.
+    fn ended(&mut self, exit: &Exit, session_gone: bool, effort_unknown: bool) {
         if self.cancelled {
             return self.end(Update::Stopped);
+        }
+        if effort_unknown {
+            return self.end(Update::Failed(crate::REASONING_EFFORT_UNSUPPORTED));
         }
         let lost = self.resume.is_some()
             && !self.saw_delta
@@ -901,6 +949,10 @@ impl Turn {
 impl Exchange for Turn {
     fn probe_span(&self) -> Option<Span> {
         self.probe_span
+    }
+
+    fn result_at(&self) -> Option<Instant> {
+        self.result_at
     }
 
     fn next(&mut self, deadline: Instant) -> Option<Update> {
@@ -947,11 +999,13 @@ impl Exchange for Turn {
                     match stream.next(wait) {
                         Some(Output::Line(line)) => self.on_line(&line),
                         Some(Output::Final(exit) | Output::Stopped(exit)) => {
-                            let session_gone = !self.started
-                                && output::names_unknown_session(&String::from_utf8_lossy(
-                                    stream.stderr_tail(),
-                                ));
-                            self.ended(&exit, session_gone);
+                            let stderr = String::from_utf8_lossy(stream.stderr_tail());
+                            let session_gone =
+                                !self.started && output::names_unknown_session(&stderr);
+                            let effort_unknown = !self.started
+                                && self.reasoning_effort.is_some()
+                                && output::names_unknown_option(&stderr, "--effort");
+                            self.ended(&exit, session_gone, effort_unknown);
                         }
                         Some(Output::Error(_)) => {
                             let update = if self.cancelled {
@@ -1006,12 +1060,70 @@ mod tests {
     }
 
     #[test]
+    fn an_effort_is_one_argument_after_the_model_and_before_the_session() {
+        let args = claude_args_for_session(
+            Some("session-1"),
+            Some("sonnet"),
+            false,
+            SessionPolicy::Persistent,
+            Some(ReasoningEffort::Xhigh),
+        );
+        let args: Vec<&str> = args.iter().map(|arg| arg.to_str().unwrap()).collect();
+        let model = args
+            .iter()
+            .position(|arg| *arg == "--model=sonnet")
+            .unwrap();
+        assert_eq!(args[model + 1], "--effort=xhigh", "{args:?}");
+        assert_eq!(&args[args.len() - 2..], ["--resume", "session-1"]);
+        assert_eq!(args.iter().filter(|arg| arg.contains("effort")).count(), 1);
+
+        // No choice, no option: Claude keeps its own default.
+        let default = claude_args(None, None, false);
+        assert!(
+            !default
+                .iter()
+                .any(|arg| arg.to_string_lossy().contains("effort"))
+        );
+    }
+
+    #[test]
+    fn every_effort_has_a_claude_level_except_none() {
+        for (effort, level) in [
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+            (ReasoningEffort::Xhigh, "xhigh"),
+            (ReasoningEffort::Max, "max"),
+        ] {
+            assert_eq!(effort_level(effort), Some(level));
+            // The word a client sends is the word Claude takes.
+            assert_eq!(effort.as_str(), level);
+        }
+        // Claude would only warn about it, and answer with its default.
+        assert_eq!(effort_level(ReasoningEffort::None), None);
+        let args = claude_args_for_session(
+            None,
+            None,
+            false,
+            SessionPolicy::Ephemeral,
+            Some(ReasoningEffort::None),
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.to_string_lossy().contains("effort")),
+            "a level Claude lacks is never passed on"
+        );
+    }
+
+    #[test]
     fn ephemeral_turns_disable_claude_session_persistence() {
         let args = claude_args_for_session(
             None,
             None,
             false,
             seatline_core::turn::SessionPolicy::Ephemeral,
+            None,
         );
         assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
     }
