@@ -236,10 +236,22 @@ pub fn names_unknown_session(message: &str) -> bool {
 
 /// Whether Claude's message says its command line does not know `option` (given
 /// in lower case). Claude's CLI reports this on stderr and exits before it
-/// starts anything: `error: unknown option '--effort=low'`.
+/// starts anything: `error: unknown option '--effort=low'`. The option has to
+/// be named on the line that says so, as a whole name: a CLI that knows it but
+/// refuses something else, and prints its usage after the error, lists it too.
 pub fn names_unknown_option(message: &str, option: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("unknown option") && lower.contains(option)
+    message.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        line.contains("unknown option") && names_whole_option(&line, option)
+    })
+}
+
+/// Whether `text` has `option` in it and not just as the start of a longer name.
+fn names_whole_option(text: &str, option: &str) -> bool {
+    text.match_indices(option).any(|(at, _)| {
+        !text[at + option.len()..]
+            .starts_with(|next: char| next.is_ascii_alphanumeric() || next == '-' || next == '_')
+    })
 }
 
 /// Classifies a failed `result` by specific phrases, never bare words such as
@@ -449,6 +461,33 @@ mod tests {
         ] {
             assert!(!names_unknown_option(message, "--effort"), "{message}");
         }
+    }
+
+    #[test]
+    fn an_option_that_only_the_usage_text_names_is_not_the_unknown_one() {
+        // A CLI that knows both options refuses a third and prints its usage.
+        let usage = "error: unknown option '--tols'\n(Did you mean --tools?)\n\n\
+            Usage: claude [options] [prompt]\n\
+              --effort <level>   Effort level for the current session\n\
+              --safe-mode        Skip hooks, plugins and skills\n";
+        for option in ["--effort", "--safe-mode"] {
+            assert!(!names_unknown_option(usage, option), "{option}");
+        }
+        assert!(names_unknown_option(usage, "--tols"));
+        // Nor is a longer name that merely starts with it.
+        assert!(!names_unknown_option(
+            "error: unknown option '--effort-level'",
+            "--effort"
+        ));
+        assert!(!names_unknown_option(
+            "error: unknown option '--safe-mode-x'",
+            "--safe-mode"
+        ));
+        // The option on a line of its own, apart from the complaint, is not named by it.
+        assert!(!names_unknown_option(
+            "error: unknown option\n--effort\n",
+            "--effort"
+        ));
     }
 
     #[test]

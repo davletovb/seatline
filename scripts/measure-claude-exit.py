@@ -112,7 +112,9 @@ def main(argv):
     extra = {}
     while "--env" in args:
         index = args.index("--env")
-        name, _, value = args[index + 1].partition("=")
+        name, equals, value = args[index + 1].partition("=") if index + 1 < len(args) else ("", "", "")
+        if not name or not equals:
+            raise SystemExit(__doc__)
         extra[name] = value
         del args[index:index + 2]
     runs = int(args[1]) if len(args) == 2 and args[1].isdecimal() else 0

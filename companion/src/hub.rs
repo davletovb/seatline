@@ -11,6 +11,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
 use seatline_core::exchange::{Timeouts, Update};
+use seatline_core::process::Reaper;
 use seatline_core::protocol::ErrorCode;
 use seatline_core::telemetry::Sink;
 use seatline_core::turn::{Namespace, SessionPolicy, ToolPolicy, Turn, is_cleanup_group};
@@ -40,6 +41,10 @@ const MAX_PROVIDER_RUNNING: usize = 2;
 const MAX_SESSIONS: usize = 10_000;
 const MAX_APP_SESSIONS: usize = 2_000;
 const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+/// How long a hub that is ending waits for the processes its adapters left to
+/// exit on their own, once told to stop: a stop grace of Claude's (2 s) and a
+/// moment to kill.
+const REAPER_STOP_WAIT: Duration = Duration::from_secs(3);
 
 /// The hub's limits, by name, as telemetry reports a broker's configuration.
 pub fn limits() -> BTreeMap<&'static str, u64> {
@@ -292,6 +297,10 @@ impl Hub {
             self.tick();
             std::thread::sleep(Duration::from_millis(2));
         }
+        // A finished turn's process that its adapter left to exit on its own is
+        // stopped too, and reaped: the thread waiting for it ends with this
+        // process, and would leave it running.
+        Reaper::shared().stop_all(REAPER_STOP_WAIT);
     }
 
     fn authorized(&self, connection: u64) -> bool {
@@ -301,11 +310,14 @@ impl Hub {
         })
     }
 
+    /// Whether nothing is queued or running, or still leaving: a turn that
+    /// finished at its provider's result can have a process left to exit.
     fn quiet(&self) -> bool {
         self.queue.is_empty()
             && self.active.is_empty()
             && self.ledger_jobs.is_empty()
             && self.cleanup.is_empty()
+            && Reaper::shared().waiting() == 0
     }
 
     fn command(&mut self, command: Command) {

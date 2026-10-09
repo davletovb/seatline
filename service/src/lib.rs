@@ -39,8 +39,14 @@ use std::time::Duration;
 use seatline_core::backlog::{Admission, Backlog};
 pub use seatline_core::backlog::{CONSUMER_TOO_SLOW, MAX_UNREAD_BYTES};
 use seatline_core::exchange::{Exchange, Timeouts};
+use seatline_core::process::Reaper;
 use seatline_core::turn::{Namespace, Turn as TurnRequest};
 use seatline_scheduler::{EndReason, Event, Supervisor, TurnId};
+
+/// How long stopping the service waits for the processes its adapters left to
+/// exit on their own, once told to stop: a stop grace of Claude's (2 s) and a
+/// moment to kill.
+const REAPER_STOP_WAIT: Duration = Duration::from_secs(3);
 
 /// What the service holds back for slow consumers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,6 +366,11 @@ fn stop_service(
         dispatch(supervisor, outputs, limits);
         thread::sleep(Duration::from_millis(1));
     }
+    // A finished turn's process that its adapter left to exit on its own is
+    // stopped too, and reaped: dropping the runtime leaves nothing of its
+    // turns running, even for a host that exits right after. (The reaper is
+    // the process's, so this also ends the wait for another runtime's.)
+    Reaper::shared().stop_all(REAPER_STOP_WAIT);
 }
 
 fn dispatch(supervisor: &mut Supervisor, outputs: &mut HashMap<TurnId, Output>, limits: Limits) {

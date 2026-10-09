@@ -72,7 +72,9 @@ pub enum SessionPolicy {
 }
 
 /// A requested reasoning budget. Omission leaves the provider's own default.
-/// Adapters that cannot honor this choice refuse it before launching a turn.
+/// Adapters that cannot pass this choice on refuse it before launching a turn.
+/// It is a request: what runs is for the provider to decide, and an adapter
+/// cannot always tell which level did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {

@@ -111,7 +111,9 @@ installation and execution; it does not change warming or provider sign-in. A
 Claude turn that succeeded and keeps no session ends when Claude prints its
 final result, and the process finishes leaving on its own in the background
 (at most 8 at a time across applications), so an application does not wait through the half second
-Claude spends on its way out.
+Claude spends on its way out. A broker that is asked to stop waits for those
+processes like any other work, and stops and reaps any that has not left by the
+time it goes, so none outlives it.
 
 ## Reasoning effort and ephemeral completion
 
@@ -136,7 +138,16 @@ list of levels, so an application offers `none` for Codex only. A Claude CLI
 from before `--effort` exits with `error: unknown option` before it starts; that
 is reported as the same non-retryable `REASONING_EFFORT_UNSUPPORTED` (one
 process was started and nothing ran) rather than as a vague process failure.
-Whether the installed CLI and the chosen model use a level is theirs to say.
+Whether the installed CLI and the chosen model use a level is theirs to say,
+and for Claude nothing reports it. Claude Code 2.1.296 exited 0 without a
+warning for `low`, `xhigh` and `max` on its default model, for `xhigh` on Haiku
+and for `max` on Sonnet, and the `init` and `result` messages of its stream
+name no effective level, only a `per_turn_effort_active` flag. So an effort
+sent to Claude is a request and not a promise: a level the model does not use
+may run as a lower one, an account's setting may cap it, and Seatline cannot
+see which happened or check the level against the model. An application should
+word the setting as a preference; one that has to know what ran cannot learn it
+from Claude's CLI today.
 
 Gemini and Grok refuse explicit effort with `REASONING_EFFORT_UNSUPPORTED`
 before launching anything, including readiness probes on checked-send paths.
@@ -197,9 +208,10 @@ keeps it running indefinitely, so an upgrade must not depend on that.
 ones, then ends the broker that is running, which is an older copy: the next use
 starts the one just installed. `seatline-companion stop` does the same on its own.
 The broker stops taking connections, leaves as soon as nothing is queued or
-running, and otherwise waits up to ten seconds (`SEATLINE_STOP_GRACE_MS` changes
-this) before ending what is still running; providers are stopped and reaped, and
-each app sees a lost connection and reconnects by itself. Run `install` from the
+running (a process that a finished Claude turn left to exit on its own counts as
+running), and otherwise waits up to ten seconds (`SEATLINE_STOP_GRACE_MS` changes
+this) before ending what is still running; providers are stopped and reaped, those
+processes included, and each app sees a lost connection and reconnects by itself. Run `install` from the
 new build (`target/release/seatline-companion install`): it installs the program
 that runs it. Only a broker that is running can be asked: it publishes a random
 control token in `broker-control` in the data directory, readable by the current
