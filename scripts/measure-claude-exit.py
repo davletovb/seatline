@@ -115,9 +115,10 @@ def main(argv):
         name, _, value = args[index + 1].partition("=")
         extra[name] = value
         del args[index:index + 2]
-    if len(args) != 2 or args[0] not in ("natural", "term") or not args[1].isdigit():
+    runs = int(args[1]) if len(args) == 2 and args[1].isdecimal() else 0
+    if len(args) != 2 or args[0] not in ("natural", "term") or runs < 1:
         raise SystemExit(__doc__)
-    mode, runs = args[0], int(args[1])
+    mode = args[0]
     executable = os.environ.get("CLAUDE_BIN") or shutil.which("claude")
     if not executable:
         raise SystemExit("no `claude` on PATH; set CLAUDE_BIN")

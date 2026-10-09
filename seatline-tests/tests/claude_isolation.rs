@@ -21,6 +21,7 @@ use seatline_companion::remote::RemoteClient;
 use seatline_companion::telemetry;
 use seatline_core::protocol::ErrorCode;
 use seatline_core::turn::{Message, ReasoningEffort, Role, SessionPolicy, ToolPolicy, Turn};
+use seatline_providers::claude::Claude;
 use seatline_providers::{Provider, Update};
 use serde_json::Value;
 use support::{FIXTURES, FakeClaude, PROMPT_STOP_GRACE, answer_text, failure, run_to_end};
@@ -31,9 +32,25 @@ const APP: &str = "test_app";
 
 static FIXTURE_LIFETIME: Mutex<()> = Mutex::new(());
 
+/// Gives `dir/name` an executable of its own: a copy, where the fixture had a
+/// link to the one fake provider binary every test shares.
+///
+/// Windows will not delete an executable that is running, and may hold it a
+/// moment after its process has gone, so a refusal is tried again for a while.
 fn independent_executable(dir: &Path, name: &str) {
     let executable = dir.join(name);
-    std::fs::remove_file(&executable).unwrap();
+    let give_up = Instant::now() + Duration::from_secs(5);
+    loop {
+        match std::fs::remove_file(&executable) {
+            Ok(()) => break,
+            Err(error)
+                if error.kind() != std::io::ErrorKind::NotFound && Instant::now() < give_up =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("cannot replace {}: {error}", executable.display()),
+        }
+    }
     std::fs::copy(FIXTURES.provider(), executable).unwrap();
 }
 
@@ -57,6 +74,15 @@ impl Fixture {
         }
     }
 
+    /// The adapter these tests run, which waits for each process to leave before
+    /// its turn ends. A turn that keeps no session otherwise ends at Claude's
+    /// result and leaves the process to exit in the background (I-05), and
+    /// these tests replace the executable between turns, as an upgrade does:
+    /// Windows will not replace one that is still running.
+    fn adapter(&self) -> Claude {
+        self.claude.adapter().with_background_exits(0)
+    }
+
     /// The `claude -p` runs so far, one command line each.
     fn runs(&self) -> Vec<String> {
         self.claude
@@ -74,8 +100,9 @@ impl Fixture {
             .collect()
     }
 
-    /// A Claude that was replaced, as an upgrade does.
+    /// A Claude that was replaced, as an upgrade does: once none is running.
     fn replace_executable(&self) {
+        self.claude.assert_nothing_left_running();
         independent_executable(&self.claude.dir, FakeClaude::file_name());
     }
 }
@@ -104,7 +131,7 @@ fn only_a_turn_without_tools_for_an_owner_who_asked_starts_in_safe_mode() {
     let fixture = Fixture::new("answers");
 
     // Not asked for: no turn gets the option.
-    let off = fixture.claude.adapter();
+    let off = fixture.adapter();
     run_to_end(off.send(plain("a")).as_mut());
     run_to_end(
         off.send(Turn {
@@ -118,7 +145,7 @@ fn only_a_turn_without_tools_for_an_owner_who_asked_starts_in_safe_mode() {
     // Asked for: a turn without tools and a search turn get it. A turn that left
     // the provider's own configuration in charge does not: it asked for the
     // user's setup.
-    let on = fixture.claude.adapter().with_isolated_launch(true);
+    let on = fixture.adapter().with_isolated_launch(true);
     for (tools, text) in [
         (ToolPolicy::None, "c"),
         (ToolPolicy::NativeWebSearch, "d"),
@@ -144,7 +171,7 @@ fn only_a_turn_without_tools_for_an_owner_who_asked_starts_in_safe_mode() {
 #[test]
 fn a_claude_from_before_safe_mode_is_asked_again_without_it_once_and_then_left_alone() {
     let fixture = Fixture::new("no-safe-mode-option");
-    let adapter = fixture.claude.adapter().with_isolated_launch(true);
+    let adapter = fixture.adapter().with_isolated_launch(true);
 
     // That Claude rejected the first run before it started anything; the same
     // question, without the option, is answered. The application hears of one
@@ -176,7 +203,7 @@ fn a_claude_from_before_safe_mode_is_asked_again_without_it_once_and_then_left_a
 #[test]
 fn what_was_learned_about_an_executable_is_forgotten_with_the_readiness_evidence() {
     let fixture = Fixture::new("no-safe-mode-option");
-    let adapter = fixture.claude.adapter().with_isolated_launch(true);
+    let adapter = fixture.adapter().with_isolated_launch(true);
     run_to_end(adapter.send(plain("one")).as_mut());
     run_to_end(adapter.send(plain("two")).as_mut());
     assert_eq!(fixture.safe_mode_runs(), [true, false, false]);
@@ -193,7 +220,7 @@ fn only_an_unknown_option_error_asks_for_another_run() {
     // A Claude that dies before it starts for some other reason: one run, an
     // ordinary failure, and nothing learned about the option.
     let fixture = Fixture::new("resume-crashes");
-    let adapter = fixture.claude.adapter().with_isolated_launch(true);
+    let adapter = fixture.adapter().with_isolated_launch(true);
     let resume = || Turn {
         session: SessionPolicy::Persistent,
         continuation: Some("session-1".to_owned()),
@@ -212,7 +239,7 @@ fn only_an_unknown_option_error_asks_for_another_run() {
 #[test]
 fn a_claude_that_knows_neither_newer_option_fails_on_the_effort_after_two_runs() {
     let fixture = Fixture::new("no-newer-options");
-    let adapter = fixture.claude.adapter().with_isolated_launch(true);
+    let adapter = fixture.adapter().with_isolated_launch(true);
     let updates = run_to_end(
         adapter
             .send(Turn {
@@ -239,7 +266,7 @@ fn a_claude_that_knows_neither_newer_option_fails_on_the_effort_after_two_runs()
 #[test]
 fn cancelling_a_run_that_is_about_to_be_rejected_stops_the_turn_and_asks_nothing_again() {
     let fixture = Fixture::new("slow-no-safe-mode-option");
-    let adapter = fixture.claude.adapter().with_isolated_launch(true);
+    let adapter = fixture.adapter().with_isolated_launch(true);
     let mut exchange = adapter.send(plain("x"));
     // The run has started; the fake has not yet said it does not know the option.
     let first = exchange.next(Instant::now() + Duration::from_secs(5));
