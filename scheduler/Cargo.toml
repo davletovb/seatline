@@ -1,7 +1,7 @@
 [package]
 name = "seatline-scheduler"
 description = "Provider turn scheduler and panic-isolating supervisor"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

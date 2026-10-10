@@ -1,7 +1,7 @@
 [package]
 name = "seatline-providers"
 description = "Provider-runtime adapters: one per execution mode of Codex, Claude, Gemini (Antigravity) and Grok, behind a neutral Turn-based Provider trait"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

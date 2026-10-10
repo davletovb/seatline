@@ -1,7 +1,7 @@
 [package]
 name = "seatline-bench"
 description = "Reproducible benchmark harness for the provider runtime: deterministic fake providers by default, live providers opt-in"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

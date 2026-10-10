@@ -1,7 +1,7 @@
 [package]
 name = "seatline-platform"
 description = "Provider-runtime platform layer: provider environment, private files and workspaces, per-turn cleanup, and where an application's files live"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
