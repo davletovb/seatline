@@ -1,0 +1,4 @@
+Follow these instructions from the application for the whole conversation:\nAnswer in French.\n\nWhat is the capital of Italy?
+Follow these instructions from the application for the whole conversation:\nReply in capital letters only.\n\nSay hello to the user.
+Follow these instructions from the application for the whole conversation:\nEnd every reply with the word DONE.\n\nWhat is 2 plus 2?
+Follow these instructions from the application for the whole conversation:\nAnswer with a JSON object with the single key "answer" and nothing else.\n\nWhat color is the sky on a clear day?
