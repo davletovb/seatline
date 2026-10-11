@@ -25,10 +25,21 @@ and prints, per variant, the input tokens (and how many were read from or
 written to the prompt cache) and the time to the first answer text and to the
 result, with the paired difference from `base` and a sign test over the
 rounds, then where in the run the time went (Claude ready, its answer begun,
-the first text, the result), and last how often each variant gave the answer
-`base` usually gives and in how many runs the model thought before it
-answered (a prompt that makes it think adds time). Each round uses the next
-prompt; round 0 only warms the prompt cache and is not counted.
+the first text, the result), and last how often each variant gave an answer
+that `base` did not give to the same prompt and in how many runs the model
+thought before it answered (a prompt that makes it think adds time). Each round uses the next
+prompt, so a prompt's own text is in the cache from its second turn on, which
+an application's changing text is not; round 0 only warms the prompt cache and
+is not counted.
+
+The variants are taken in a different order in every round, so that a
+variant's place in the round does not stand in for the variant. The orders are
+those of a balanced Latin square (over all of them every variant takes each
+position, and follows each other variant, equally often), dealt out in blocks
+and in a shuffled sequence (`--seed`) so that no prompt always meets the same
+order. A ROUNDS that is a multiple of the number of orders (4 for four
+variants, 6 for three, 2 for two) keeps the design exactly balanced, and the
+report shows how often each variant was taken in each position.
 
 Options:
   --prompts FILE       one prompt per line, a backslash and n standing for a
@@ -46,6 +57,9 @@ Options:
                        comparing them by eye or with a judge. Answer quality is
                        not measured here: that needs your own corpus.
   --raw FILE           write every run (timings, usage, answer) as JSON lines
+  --seed N             seed of the shuffle that deals out the orders (default 1)
+  --timeout SECONDS    stop a run that takes longer (default 180): it is asked
+                       to stop, then killed, and counts as no answer
   --from-raw FILE      print the report for rows saved with --raw, running
                        nothing and using no quota. Give the same --prompts or
                        --search as the run that saved them
@@ -56,14 +70,18 @@ needs the explicit SEATLINE_BENCH_LIVE=1, like `seatline-bench run --live`.
 or later (`process_group`).
 """
 import collections
+import inspect
 import json
 import math
 import os
+import random
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 
@@ -121,7 +139,42 @@ def variant_args(variant, scratch, short_text):
     return ["--system-prompt-file", path]
 
 
-def run_once(executable, variant, prompt, cwd, scratch, search, short_text):
+def balanced_orders(count):
+    """The orders of `count` variants in a balanced Latin square (with an odd count, it and its reverse)."""
+    first = [0]
+    low, high = 1, count - 1
+    while low <= high:
+        first.append(low)
+        low += 1
+        if low <= high:
+            first.append(high)
+            high -= 1
+    orders = [[(index + shift) % count for index in first] for shift in range(count)]
+    if count % 2:
+        orders += [order[::-1] for order in orders]
+    return orders
+
+
+def round_orders(rounds, count, seed):
+    """The order of the variants in each round, 0 to `rounds`: the warm-up round in the order given, then the balanced orders in shuffled blocks."""
+    orders = balanced_orders(count)
+    shuffle = random.Random(seed)
+    dealt = [list(range(count))]
+    while len(dealt) <= rounds:
+        block = list(orders)
+        shuffle.shuffle(block)
+        dealt.extend(block)
+    return dealt[:rounds + 1]
+
+
+def stop_group(process, signum):
+    try:
+        os.killpg(process.pid, signum)  # its own process group: `process_group=0` below
+    except ProcessLookupError:
+        pass
+
+
+def run_once(executable, variant, prompt, cwd, scratch, search, short_text, timeout):
     tools = ["--tools", "WebSearch", "--allowedTools", "WebSearch"] if search else ["--tools", ""]
     message = json.dumps({
         "type": "user",
@@ -134,8 +187,33 @@ def run_once(executable, variant, prompt, cwd, scratch, search, short_text):
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         process_group=0,
     )
-    process.stdin.write(message.encode())
-    process.stdin.close()
+    finished = threading.Event()
+    timed_out = []
+    stderr_tail = bytearray()
+
+    def watch():
+        if not finished.wait(timeout):
+            timed_out.append(True)
+            stop_group(process, signal.SIGTERM)
+            if not finished.wait(5):
+                stop_group(process, signal.SIGKILL)
+
+    def drain():
+        # A child that fills the stderr pipe stops until someone reads it, and
+        # stdout would never end: read it as it comes, and keep the end of it.
+        while chunk := os.read(process.stderr.fileno(), 65536):
+            stderr_tail.extend(chunk)
+            del stderr_tail[:-2000]
+
+    watchdog = threading.Thread(target=watch, daemon=True)
+    drainer = threading.Thread(target=drain, daemon=True)
+    watchdog.start()
+    drainer.start()
+    try:
+        process.stdin.write(message.encode())
+        process.stdin.close()
+    except BrokenPipeError:  # it has already gone: the run will say why
+        pass
     ready = answer_begun = first_text = result = None
     usage = None
     answer = ""
@@ -169,11 +247,15 @@ def run_once(executable, variant, prompt, cwd, scratch, search, short_text):
                 usage = event.get("usage")
                 if event.get("is_error"):
                     error = str(event.get("result"))[:200]
-    process.stderr.read()
     process.wait()
+    finished.set()
+    drainer.join(5)
+    if timed_out:
+        error = f"timed out after {timeout} s"
     return {"variant": variant, "ready_ms": ready, "answer_begun_ms": answer_begun,
             "first_text_ms": first_text, "result_ms": result,
-            "usage": usage, "answer": answer, "error": error}
+            "usage": usage, "answer": answer, "error": error,
+            "stderr": stderr_tail.decode(errors="replace")[-500:]}
 
 
 def percentile(values, fraction):
@@ -206,33 +288,50 @@ def alike(text):
 
 
 def report_answers(rows, variants, prompt_count):
-    """How often a variant gave base's usual answer to the same prompt, and how much the model wrote.
+    """How often a variant gave an answer that `base` did not give to the same prompt, and how much the model wrote.
 
-    `base` against itself is the floor: the model does not always answer the
-    same way twice. Only prompts with one short, fixed answer (proofreading)
-    can be compared this way; `prompt_count` is None for the others. Output
-    tokens include the ones the model spent thinking before it answered, which
-    the CLI does not show; they are counted apart because a prompt that makes
-    the model think more adds time to the first text.
+    `base` against its own other answers is the floor: the model does not
+    always answer the same way twice. Only prompts with one short, fixed answer
+    (proofreading) can be compared this way; `prompt_count` is None for the
+    others. Output tokens include the ones the model spent thinking before it
+    answered, which the CLI does not show; they are counted apart because a
+    prompt that makes the model think more adds time to the first text.
     """
-    usual = {}
+    given = collections.defaultdict(collections.Counter)
     if prompt_count:
-        counts = {}
         for row in rows:
             if row["round"] > 0 and row["variant"] == "base" and row["answer"]:
-                counts.setdefault(row["round"] % prompt_count, collections.Counter())[alike(row["answer"])] += 1
-        usual = {index: seen.most_common(1)[0][0] for index, seen in counts.items()}
-    print(f'{"variant":8s} | {"same answer as base usually gives":>34s} | {"output tokens (median, largest)":>31s} | thought first')
+                given[row["round"] % prompt_count][alike(row["answer"])] += 1
+    print(f'{"variant":8s} | {"answers base did not give":>26s} | {"output tokens (median, largest)":>31s} | thought first')
     for variant in variants:
         answered = [r for r in rows if r["round"] > 0 and r["variant"] == variant and r["answer"] and r["usage"]]
         if not answered:
             continue
-        same = (f"{sum(alike(r['answer']) == usual.get(r['round'] % prompt_count) for r in answered)} of {len(answered)}"
-                if prompt_count else "-")
+        novel = "-"
+        if prompt_count:
+            others = sum(
+                given[r["round"] % prompt_count][alike(r["answer"])] - (variant == "base") <= 0 for r in answered)
+            novel = f"{others} of {len(answered)}"
         out = [r["usage"].get("output_tokens", 0) for r in answered]
         thought = sum(r["usage"].get("output_tokens_details", {}).get("thinking_tokens", 0) > 0 for r in answered)
-        print(f'{variant:8s} | {same:>34s} | {statistics.median(out):>22.0f}, {max(out):>7d} | '
+        print(f'{variant:8s} | {novel:>26s} | {statistics.median(out):>22.0f}, {max(out):>7d} | '
               f'{thought} of {len(answered)} runs')
+
+
+def report_order(rows, variants):
+    """How often each variant was taken first, second, ... in the counted rounds, and its median first text there."""
+    placed = [r for r in rows if r["round"] > 0 and "position" in r]
+    if not placed:
+        return
+    places = range(1, len(variants) + 1)
+    print(f'{"variant":8s} | {"counted rounds taken 1st, 2nd, ...":>36s} | median first text (ms) at each place')
+    for variant in variants:
+        counts = collections.Counter(r["position"] for r in placed if r["variant"] == variant)
+        times = {place: [r["first_text_ms"] for r in placed
+                         if r["variant"] == variant and r["position"] == place and r["first_text_ms"] is not None]
+                 for place in places}
+        print(f'{variant:8s} | {", ".join(f"{counts[place]:>3d}" for place in places):>36s} | '
+              + ", ".join(f"{statistics.median(times[place]):>5.0f}" if times[place] else "    -" for place in places))
 
 
 def report(rows, variants, prompt_count):
@@ -276,12 +375,15 @@ def report(rows, variants, prompt_count):
                       f"slower in {sum(d > 0 for d in differences)}, sign test p = {sign_test(differences):.2f}")
     print()
     report_answers(rows, variants, prompt_count)
+    print()
+    report_order(rows, variants)
 
 
 def main(argv):
     args = argv[1:]
     options = {"--prompts": None, "--short-prompt": "Answer the user's message directly.",
-               "--variants": ",".join(DEFAULT_VARIANTS), "--answers": None, "--raw": None, "--from-raw": None}
+               "--variants": ",".join(DEFAULT_VARIANTS), "--answers": None, "--raw": None, "--from-raw": None,
+               "--seed": "1", "--timeout": "180"}
     flags = {"--fresh-cwd": False, "--search": False}
     positional = []
     while args:
@@ -306,6 +408,8 @@ def main(argv):
         prompts = [SEARCH_PROMPT] if flags["--search"] else PROOFREADING
     if not prompts:
         raise SystemExit("no prompts")
+    if not options["--seed"].isdecimal() or not options["--timeout"].isdecimal() or int(options["--timeout"]) < 1:
+        raise SystemExit(__doc__)
     prompt_count = None if flags["--search"] else len(prompts)
     if options["--from-raw"]:
         if positional or options["--raw"] or options["--answers"] or flags["--fresh-cwd"]:
@@ -319,8 +423,8 @@ def main(argv):
     rounds = int(positional[0])
     if os.environ.get("SEATLINE_BENCH_LIVE") != "1":
         raise SystemExit("this sends real prompts and uses a little of the account's quota; set SEATLINE_BENCH_LIVE=1 to confirm")
-    if sys.version_info < (3, 11):
-        raise SystemExit("needs Python 3.11 or later")
+    if "process_group" not in inspect.signature(subprocess.Popen).parameters:
+        raise SystemExit("needs Python 3.11 or later (`process_group`)")
     executable = os.environ.get("CLAUDE_BIN") or shutil.which("claude")
     if not executable:
         raise SystemExit("no `claude` on PATH; set CLAUDE_BIN")
@@ -330,13 +434,17 @@ def main(argv):
     os.makedirs(base_dir, exist_ok=True)
     scratch = tempfile.mkdtemp(prefix="run-", dir=base_dir)
     rows = []
+    plan = round_orders(rounds, len(variants), int(options["--seed"]))
     try:
         for round_number in range(rounds + 1):
             prompt = prompts[round_number % len(prompts)]
-            for variant in variants:
+            for position, index in enumerate(plan[round_number], start=1):
+                variant = variants[index]
                 cwd = tempfile.mkdtemp(prefix="cwd-", dir=scratch) if flags["--fresh-cwd"] else scratch
-                row = run_once(executable, variant, prompt, cwd, scratch, flags["--search"], options["--short-prompt"])
+                row = run_once(executable, variant, prompt, cwd, scratch, flags["--search"],
+                               options["--short-prompt"], int(options["--timeout"]))
                 row["round"] = round_number
+                row["position"] = position
                 rows.append(row)
                 done = row["usage"] and row["first_text_ms"] is not None
                 note = "" if done else f' (no answer{": " + row["error"] if row["error"] else ""})'
