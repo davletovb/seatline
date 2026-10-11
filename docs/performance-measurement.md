@@ -328,9 +328,11 @@ completed evidence if a later launch fails. Both output pipes are drained
 concurrently and stderr evidence is bounded. A timeout asks the process to
 stop, allows five seconds for cleanup, then kills it; it remains a failed row,
 not a timing sample. Failed and incomplete runs are excluded from timing and
-answer statistics and make a live command exit unsuccessfully. Invalid output
-paths are rejected before launching a provider. Offline reports reject invalid
-or duplicate round/variant rows.
+answer statistics and make a live command exit unsuccessfully. Output files are
+opened without truncation and compared by their actual file identity before existing evidence is cleared. Path aliases (including relative
+spellings, symlinks, hard links, and Windows case aliases) are rejected before
+launching a provider; an invalid second output leaves the first intact. Offline
+reports reject invalid or duplicate round/variant rows.
 
 The process manager can add up to its 10 ms exit polling interval to the
 observed result-to-exit delay, and stream timestamps include reader-thread

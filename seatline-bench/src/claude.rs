@@ -530,14 +530,46 @@ impl Orders {
     }
 }
 
-fn output_file(path: Option<&str>) -> io::Result<Option<std::fs::File>> {
+fn open_output(path: Option<&str>) -> io::Result<Option<std::fs::File>> {
     path.map(|p| {
-        // Open before spending any quota. Rows are appended and flushed as they
-        // arrive, so a failure in a later turn leaves earlier evidence intact.
-        private_fs::write_private_file(Path::new(p), b"")?;
-        std::fs::OpenOptions::new().append(true).open(p)
+        // Open without truncation: path spelling, symlinks, and hard links can
+        // identify the same file. Check the actual handles before discarding
+        // any existing evidence, then write through those same handles.
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(p)
     })
     .transpose()
+}
+
+type OutputFiles = (Option<std::fs::File>, Option<std::fs::File>);
+
+fn output_files(raw_path: Option<&str>, answers_path: Option<&str>) -> io::Result<OutputFiles> {
+    let raw = open_output(raw_path)?;
+    let answers = open_output(answers_path)?;
+    if let (Some(raw), Some(answers)) = (&raw, &answers) {
+        let raw_identity = same_file::Handle::from_file(raw.try_clone()?)?;
+        let answers_identity = same_file::Handle::from_file(answers.try_clone()?)?;
+        if raw_identity == answers_identity {
+            return Err(io::Error::other(
+                "--raw and --answers must be different files",
+            ));
+        }
+    }
+    for file in raw.iter().chain(answers.iter()) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.set_len(0)?;
+    }
+    Ok((raw, answers))
 }
 fn write_row(file: &mut Option<std::fs::File>, value: &impl serde::Serialize) -> io::Result<()> {
     if let Some(file) = file {
@@ -566,8 +598,7 @@ pub fn prompts_command(args: &[String]) -> io::Result<()> {
     }
     let executable = live_executable()?;
     let scratch = Scratch::new()?;
-    let mut raw = output_file(options.raw.as_deref())?;
-    let mut answers = output_file(options.answers.as_deref())?;
+    let (mut raw, mut answers) = output_files(options.raw.as_deref(), options.answers.as_deref())?;
     let mut orders = Orders::new(options.variants.len(), options.seed);
     let mut rows = Vec::new();
     for round in 0..=options.rounds.unwrap() {

@@ -38,6 +38,7 @@ impl Fixture {
     fn run(&self, args: &[&str], live: bool) -> Output {
         let mut command = Command::new(HARNESS);
         command
+            .current_dir(&self.0)
             .args(args)
             .env("CLAUDE_BIN", self.exe())
             .env("XDG_CACHE_HOME", &self.0)
@@ -83,7 +84,7 @@ fn historical_python_report_is_reproduced_without_a_provider_or_opt_in() {
     );
     assert_eq!(
         successful(&output),
-        include_str!("fixtures/claude-system-prompt-warm-report.txt")
+        include_str!("fixtures/claude-system-prompt-warm-report.txt").replace("\r\n", "\n")
     );
     assert!(!fixture.0.join("claude-invocations").exists());
     for (name, extra) in [
@@ -410,4 +411,126 @@ fn an_ignored_stop_is_killed_and_evidence_is_preserved() {
             "timed-out provider is reaped"
         );
     }
+}
+
+fn reject_output_alias(fixture: &Fixture, raw: &str, answers: &str) {
+    let output = fixture.run(
+        &["claude-prompts", "1", "--raw", raw, "--answers", answers],
+        true,
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("must be different files"));
+    assert!(
+        !fixture.0.join("claude-invocations").exists(),
+        "no quota spent for aliases"
+    );
+}
+
+#[test]
+fn output_path_spellings_are_checked_before_truncating_existing_evidence() {
+    let fixture = Fixture::new("exits-after-0");
+    let file = fixture.0.join("results.jsonl");
+    std::fs::write(&file, "previous evidence\n").unwrap();
+    for alias in ["./results.jsonl", file.to_str().unwrap()] {
+        reject_output_alias(&fixture, "results.jsonl", alias);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "previous evidence\n"
+        );
+    }
+}
+
+#[test]
+fn output_aliases_are_rejected_even_when_the_file_does_not_yet_exist() {
+    let fixture = Fixture::new("exits-after-0");
+    reject_output_alias(&fixture, "new.jsonl", "./new.jsonl");
+    assert!(
+        std::fs::read(fixture.0.join("new.jsonl"))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn hard_linked_outputs_are_rejected_without_destroying_evidence() {
+    let fixture = Fixture::new("exits-after-0");
+    let raw = fixture.0.join("results.jsonl");
+    std::fs::write(&raw, "previous evidence\n").unwrap();
+    std::fs::hard_link(&raw, fixture.0.join("alias.jsonl")).unwrap();
+    reject_output_alias(&fixture, "results.jsonl", "alias.jsonl");
+    assert_eq!(std::fs::read_to_string(raw).unwrap(), "previous evidence\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_outputs_are_rejected_without_destroying_evidence() {
+    let fixture = Fixture::new("exits-after-0");
+    let raw = fixture.0.join("results.jsonl");
+    std::fs::write(&raw, "previous evidence\n").unwrap();
+    std::os::unix::fs::symlink(&raw, fixture.0.join("alias.jsonl")).unwrap();
+    reject_output_alias(&fixture, "results.jsonl", "alias.jsonl");
+    assert_eq!(std::fs::read_to_string(raw).unwrap(), "previous evidence\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn case_aliases_on_windows_are_rejected_without_destroying_evidence() {
+    let fixture = Fixture::new("exits-after-0");
+    let raw = fixture.0.join("results.jsonl");
+    std::fs::write(&raw, "previous evidence\n").unwrap();
+    reject_output_alias(&fixture, "results.jsonl", "RESULTS.JSONL");
+    assert_eq!(std::fs::read_to_string(raw).unwrap(), "previous evidence\n");
+}
+
+#[test]
+fn invalid_second_output_leaves_the_first_output_intact() {
+    let fixture = Fixture::new("exits-after-0");
+    let raw = fixture.0.join("results.jsonl");
+    std::fs::write(&raw, "previous evidence\n").unwrap();
+    let output = fixture.run(
+        &[
+            "claude-prompts",
+            "1",
+            "--raw",
+            "results.jsonl",
+            "--answers",
+            "absent/answers.jsonl",
+        ],
+        true,
+    );
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read_to_string(raw).unwrap(), "previous evidence\n");
+    assert!(!fixture.0.join("claude-invocations").exists());
+}
+
+#[test]
+fn distinct_existing_outputs_are_replaced_with_separate_valid_jsonl_streams() {
+    let fixture = Fixture::new("exits-after-0");
+    for file in ["raw.jsonl", "answers.jsonl"] {
+        std::fs::write(fixture.0.join(file), "previous evidence\n").unwrap();
+    }
+    successful(&fixture.run(
+        &[
+            "claude-prompts",
+            "1",
+            "--variants",
+            "base",
+            "--raw",
+            "raw.jsonl",
+            "--answers",
+            "answers.jsonl",
+        ],
+        true,
+    ));
+    let raw = fixture.rows();
+    assert_eq!(raw.len(), 2);
+    assert!(raw.iter().all(|r| r["usage"].is_object()));
+    let answers: Vec<Value> = std::fs::read_to_string(fixture.0.join("answers.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    assert_eq!(answers.len(), 1);
+    assert!(answers[0]["usage"].is_null());
+    assert!(answers[0]["answer"].is_string());
 }
