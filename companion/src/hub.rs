@@ -1853,6 +1853,11 @@ mod tests {
     }
 
     fn setup() -> (Hub, Vec<tokio::sync::mpsc::Receiver<Value>>) {
+        setup_with(&["first", "second"])
+    }
+
+    /// A hub with an application for each name, on connections 1, 2, and so on.
+    fn setup_with(apps: &[&str]) -> (Hub, Vec<tokio::sync::mpsc::Receiver<Value>>) {
         let root =
             std::env::temp_dir().join(format!("seatline-hub-{}", config::random_token().unwrap()));
         let ledger = Ledger::new(root.clone(), Sessions::default()).unwrap();
@@ -1877,7 +1882,8 @@ mod tests {
             telemetry: Telemetry::disabled(),
         };
         let mut outputs = Vec::new();
-        for (id, app) in [(1, "first"), (2, "second")] {
+        for (index, &app) in apps.iter().enumerate() {
+            let id = index as u64 + 1;
             let grant = Grant {
                 app: app.into(),
                 token: config::random_token().unwrap(),
@@ -3196,6 +3202,178 @@ mod tests {
         }
         request(&mut hub, 2, "wakeup", "status", json!({}));
         assert_eq!(hub.wait_time(Instant::now()), Duration::from_millis(1));
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    /// A provider whose turns stay running until the test opens their gate.
+    /// Each turn is named for its message text, and `started` lists them in the
+    /// order the provider was asked for them.
+    #[derive(Clone, Default)]
+    struct Held {
+        gates: Rc<RefCell<HashMap<String, Rc<Cell<bool>>>>>,
+        started: Rc<RefCell<Vec<String>>>,
+    }
+    struct HeldTurn {
+        release: Rc<Cell<bool>>,
+        cursor: u8,
+    }
+    impl Exchange for HeldTurn {
+        fn next(&mut self, _: Instant) -> Option<Update> {
+            match self.cursor {
+                0 => {
+                    self.cursor = 1;
+                    Some(Update::Launched)
+                }
+                1 => {
+                    self.cursor = 2;
+                    Some(Update::Started)
+                }
+                2 if self.release.get() => {
+                    self.cursor = 3;
+                    Some(Update::Completed)
+                }
+                _ => None,
+            }
+        }
+        fn cancel(&mut self, _: Duration) {
+            self.release.set(true);
+        }
+    }
+    impl Provider for Held {
+        fn id(&self) -> &str {
+            "codex"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Fixture.capabilities()
+        }
+        fn timeouts(&self) -> Timeouts {
+            Fixture.timeouts()
+        }
+        fn status(&self) -> Box<dyn Exchange> {
+            Fixture.status()
+        }
+        fn send(&self, turn: Turn) -> Box<dyn Exchange> {
+            let name = turn.messages[0].text.clone();
+            let release = Rc::new(Cell::new(false));
+            self.started.borrow_mut().push(name.clone());
+            self.gates.borrow_mut().insert(name, release.clone());
+            Box::new(HeldTurn { release, cursor: 0 })
+        }
+    }
+
+    /// A turn that keeps no session, named by its text.
+    fn held_turn(name: &str) -> Value {
+        let mut turn = turn_with_tools("none");
+        turn["session"] = json!("ephemeral");
+        turn["messages"][0]["text"] = json!(name);
+        turn
+    }
+
+    fn running_for(hub: &Hub, app: &str) -> usize {
+        hub.active
+            .values()
+            .filter(|active| active.request.app == app)
+            .count()
+    }
+
+    #[test]
+    fn the_app_and_provider_ceilings_decide_how_many_of_one_applications_requests_run_together() {
+        // The app ceiling, the provider ceiling, and how many run: the defaults
+        // (two), both raised, the smaller of the two winning either way, and a
+        // ceiling above what the global limits give (six generations).
+        for (app_limit, provider_limit, expected) in
+            [(2, 2, 2), (4, 4, 4), (4, 3, 3), (3, 8, 3), (8, 8, 6)]
+        {
+            let (mut hub, _output) = setup();
+            hub.policy.max_app_running = app_limit;
+            hub.policy.max_provider_running = provider_limit;
+            install_provider(&mut hub, "first", Box::new(Held::default()));
+            // The most one application may have queued.
+            for part in 0..MAX_APP_QUEUE {
+                let name = format!("part-{part}");
+                request(&mut hub, 1, &name, "send", held_turn(&name));
+            }
+            wait_until(&mut hub, |hub| hub.active.len() == expected);
+            // However long the hub is given, no more start.
+            for _ in 0..20 {
+                hub.tick();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(hub.active.len(), expected, "{app_limit}/{provider_limit}");
+            assert_eq!(hub.queue.len(), MAX_APP_QUEUE - expected);
+            std::fs::remove_dir_all(&hub.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn three_applications_contending_for_one_provider_hold_the_raised_ceilings_and_none_starves() {
+        let apps = ["first", "second", "third"];
+        let (mut hub, mut output) = setup_with(&apps);
+        // Up to three each, but only four at once on the provider.
+        hub.policy.max_app_running = 3;
+        hub.policy.max_provider_running = 4;
+        let held = Held::default();
+        for app in apps {
+            install_provider(&mut hub, app, Box::new(held.clone()));
+        }
+        // Each splits a job into four parts: twelve requests for four places.
+        for (index, app) in apps.iter().enumerate() {
+            for part in 0..4 {
+                let name = format!("{app}-{part}");
+                request(&mut hub, index as u64 + 1, &name, "send", held_turn(&name));
+            }
+        }
+        wait_until(&mut hub, |hub| hub.active.len() == 4);
+        // Places are shared out in turn, so every application has one.
+        for app in apps {
+            assert!(running_for(&hub, app) >= 1, "{app} was left out");
+        }
+
+        // Finish the oldest running request until none is left, looking at every
+        // state on the way.
+        let (mut peak, mut peak_per_app) = (0, 0);
+        for _ in 0..40 {
+            for _ in 0..3 {
+                hub.tick();
+            }
+            peak = peak.max(hub.active.len());
+            assert!(hub.active.len() <= 4, "{} running", hub.active.len());
+            for app in apps {
+                peak_per_app = peak_per_app.max(running_for(&hub, app));
+                assert!(running_for(&hub, app) <= 3, "{app} has too many");
+            }
+            if hub.active.is_empty() && hub.queue.is_empty() {
+                break;
+            }
+            let oldest = held
+                .started
+                .borrow()
+                .iter()
+                .find(|name| hub.active.values().any(|a| &a.request.id == *name))
+                .cloned()
+                .expect("something is running");
+            held.gates.borrow()[&oldest].set(true);
+            wait_until(&mut hub, |hub| {
+                !hub.active.values().any(|a| a.request.id == oldest)
+            });
+        }
+        assert!(
+            hub.active.is_empty() && hub.queue.is_empty(),
+            "never finished"
+        );
+        assert_eq!(peak, 4, "the provider's raised ceiling was never used");
+        assert!(
+            peak_per_app >= 2,
+            "no application ran more than one request"
+        );
+        // All twelve were served: four for each application.
+        for (index, app) in apps.iter().enumerate() {
+            let completed = drain(&mut output[index])
+                .iter()
+                .filter(|event| event["event"]["type"] == "completed")
+                .count();
+            assert_eq!(completed, 4, "{app}");
+        }
         std::fs::remove_dir_all(&hub.root).unwrap();
     }
     #[test]

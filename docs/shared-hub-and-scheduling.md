@@ -53,9 +53,9 @@ Optional owner configuration lives in `scheduling.json` beside the broker's gran
 }
 ```
 
-`claude_isolation` is the one setting that is not a limit; see [Claude launch isolation](#claude-launch-isolation-i-06).
+`claude_isolation` is the one setting that is not a limit; see [Claude launch isolation](#claude-launch-isolation-i-06). `max_app_running` and `max_provider_running` can be raised; see below.
 
-The global ceiling covers **all** classes. App/provider limits apply **within each class**, so two long generations no longer occupy the readiness allowance. Generation's global allowance is `max(1, max_running - max_readiness_running)`: six by default, leaving readiness capacity. Cleanup has a separate two-job ceiling and uses available global capacity. Smaller global limits still win over class limits. The hard ceilings are 8 globally, 2 per app/provider/class, 2 readiness jobs, 2 cleanup jobs, an interactive burst of 1–8, and a queue timeout of 1–900,000 ms. The queue remains capped at 64 requests globally and 8 per app; session caps remain 10,000 globally and 2,000 per app. Effective policy and worker limits appear in the broker telemetry record.
+The global ceiling covers **all** classes. App/provider limits apply **within each class**, so two long generations no longer occupy the readiness allowance. Generation's global allowance is `max(1, max_running - max_readiness_running)`: six by default, leaving readiness capacity. Cleanup has a separate two-job ceiling and uses available global capacity. Smaller global limits still win over class limits. The hard ceilings are 8 globally, 8 per app/provider/class (the defaults stay at 2; see [Raising the per-app and per-provider limits](#raising-the-per-app-and-per-provider-limits-i-08)), 2 readiness jobs, 2 cleanup jobs, an interactive burst of 1–8, and a queue timeout of 1–900,000 ms. The queue remains capped at 64 requests globally and 8 per app; session caps remain 10,000 globally and 2,000 per app. Effective policy and worker limits appear in the broker telemetry record.
 
 This changes the old aggregate app/provider caps: a provider can now run two generation processes plus two readiness processes concurrently, for four processes, subject to the global ceiling. Cleanup has its own allowance but existing conflict rules still exclude it from generation on the same app/provider.
 
@@ -92,6 +92,25 @@ Update::Queued { .. } | Update::Admitted => {}
 ```
 
 Scheduling events remain opt-in on the wire; opting out does not remove this compile-time migration requirement. No application pin is updated in this PR.
+
+## Raising the per-app and per-provider limits (I-08)
+
+By default one application has at most two requests of a class running at once, and so does one provider, for all applications together. An application that splits one long job into parallel requests (the chunks of a long document, say) finds the third and fourth waiting for the first two. The owner can let them run together by raising either limit in `scheduling.json`, up to 8:
+
+```json
+{ "max_app_running": 4, "max_provider_running": 4 }
+```
+
+Both are read at start, like the rest of the file, and appear in the broker's telemetry record as `limits.max_app_running` and `limits.max_provider_running`. A value outside 1 to 8 fails startup, and so does any value above 2 on a companion from before this change, so update the companion before raising them. The defaults do not change: a file that does not mention them leaves both at 2.
+
+Raising them is not free, which is why it is the owner's to do and not an application's:
+
+- **Each running request is a provider process and a call against the account.** Four at once is twice the burst of rate-limit and quota use that two was, and a provider that limits the account may answer the extra ones with errors, which can cost more time than waiting would have. Start with the number of parts your busiest job really has.
+- **The other limits still apply and win.** A request needs a free place under every limit at once: the global one (8, of which generation gets `max_running - max_readiness_running`, six by default), its class, its application and its provider. Raising `max_app_running` to 8 with the other limits as they are runs six generations, not eight, and raising it alone does nothing for a provider that is already at `max_provider_running`.
+- **`max_provider_running` is shared.** It counts the provider's requests for every application, so one application's parts can use the places another's requests would have had. Places are still given out in turn across applications, and an application's own requests keep their order, so a busy application does not starve the others; it does lengthen their wait for a place while its parts are running.
+- **Provider processes can briefly outnumber running requests** while Claude finishes leaving (at most 8 across the broker), as before.
+
+Tests: the validation (the defaults, each value up to 8 accepted, 0 and 9 refused, the readiness and cleanup limits unchanged), the hub with one application at the defaults and at raised limits (including a limit above what the global ones give), three applications contending for one provider at limits of 3 and 4 (the ceilings hold at every step, every application gets a place, all twelve requests are served), and the real broker with the fake Codex: two providers run together with no file, four with the raised one, which the broker reports.
 
 ## Claude launch isolation (I-06)
 
