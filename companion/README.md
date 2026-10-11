@@ -99,7 +99,8 @@ Methods: `status`, `send` (neutral Turn), `forget` (`sessions`), `cleanup`
 (`group`), `cancel` (`target`, confined to the same connection). Random broker
 session tokens replace raw provider handles and cannot cross app/provider scope.
 
-The limits are 8 running operations, 2 per app and 2 per provider, 64 queued
+The limits are 8 running operations, 2 per app and 2 per provider (an owner can raise
+these two, up to 8, in `scheduling.json`; see `docs/shared-hub-and-scheduling.md`), 64 queued
 requests (8 per app), 32 connections, 2,000 stored sessions per app (10,000 in
 all), and 15 minutes per turn. Output is bounded; slow/disconnected clients are
 cancelled. A client that connects when all 32 slots are taken receives

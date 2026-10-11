@@ -348,6 +348,55 @@ fn a_cancel_stops_one_turn_and_reaps_only_its_process() {
     assert_eq!(world.records("connection").len(), 1);
 }
 
+/// Starts `parts` turns at once on one application and reports how many
+/// provider processes are running together once the broker has had its fill,
+/// then stops them all.
+fn providers_running_together(world: &World, parts: usize) -> usize {
+    let client = world.client();
+    let mut turns: Vec<_> = (0..parts)
+        .map(|index| client.send("codex", &ask(&format!("part {index}"))))
+        .collect();
+    // The ones that start do so at once; give any that should not every chance.
+    wait_until("a provider to start", || !world.fake.pids().is_empty());
+    std::thread::sleep(Duration::from_millis(600));
+    let together = world.fake.pids().len();
+    for turn in &mut turns {
+        turn.cancel(Duration::ZERO);
+    }
+    for turn in &mut turns {
+        assert_eq!(drain(turn.as_mut()).last(), Some(&Update::Stopped));
+    }
+    together
+}
+
+#[test]
+fn one_application_runs_two_providers_together_unless_the_owner_raises_the_ceilings() {
+    // Nothing in the owner's file: the defaults, two per application.
+    let world = World::new("goes-quiet");
+    assert_eq!(providers_running_together(&world, 6), 2);
+}
+
+#[test]
+fn an_owners_raised_ceilings_reach_the_broker_and_let_one_application_run_that_many_together() {
+    let mut world = World::new("goes-quiet");
+    // The file is read when the broker starts.
+    world.kill_broker();
+    std::fs::write(
+        world.root.join("scheduling.json"),
+        r#"{"max_app_running": 4, "max_provider_running": 4}"#,
+    )
+    .unwrap();
+    world.start_broker();
+
+    assert_eq!(providers_running_together(&world, 6), 4);
+    wait_until("the broker's configuration", || {
+        !world.records("broker").is_empty()
+    });
+    let broker = world.records("broker").pop().unwrap();
+    assert_eq!(broker["limits"]["max_app_running"], 4, "{broker}");
+    assert_eq!(broker["limits"]["max_provider_running"], 4, "{broker}");
+}
+
 #[test]
 fn a_broker_that_goes_away_ends_the_turn_without_a_replay_and_the_next_request_reconnects() {
     let mut world = World::new("goes-quiet");

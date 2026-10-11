@@ -95,6 +95,8 @@ Persistent provider processes (slice E) were not touched: the decision about Cod
 
 **Adopting the readiness contract in another client.** Use `readiness`/`prepare` with fresh or cached evidence (at most 30 seconds). For account restrictions, send with `send_ready_with_policy`, `allowed_sign_in` and `check_sign_in: false`; retain client policy checks for presentation. Treat `SIGN_IN_POLICY_DENIED` as final, and refuse generation when the protected method is unsupported. An evidence-change/expiry refusal may be retried once with a fresh check, since nothing launched. Rust callers use `Provider::send_with_readiness_policy` and `SignInPolicy`.
 
+**Issuing requests in parallel.** One application has at most two requests of a class running at once, and one provider at most two for all applications together; the next ones wait in the queue (eight per application, 30 seconds by default). An application that splits a long job into parts therefore sees the third wait for the first two. The owner, not the application, can raise those two limits in `scheduling.json` (`max_app_running`, `max_provider_running`, up to 8): each running request is a provider process and a call against the account's rate limits, so more at once can mean rate-limit errors instead of a shorter wait. See [Raising the per-app and per-provider limits](shared-hub-and-scheduling.md#raising-the-per-app-and-per-provider-limits-i-08).
+
 **Adopting the shared Rust client.** One `RemoteClient` per application, `RemoteProvider::with_client` for each provider. An application whose tests close a host's input right after a request must hold the input open until the answer arrives: the shared connection answers a moment later (Tabbeam's `cli.rs` needed this).
 
 ## Recovery instructions
