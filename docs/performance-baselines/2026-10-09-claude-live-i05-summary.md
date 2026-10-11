@@ -4,7 +4,9 @@ The [first live baseline](2026-10-09-claude-live-summary.md) found that a Claude
 
 ## What Claude does after its final result
 
-The measurements ran the adapter's own command line (a plain turn, no tools, no session kept) with the environment Seatline gives a provider and in a process group of its own, as Seatline starts it. [`scripts/measure-claude-exit.py`](../../scripts/measure-claude-exit.py) does the same for your CLI; it has no kill mode, because of what a kill leaves. Milliseconds from the `result` line on Claude's stdout to its exit:
+The measurements below were collected with the [original Python tool](https://github.com/davletovb/seatline/blob/ef772f72f206091703afe4c2648ef443ecf20e00/scripts/measure-claude-exit.py). Its Rust replacement is documented in the [runbook](../performance-measurement.md#direct-claude-cli-measurements-in-rust); this migration leaves the historical evidence unchanged.
+
+The measurements ran the adapter's own command line (a plain turn, no tools, no session kept) with the environment Seatline gives a provider and in a process group of its own, as Seatline starts it. [`seatline-bench claude-exit`](../../seatline-bench/src/claude.rs) does the same for your CLI; it has no kill mode, because of what a kill leaves. Milliseconds from the `result` line on Claude's stdout to its exit:
 
 | What was done at the result | Runs | Result → exit | Exit | Left behind |
 | --- | --- | --- | --- | --- |
@@ -66,4 +68,4 @@ All 40 requests of the four scenarios that keep no session have a `tail` of 0.1 
 
 ## Not measured
 
-Antigravity and Grok; Claude under concurrent load; other CLI versions; what the wrap-up is for (it was seen to upload events, not asked why). Run `scripts/measure-claude-exit.py` on your own CLI to see its wrap-up, and the [runbook](../performance-measurement.md#recording-a-live-baseline) for the rest.
+Antigravity and Grok; Claude under concurrent load; other CLI versions; what the wrap-up is for (it was seen to upload events, not asked why). Run `seatline-bench claude-exit` on your own CLI to see its wrap-up, and the [runbook](../performance-measurement.md#recording-a-live-baseline) for the rest.

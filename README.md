@@ -63,6 +63,11 @@ target/release/seatline-bench compare before.json after.json
 a measurement may and may not be used to claim, the baseline, and the budgets it
 sets. Live-provider runs are opt-in and send real prompts.
 
+`seatline-bench claude-exit` measures Claude's result-to-exit delay, and
+`seatline-bench claude-prompts` compares system prompt variants or reprints
+saved JSONL evidence. Both are Rust commands; see the
+[direct Claude measurements](docs/performance-measurement.md#direct-claude-cli-measurements-in-rust).
+
 ## Provenance
 
 This repository was extracted from the provider-runtime boundary in [TabBeam](https://github.com/davletovb/TabBeam), source commit `b4bfd5bd0f3ca9db461963b971b8af0177754e5d`.

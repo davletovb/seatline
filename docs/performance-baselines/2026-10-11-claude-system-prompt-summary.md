@@ -1,6 +1,6 @@
 # I-10: Claude's own system prompt, 2026-10-11
 
-Every Claude turn starts with the system prompt Claude Code puts in front of it. Tracker item I-10 asked whether that prompt costs time, whether `--exclude-dynamic-system-prompt-sections` or `--system-prompt` would help, and what it would do to the answers. This is what was measured, and why **nothing in Seatline's Claude launch changed**. It is **Claude only**, from one cloud sandbox: CLI 2.1.296, default model `claude-opus-5-5`, an OAuth sign-in on a plan of unknown size, the adapter's own command line and environment, and a scratch workspace that is not a git repository and holds no `CLAUDE.md`. [`scripts/compare-claude-system-prompts.py`](../../scripts/compare-claude-system-prompts.py) ran everything below; the raw rows are beside this file, and `--from-raw FILE` prints any of these tables again without a Claude. This is the second version of the evidence: the first took the variants in the same order every round, and a review asked for it to be rotated and everything measured again (see [what changed](#what-changed-when-the-order-was-rotated)).
+Every Claude turn starts with the system prompt Claude Code puts in front of it. Tracker item I-10 asked whether that prompt costs time, whether `--exclude-dynamic-system-prompt-sections` or `--system-prompt` would help, and what it would do to the answers. This is what was measured, and why **nothing in Seatline's Claude launch changed**. It is **Claude only**, from one cloud sandbox: CLI 2.1.296, default model `claude-opus-5-5`, an OAuth sign-in on a plan of unknown size, the adapter's own command line and environment, and a scratch workspace that is not a git repository and holds no `CLAUDE.md`. The former Python comparison script ([original source](https://github.com/davletovb/seatline/blob/bc75cdd68678e53b65bf00621c55bca4c2b6e15a/scripts/compare-claude-system-prompts.py)) ran everything below; the raw rows are beside this file, and `seatline-bench claude-prompts --from-raw FILE` prints any of these tables again without a Claude. This is the second version of the evidence: the first took the variants in the same order every round, and a review asked for it to be rotated and everything measured again (see [what changed](#what-changed-when-the-order-was-rotated)).
 
 ## What a plain turn sends
 
@@ -91,7 +91,7 @@ Seatline's Claude launch is **unchanged**.
 To run the comparison on your own prompts and your own CLI (each run sends a real prompt):
 
 ```sh
-SEATLINE_BENCH_LIVE=1 python3 scripts/compare-claude-system-prompts.py 32 \
+SEATLINE_BENCH_LIVE=1 target/release/seatline-bench claude-prompts 32 \
   --prompts your-prompts.txt --short-prompt "your wording" \
   --variants base,short --answers answers.jsonl --raw rows.jsonl
 ```

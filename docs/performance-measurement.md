@@ -114,7 +114,7 @@ done
 
 Twenty samples is the least that gives a 95th percentile its own value (rule 5); at twenty, the commands above send 106 prompts per Claude or Codex run (five scenarios of 21, and the prompt that starts the resumed conversation) and 63 per Gemini or Grok run. For a first look, `--samples 10` roughly halves that and the report says its p95 is the maximum. `warm-send-adapter` and `warm-send-shared` add only the client's own 0.1 to 0.3 ms to `warm-send`, which seconds of provider time bury, so a live run need not repeat them. Run from the repository root so the report records the revision and whether the tree is clean.
 
-**What the phases tell apart** (broker view, in the report's columns): `init` is the provider's start-up from launch until it announces itself, and is where a CLI that loads hooks, plugins or `CLAUDE.md` pays for them; `text wait` is from then to the first visible text, which is the network and the model; `completion` is from first text to the terminal update; and `tail`, inside `completion`, is the part after the provider's final result, spent waiting for its process to leave (a Claude turn that keeps no session no longer waits, so its tail is next to nothing; `scripts/measure-claude-exit.py` shows what your Claude CLI does between its result and its exit). `scripts/compare-claude-system-prompts.py` runs the comparison behind tracker item I-10 on your CLI and your own prompts: what Claude's own system prompt, which a plain turn sends 2.7 thousand tokens of, costs in time and in cache writes, and whether a shorter one changes the answers (in [the one sandbox it was run in](performance-baselines/2026-10-11-claude-system-prompt-summary.md), `--exclude-dynamic-system-prompt-sections` changed no time, and a five-word prompt started a short answer about 0.7 s sooner and ended it about a fifth of a second sooner, with some wordings and not with others, and changed its style). The sample's `usage` counts say whether the provider's prompt cache is being hit: a `cached_input` near zero on every request after the first means the prefix it sends changes from turn to turn. `queue wait`, `cleanup` and the handshake are the only phases that are purely Seatline's.
+**What the phases tell apart** (broker view, in the report's columns): `init` is the provider's start-up from launch until it announces itself, and is where a CLI that loads hooks, plugins or `CLAUDE.md` pays for them; `text wait` is from then to the first visible text, which is the network and the model; `completion` is from first text to the terminal update; and `tail`, inside `completion`, is the part after the provider's final result, spent waiting for its process to leave (a Claude turn that keeps no session no longer waits, so its tail is next to nothing; `seatline-bench claude-exit` shows what your Claude CLI does between its result and its exit). `seatline-bench claude-prompts` runs the comparison behind tracker item I-10 on your CLI and your own prompts: what Claude's own system prompt, which a plain turn sends 2.7 thousand tokens of, costs in time and in cache writes, and whether a shorter one changes the answers (in [the one sandbox it was run in](performance-baselines/2026-10-11-claude-system-prompt-summary.md), `--exclude-dynamic-system-prompt-sections` changed no time, and a five-word prompt started a short answer about 0.7 s sooner and ended it about a fifth of a second sooner, with some wordings and not with others, and changed its style). The sample's `usage` counts say whether the provider's prompt cache is being hit: a `cached_input` near zero on every request after the first means the prefix it sends changes from turn to turn. `queue wait`, `cleanup` and the handshake are the only phases that are purely Seatline's.
 
 **Measuring a Seatline setting.** A setting that changes how a provider is launched is measured on the same machine, in the same hour, with the same scenarios, once without it, once with it, and then **without it again**: the second run without it is the noise. The owner's [`scheduling.json`](shared-hub-and-scheduling.md#claude-launch-isolation-i-06) is passed to every scratch broker of the run with `--policy`, which checks it with the broker's own rules first and records its contents in the report. For Claude launch isolation:
 
@@ -263,3 +263,80 @@ F-01 through F-04 add [hub-only before/after evidence](performance-baselines/202
 - **Long requests are fake and fixed.** The 300 ms `slow` behavior is the only long request; contention results scale with it.
 - **Idle cost** (CPU, wakeups) and **memory** were not measured in the original B baseline. The F follow-up above measures idle cost; memory remains unmeasured.
 - **A genuinely cold machine** (empty page cache, first start after installation) is not reproduced: `cold-broker` is a cold *broker* on a warm machine.
+
+## Direct Claude CLI measurements in Rust
+
+Build once with `cargo build --release --locked -p seatline-bench`. These
+commands replace the former `scripts/measure-claude-exit.py` and
+`scripts/compare-claude-system-prompts.py`; no Python installation is needed.
+They launch the installed Claude CLI directly, without a broker, using
+Seatline's process manager and its provider environment allowlist.
+`CLAUDE_BIN` selects an explicit executable instead of looking on `PATH`.
+
+```sh
+# Result-to-exit delay. Natural exit is the default experiment; term sends
+# SIGTERM to the group at the result (Unix only). There is no kill mode.
+SEATLINE_BENCH_LIVE=1 target/release/seatline-bench claude-exit natural 5
+SEATLINE_BENCH_LIVE=1 target/release/seatline-bench claude-exit term 5
+SEATLINE_BENCH_LIVE=1 target/release/seatline-bench claude-exit natural 5 \
+  --env DISABLE_TELEMETRY=1
+
+# System prompt variants. Round zero warms up and is excluded from statistics.
+SEATLINE_BENCH_LIVE=1 target/release/seatline-bench claude-prompts 32 \
+  --variants base,dynamic,short,padded --seed 1 \
+  --raw prompts.jsonl --answers answers.jsonl
+
+# Reprint historical or new JSONL evidence, offline, without Claude or opt-in.
+target/release/seatline-bench claude-prompts --from-raw \
+  docs/performance-baselines/2026-10-11-claude-system-prompt-warm.jsonl
+```
+
+`claude-exit --help` and `claude-prompts --help` list all options. Exit mode
+accepts repeated `--env NAME=VALUE` overrides (last value wins); both commands
+accept `--timeout SECONDS` (default 180, maximum 86,400). System prompt mode
+also accepts `--prompts FILE` (one prompt per line, `\n` for an embedded newline),
+`--short-prompt TEXT`, `--fresh-cwd`, `--search`, `--variants LIST`, `--seed N`,
+`--raw FILE`, and `--answers FILE`. Give the same `--prompts` or `--search`
+when reprinting a saved run so answer comparison uses the same prompt grouping.
+Variants must be distinct. All four named variants retain the original meaning:
+`base` uses the adapter's normal prompt, `dynamic` excludes dynamic system
+prompt sections, `short` supplies a replacement system prompt file, and
+`padded` adds 75 reference notes to that replacement. Only `--search` enables
+WebSearch; other tools remain disabled.
+
+The reports retain interpolated quartiles and percentiles, conventional
+medians, input/cache/output counts, thinking counts, per-phase timing,
+round-paired differences, two-sided sign tests, answer novelty against base's
+other answers, and position counts and timings. These are the same statistics
+as the original comparison tool, separate from the main scenario report's
+nearest-rank percentiles. Answer novelty measures textual differences, not
+quality. Exit mode retains the original upper-middle median for even samples.
+
+Order is still a balanced Latin square dealt in shuffled blocks. The Rust
+implementation uses SplitMix64 and Fisher-Yates with rejection sampling: the
+same seed reproduces the Rust order across runs, but does **not** reproduce
+Python's shuffle. Use multiples of 4 rounds for four variants, 6 for three,
+or 2 for two for exact position and predecessor balance. Each raw row records
+its round and position, and historical rows lacking a position still load.
+The JSONL schema is unchanged; no historical measurements have
+been rerun or rewritten by this migration.
+
+Live runs require `SEATLINE_BENCH_LIVE=1` and use the signed-in account's quota.
+Scratch workspaces and replacement prompt files are private and removed after
+the run. Raw rows and answer files are flushed after each turn, preserving
+completed evidence if a later launch fails. Both output pipes are drained
+concurrently and stderr evidence is bounded. A timeout asks the process to
+stop, allows five seconds for cleanup, then kills it; it remains a failed row,
+not a timing sample. Failed and incomplete runs are excluded from timing and
+answer statistics and make a live command exit unsuccessfully. Output files are
+opened without truncation and compared by their actual file identity before existing evidence is cleared. Path aliases (including relative
+spellings, symlinks, hard links, and Windows case aliases) are rejected before
+launching a provider; an invalid second output leaves the first intact. Offline
+reports reject invalid or duplicate round/variant rows.
+
+The process manager can add up to its 10 ms exit polling interval to the
+observed result-to-exit delay, and stream timestamps include reader-thread
+and event-delivery scheduling. Rerun both sides with the same Rust build before
+claiming small latency differences against historical Python measurements.
+Windows supports natural exit and prompt comparison; `term` is rejected there
+because Seatline's Windows stop request does not send Unix SIGTERM.
