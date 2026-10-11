@@ -122,7 +122,7 @@ fn print_mode(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCod
     // `exits-after-<ms>` answers, and `fails-after-<ms>` fails, and either then
     // takes that long to leave, as a CLI does that uploads its own usage analytics on the way
     // out. A launch records its exit only if it is allowed to get that far.
-    let leaves_after = ["exits-after-", "fails-after-"]
+    let leaves_after = ["exits-after-", "fails-after-", "stderr-exits-after-"]
         .iter()
         .find_map(|prefix| behavior.strip_prefix(prefix))
         .and_then(|ms| ms.parse::<u64>().ok())
@@ -221,6 +221,10 @@ fn print_mode(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCod
         .unwrap_or_else(|| original_session.clone());
 
     let mut out = io::stdout().lock();
+    if behavior.starts_with("stderr-exits-after-") {
+        // Regression fixture: fills stderr beyond pipe capacity before stdout.
+        io::stderr().write_all(&vec![b'x'; 300_000])?;
+    }
     emit(
         &mut out,
         &json!({"type":"system","subtype":"init","session_id":init_session}),
@@ -403,7 +407,7 @@ fn print_mode(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCod
         "result":result,
         "session_id":result_session
     });
-    if leaves_after.is_some() {
+    if leaves_after.is_some() || behavior == "no-final-newline" {
         finished["usage"] = json!({
             "input_tokens":11,
             "cache_creation_input_tokens":2,
@@ -411,7 +415,12 @@ fn print_mode(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCod
             "output_tokens":3
         });
     }
-    emit(&mut out, &finished)?;
+    if behavior == "no-final-newline" {
+        write!(out, "{finished}")?;
+        out.flush()?;
+    } else {
+        emit(&mut out, &finished)?;
+    }
     leave_after(dir, leaves_after);
 
     if behavior == "lingers" {

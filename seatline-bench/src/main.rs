@@ -11,11 +11,16 @@
 //! seatline-bench compare BEFORE.json AFTER.json
 //! seatline-bench overhead [--turns N] [--updates N] [--rounds N]
 //! seatline-bench hub [--idle-ms N] [--samples N] [--label TEXT] [--output FILE.json]
+//! seatline-bench claude-exit MODE RUNS [--env NAME=VALUE ...] [--timeout SECONDS]
+//! seatline-bench claude-prompts ROUNDS [options]
+//! seatline-bench claude-prompts --from-raw FILE [--prompts FILE] [--search]
 //! ```
 //!
 //! `app` is internal: the harness runs itself as each simulated application.
 
 mod app;
+mod claude;
+mod claude_report;
 mod environment;
 mod hub_overhead;
 mod lab;
@@ -45,6 +50,11 @@ const USAGE: &str = "usage:
   seatline-bench compare BEFORE.json AFTER.json
   seatline-bench overhead [--turns N] [--updates N] [--rounds N]
   seatline-bench hub [--idle-ms N] [--samples N] [--label TEXT] [--output FILE.json]
+  seatline-bench claude-exit MODE RUNS [--env NAME=VALUE ...] [--timeout SECONDS]
+  seatline-bench claude-prompts ROUNDS [--prompts FILE] [--variants LIST]
+                     [--short-prompt TEXT] [--fresh-cwd] [--search] [--seed N]
+                     [--timeout SECONDS] [--raw FILE] [--answers FILE]
+  seatline-bench claude-prompts --from-raw FILE [--prompts FILE] [--search]
 
 scenarios: cold-broker cold-three-app warm-send warm-send-adapter warm-send-shared
            warm-send-probe prepared-send warm-status resumed-context reused-process
@@ -83,6 +93,8 @@ fn run() -> io::Result<()> {
         Some("overhead") => overhead::command(&args[1..]),
         Some("hub") => hub_overhead::command(&args[1..]),
         Some("hub-child") => hub_overhead::child(&args[1..]),
+        Some("claude-exit") => claude::exit_command(&args[1..]),
+        Some("claude-prompts") => claude::prompts_command(&args[1..]),
         Some("report") if args.len() == 2 => {
             print!("{}", report::markdown(&read_report(&args[1])?));
             Ok(())

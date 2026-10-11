@@ -1,0 +1,31 @@
+variant    n |  input cache write cache read | first text (ms)     p25-p75    p95 | to result
+base      32 |   2712           0       2709 |            2167  2037-2406    3213 |      2356
+dynamic   32 |   2522           0       2520 |            2093  2003-2283    3253 |      2334
+short     32 |    604           0        602 |            1300  1211-1718    2505 |      2042
+padded    32 |   2704           0       2702 |            2090  2005-2492    3080 |      2345
+
+variant  |      where the run was (median ms from launch)
+         |     ready  answer begun  first text    result
+base     |       674          2073        2167      2356
+dynamic  |       679          2045        2093      2334
+short    |       660          1238        1300      2042
+padded   |       660          1974        2090      2345
+
+dynamic - base, time to first text: median paired difference -30 ms over 32 rounds, slower in 15, sign test p = 0.86
+dynamic - base, time to the result: median paired difference -23 ms over 32 rounds, slower in 13, sign test p = 0.38
+short - base, time to first text: median paired difference -763 ms over 32 rounds, slower in 2, sign test p = 0.00
+short - base, time to the result: median paired difference -220 ms over 32 rounds, slower in 4, sign test p = 0.00
+padded - base, time to first text: median paired difference -8 ms over 32 rounds, slower in 16, sign test p = 1.00
+padded - base, time to the result: median paired difference -25 ms over 32 rounds, slower in 15, sign test p = 0.86
+
+variant  |  answers base did not give | output tokens (median, largest) | thought first
+base     |                    0 of 32 |                     32,      96 | 7 of 32 runs
+dynamic  |                    0 of 32 |                     32,      89 | 6 of 32 runs
+short    |                    0 of 32 |                     32,     113 | 11 of 32 runs
+padded   |                    0 of 32 |                     32,     122 | 12 of 32 runs
+
+variant  |   counted rounds taken 1st, 2nd, ... | median first text (ms) at each place
+base     |                     8,   8,   8,   8 |  2210,  2133,  2100,  2089
+dynamic  |                     8,   8,   8,   8 |  2034,  2165,  2084,  2014
+short    |                     8,   8,   8,   8 |  1357,  1282,  1274,  1317
+padded   |                     8,   8,   8,   8 |  2110,  2112,  2086,  2075
