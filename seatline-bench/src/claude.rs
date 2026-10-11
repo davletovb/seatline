@@ -536,7 +536,9 @@ fn open_output(path: Option<&str>) -> io::Result<Option<std::fs::File>> {
         // identify the same file. Check the actual handles before discarding
         // any existing evidence, then write through those same handles.
         let mut options = std::fs::OpenOptions::new();
-        options.create(true).append(true);
+        // Windows append-only handles omit FILE_WRITE_DATA, which set_len
+        // needs. Each output has one writer starting at offset zero.
+        options.create(true).write(true).truncate(false);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
