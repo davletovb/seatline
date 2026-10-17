@@ -82,10 +82,52 @@ fn run() -> io::Result<()> {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?
-                .block_on(seatline_companion::connect::serve(
-                    root,
-                    seatline_companion::connect::port()?,
-                ))
+                .block_on(seatline_companion::links::serve(root))
+        }
+        Some("link") if args.len() >= 2 => {
+            let (mut origin, mut relay, mut open) = (None, None, false);
+            for arg in &args[2..] {
+                if let Some(value) = arg.strip_prefix("--relay=") {
+                    relay = Some(value);
+                } else if arg == "--open" {
+                    open = true;
+                } else if arg.starts_with("https://") && origin.is_none() {
+                    origin = Some(arg.as_str());
+                } else {
+                    return Err(io::Error::other(format!("unrecognized argument `{arg}`")));
+                }
+            }
+            let link = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(seatline_companion::links::link(
+                    &root, &args[1], origin, relay,
+                ))?;
+            println!(
+                "Linked a browser to {}. Open this private link in the browser you use it in (or paste it into the site):\n{}",
+                link.origin,
+                link.url()
+            );
+            if !seatline_companion::links::service_running(&root) {
+                eprintln!(
+                    "Seatline: the web service is not running, so the website cannot reach Seatline yet. Start it with `seatline-companion web`, or `seatline-companion autostart on` to start it at login."
+                );
+            }
+            if open {
+                // The browser reads the one-shot page at once; it is removed soon after.
+                let page = seatline_companion::web::open_privately(&root, &link.url())?;
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let _ = std::fs::remove_file(page);
+            }
+            Ok(())
+        }
+        Some("unlink") if args.len() == 2 => {
+            let ended = seatline_companion::links::unlink(&root, &args[1])?;
+            println!(
+                "Ended {ended} link(s) of {}; those browsers must be linked again.",
+                args[1]
+            );
+            Ok(())
         }
         Some("autostart") if args.len() == 2 && matches!(args[1].as_str(), "on" | "off") => {
             if args[1] == "off" {
@@ -261,7 +303,7 @@ fn run() -> io::Result<()> {
             }
         }
         _ => Err(io::Error::other(
-            "usage: seatline-companion install | stop | serve | web | autostart on|off | connect APP | pair APP RELAY SITE [--open] | authorize APP PROVIDERS [EXTENSION_ORIGIN...] [SITE_ORIGIN...] [--relay=RELAY_ORIGIN] [--cache-title=TITLE] [--allow-provider-default] | register-native APP EXECUTABLE [ARGS...] | revoke APP | manifest",
+            "usage: seatline-companion install | stop | serve | web | link APP [SITE_ORIGIN] [--relay=RELAY_ORIGIN] [--open] | unlink APP | autostart on|off | connect APP | pair APP RELAY SITE [--open] | authorize APP PROVIDERS [EXTENSION_ORIGIN...] [SITE_ORIGIN...] [--relay=RELAY_ORIGIN] [--cache-title=TITLE] [--allow-provider-default] | register-native APP EXECUTABLE [ARGS...] | revoke APP | manifest",
         )),
     }
 }

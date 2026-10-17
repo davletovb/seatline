@@ -16,7 +16,7 @@ pub mod wire;
 #[cfg(feature = "web")]
 pub mod autostart;
 #[cfg(feature = "web")]
-pub mod connect;
+pub mod links;
 #[cfg(feature = "web")]
 pub mod secure;
 #[cfg(feature = "web")]

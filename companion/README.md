@@ -5,8 +5,8 @@ provider contract to multiple independently authorized apps. It contains no
 Conclave orchestration, product storage, website hosting, or JavaScript runtime.
 
 The per-user broker uses a private Unix socket on Linux/macOS and a Windows
-named pipe; it has no HTTP listener. The web service (below) answers one page on
-the loopback interface for authorized websites. App grants control providers,
+named pipe. The companion opens no listening port; websites reach it only through
+outbound, encrypted relay connections. App grants control providers,
 tool policy and exact extension/website origins. Sessions, cancellation and
 cleanup are scoped to the authenticated app; all apps share bounded scheduling.
 
@@ -20,7 +20,12 @@ seatline-companion install
 seatline-companion authorize my_app codex,claude https://app.example.com --relay=https://relay.example.com
 ```
 
-That is all a website needs: see [websites without `pair`](#websites-without-pair-the-web-service).
+Then link each browser once (see [linked browsers](#linked-browsers-and-the-web-service)):
+
+```sh
+seatline-companion link my_app --open
+```
+
 `pair` still works for a one-off connection:
 
 ```sh
@@ -54,48 +59,31 @@ without any frame as a dead link, so a relay must answer `ping` with
 `{"type":"pong"}`. A relay otherwise only has to forward `data` envelopes
 between the two roles; it never needs to understand them.
 
-### Websites without `pair`: the web service
+### Linked browsers and the web service
 
-`seatline-companion web` keeps authorized websites connected without anyone
-running `pair`. For each website an app is authorized for (an app, one of its
-website origins and one of its relays) it keeps one standing pairing, stored in
-`web/APP.json` in the data directory (owner-only), and keeps its helper side
-connected to the relay as `pair` does, probing every 15 s and backing off for at
-most 15 s, so a website finds Seatline again soon after sleep or a network change.
+`seatline-companion link APP [SITE_ORIGIN] [--relay=RELAY_ORIGIN] [--open]`
+makes a pairing for one browser on one of the app's authorized websites (the
+grant's only website and relay unless named) and prints its link. Open it in
+that browser, or paste it into the website; `--open` opens it in the default
+browser through the same private one-shot page `pair --open` uses. The link is
+stored in `web/APP.json` in the data directory (owner-only). Each browser gets a
+link of its own (the relay lets one browser at a time use a pairing); linking a
+ninth browser to a website ends its oldest link.
 
-The browser gets its side from one page on the loopback interface (port 27183,
-or `SEATLINE_WEB_PORT`):
+`seatline-companion web` keeps the helper side of every stored link connected to
+the relay, as `pair` keeps its one, so a linked browser finds Seatline whenever it
+opens the website, with nothing to click. It probes every 15 s and backs off for
+at most 15 s, so a website finds Seatline again soon after sleep or a network
+change. It opens no port: its only connections are outbound, to the relay and to
+the local broker, which it uses only while a browser is connected. It notices
+links made, ended or revoked within two seconds.
 
-```text
-http://127.0.0.1:27183/connect?app=APP&origin=WEBSITE_ORIGIN&relay=RELAY_ORIGIN
-```
-
-The website opens it in a window of its own from a click. The page posts
-`{"type":"seatline-pairing","version":1,"app","relay","id","token","key"}` to the
-window that opened it, addressed to the website's origin, and closes. Opened any
-other way (no opener), it forwards to the website with the pairing in the
-fragment, as a `pair` link does. A pairing it cannot get from the relay is
-reported to an authorized website as `{"type":"seatline-pairing","version":1,
-"error":"relay_unavailable","message"}`. Chrome lets a public website open this
-window without the local network permission that a `fetch` or WebSocket to the
-loopback interface needs (checked with Chrome 147), and Safari, which refuses
-those outright from an HTTPS page, opens it too.
-
-What the page does and does not do:
-
-* It answers only a top-level navigation (`Sec-Fetch-Dest: document` and
-  `Sec-Fetch-Mode: navigate`, when the browser sends them) addressed to the
-  loopback host by name (`Host` is `127.0.0.1:PORT` or `localhost:PORT`), so no
-  page can embed or fetch it or reach it through DNS rebinding. It cannot be
-  framed, is never cached, and runs only its own script (a nonce in its CSP).
-* It hands a pairing only to an origin the app's grant names, and only by
-  addressing that origin. A website that is not authorized gets a page that says
-  how to authorize it, and is told nothing.
-* Opening it again hands over the same pairing; it never makes a second one for
-  a website. A pairing ends when the relay refuses it (expired or unknown) or the
-  app is revoked or reauthorized, and the next visit makes a new one.
-* Like a `pair` link, the pairing is a session credential for the website's
-  origin: script injection on that origin can read it.
+A link ends when the relay refuses it (expired or unknown), when the app is
+revoked or reauthorized, or with `seatline-companion unlink APP`, which ends all
+of the app's links. Because the service keeps connecting, a link does not lapse
+while it runs: it is a long-lived session credential for that website's origin.
+Treat a printed link as a secret, and remember that script injection on the
+website's origin can read the browser's copy.
 
 `install`, and `authorize` for an app with a website, register the service to
 start at login: a launch agent (`~/Library/LaunchAgents/com.seatline.web.plist`)

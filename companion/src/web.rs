@@ -110,11 +110,7 @@ pub async fn pair(root: &Path, app: &str, relay: &str, site: &str, launch: bool)
     if launch {
         // The link holds the browser credential and the encryption key, so it
         // never goes on a command line where other local users could read it.
-        let page = prepare_launch(root, site.as_str())?;
-        if let Err(failure) = open_website(&page) {
-            let _ = std::fs::remove_file(&page);
-            return Err(failure);
-        }
+        let page = open_privately(root, site.as_str())?;
         tokio::spawn(async move {
             tokio::time::sleep(LAUNCH_PAGE_LIFETIME).await;
             let _ = std::fs::remove_file(page);
@@ -447,6 +443,18 @@ async fn connection(
     }
     drop(broker_writer);
     result
+}
+
+/// Opens `url` (a pairing link) in the user's browser through a private one-shot
+/// page, so the link never goes on a command line where other local users could
+/// read it. Returns the page, for the caller to remove once the browser has read it.
+pub fn open_privately(root: &Path, url: &str) -> io::Result<PathBuf> {
+    let page = prepare_launch(root, url)?;
+    if let Err(failure) = open_website(&page) {
+        let _ = std::fs::remove_file(&page);
+        return Err(failure);
+    }
+    Ok(page)
 }
 
 /// How long the one-shot page that hands the pairing link to the browser lives.
