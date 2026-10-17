@@ -631,17 +631,26 @@ impl Exchange for StatusCheck {
             let authentication = match self {
                 Self::Done(updates) => return updates.pop_front(),
                 Self::Probing {
-                    process, give_up, ..
+                    process,
+                    give_up,
+                    output,
                 } if Instant::now() >= *give_up => {
                     process.kill();
-                    Authentication::Unknown
+                    // Claude prints its answer before it leaves, and can be slow to
+                    // leave: what it already said is still its answer.
+                    reported_sign_in(output).unwrap_or(Authentication::Unknown)
                 }
                 Self::Probing {
                     process,
                     give_up,
                     output,
                 } => match process.next_event(deadline.min(*give_up)) {
-                    Some(Event::Exited(exit)) => signed_in(&exit),
+                    Some(Event::Exited(exit)) => match signed_in(&exit) {
+                        Authentication::Unknown => {
+                            reported_sign_in(output).unwrap_or(Authentication::Unknown)
+                        }
+                        known => known,
+                    },
                     Some(Event::Stdout(bytes)) => {
                         crate::keep_bounded_output(output, &bytes, 4096);
                         if Instant::now() >= busy_until {
@@ -676,9 +685,33 @@ impl Exchange for StatusCheck {
     }
 }
 
+/// The JSON object `claude auth status` printed. A line Claude prints before it
+/// (a notice) does not hide it.
+fn status_json(output: &[u8]) -> Option<serde_json::Value> {
+    let object = |bytes: &[u8]| {
+        serde_json::from_slice::<serde_json::Value>(bytes)
+            .ok()
+            .filter(serde_json::Value::is_object)
+    };
+    object(output).or_else(|| {
+        let start = output.iter().position(|&byte| byte == b'{')?;
+        let end = output.iter().rposition(|&byte| byte == b'}')?;
+        object(output.get(start..=end)?)
+    })
+}
+
+/// Whether Claude said it is signed in, for when its exit cannot say: it was
+/// stopped at the time limit, or left with a code that is neither 0 nor 1.
+fn reported_sign_in(output: &[u8]) -> Option<Authentication> {
+    match status_json(output)?.get("loggedIn")?.as_bool()? {
+        true => Some(Authentication::Authenticated),
+        false => Some(Authentication::Unauthenticated),
+    }
+}
+
 fn classify_sign_in(output: &[u8]) -> seatline_core::turn::SignInClassification {
     use seatline_core::turn::SignInClassification;
-    let parsed = serde_json::from_slice::<serde_json::Value>(output).ok();
+    let parsed = status_json(output);
     match parsed
         .as_ref()
         .and_then(|value| value["authMethod"].as_str())

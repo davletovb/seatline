@@ -96,6 +96,31 @@ fn auth_status(behavior: &str) -> ExitCode {
             );
             ExitCode::SUCCESS
         }
+        // A real Claude prints its answer and can then be slow to leave, or
+        // leave with a code that is neither 0 nor 1.
+        "subscription-lingers" => {
+            let mut stdout = io::stdout();
+            let _ = writeln!(
+                stdout,
+                r#"{{"loggedIn":true,"authMethod":"claude.ai","email":"{SECRET}"}}"#
+            );
+            let _ = stdout.flush();
+            hang()
+        }
+        "subscription-odd-exit" => {
+            let _ = writeln!(
+                io::stdout(),
+                r#"{{"loggedIn":true,"authMethod":"claude.ai","email":"{SECRET}"}}"#
+            );
+            ExitCode::from(2)
+        }
+        "subscription-after-notice" => {
+            let _ = writeln!(
+                io::stdout(),
+                "A notice before the answer\n{{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"{SECRET}\"}}"
+            );
+            ExitCode::SUCCESS
+        }
         _ => {
             let _ = writeln!(io::stdout(), r#"{{"loggedIn":true,"email":"{SECRET}"}}"#);
             ExitCode::SUCCESS

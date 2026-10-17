@@ -5,9 +5,10 @@ provider contract to multiple independently authorized apps. It contains no
 Conclave orchestration, product storage, website hosting, or JavaScript runtime.
 
 The per-user broker uses a private Unix socket on Linux/macOS and a Windows
-named pipe. There is no local HTTP listener. App grants control providers, tool
-policy and exact extension/website origins. Sessions, cancellation and cleanup
-are scoped to the authenticated app; all apps share bounded scheduling.
+named pipe. The companion opens no listening port; websites reach it only through
+outbound, encrypted relay connections. App grants control providers,
+tool policy and exact extension/website origins. Sessions, cancellation and
+cleanup are scoped to the authenticated app; all apps share bounded scheduling.
 
 Build with `cargo build --release --locked -p seatline-companion`, then run the
 resulting executable with `install` once. CI attaches native binaries for review;
@@ -17,6 +18,17 @@ still install and sign in to their chosen provider CLIs separately.
 ```sh
 seatline-companion install
 seatline-companion authorize my_app codex,claude https://app.example.com --relay=https://relay.example.com
+```
+
+Then link each browser once (see [linked browsers](#linked-browsers-and-the-web-service)):
+
+```sh
+seatline-companion link my_app --open
+```
+
+`pair` still works for a one-off connection:
+
+```sh
 seatline-companion pair my_app https://relay.example.com https://app.example.com --open
 ```
 
@@ -46,6 +58,43 @@ It sends `{"type":"ping"}` every 25 s once authenticated and treats 75 s
 without any frame as a dead link, so a relay must answer `ping` with
 `{"type":"pong"}`. A relay otherwise only has to forward `data` envelopes
 between the two roles; it never needs to understand them.
+
+### Linked browsers and the web service
+
+`seatline-companion link APP [SITE_ORIGIN] [--relay=RELAY_ORIGIN] [--open]`
+makes a pairing for one browser on one of the app's authorized websites (the
+grant's only website and relay unless named) and prints its link. Open it in
+that browser, or paste it into the website; `--open` opens it in the default
+browser through the same private one-shot page `pair --open` uses. The link is
+stored in `web/APP.json` in the data directory (owner-only). Each browser gets a
+link of its own (the relay lets one browser at a time use a pairing); linking a
+ninth browser to a website ends its oldest link.
+
+`seatline-companion web` keeps the helper side of every stored link connected to
+the relay, as `pair` keeps its one, so a linked browser finds Seatline whenever it
+opens the website, with nothing to click. It probes every 15 s and backs off for
+at most 15 s, so a website finds Seatline again soon after sleep or a network
+change. It opens no port: its only connections are outbound, to the relay and to
+the local broker, which it uses only while a browser is connected. It notices
+links made, ended or revoked within two seconds.
+
+A link ends when the relay refuses it (expired or unknown), when the app is
+revoked or reauthorized, or with `seatline-companion unlink APP`, which ends all
+of the app's links. Because the service keeps connecting, a link does not lapse
+while it runs: it is a long-lived session credential for that website's origin.
+Treat a printed link as a secret, and remember that script injection on the
+website's origin can read the browser's copy.
+
+`install`, and `authorize` for an app with a website, register the service to
+start at login: a launch agent (`~/Library/LaunchAgents/com.seatline.web.plist`)
+on macOS, a systemd user service (`seatline-web.service`, or an XDG autostart
+entry without systemd) on Linux, a `Run` entry on Windows. It runs the installed
+copy with the `PATH` of the terminal `install` or `authorize` ran in; `install`
+restarts it on the new copy (on macOS and with systemd; elsewhere at the next
+login). `revoke` removes the registration once no app has a website left, and
+`seatline-companion autostart off` removes it at any time (`autostart on` adds it
+back). Nothing is registered for a data directory named with `SEATLINE_DATA_DIR`,
+or when `SEATLINE_NO_AUTOSTART=1`.
 
 ### Web transport protocol 2
 

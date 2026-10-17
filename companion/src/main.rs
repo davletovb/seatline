@@ -73,6 +73,80 @@ fn run() -> io::Result<()> {
                     args.len() == 5,
                 ))
         }
+        Some("web") if args.len() == 1 || (args.len() == 2 && args[1] == "--detach") => {
+            // Started at login by Windows, which gives it a console: start again without one.
+            #[cfg(windows)]
+            if args.len() == 2 {
+                return seatline_companion::autostart::detach();
+            }
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(seatline_companion::links::serve(root))
+        }
+        Some("link") if args.len() >= 2 => {
+            let (mut origin, mut relay, mut open) = (None, None, false);
+            for arg in &args[2..] {
+                if let Some(value) = arg.strip_prefix("--relay=") {
+                    relay = Some(value);
+                } else if arg == "--open" {
+                    open = true;
+                } else if arg.starts_with("https://") && origin.is_none() {
+                    origin = Some(arg.as_str());
+                } else {
+                    return Err(io::Error::other(format!("unrecognized argument `{arg}`")));
+                }
+            }
+            let link = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(seatline_companion::links::link(
+                    &root, &args[1], origin, relay,
+                ))?;
+            println!(
+                "Linked a browser to {}. Open this private link in the browser you use it in (or paste it into the site):\n{}",
+                link.origin,
+                link.url()
+            );
+            if !seatline_companion::links::service_running(&root) {
+                eprintln!(
+                    "Seatline: the web service is not running, so the website cannot reach Seatline yet. Start it with `seatline-companion web`, or `seatline-companion autostart on` to start it at login."
+                );
+            }
+            if open {
+                // The browser reads the one-shot page at once; it is removed soon after.
+                let page = seatline_companion::web::open_privately(&root, &link.url())?;
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let _ = std::fs::remove_file(page);
+            }
+            Ok(())
+        }
+        Some("unlink") if args.len() == 2 => {
+            let ended = seatline_companion::links::unlink(&root, &args[1])?;
+            println!(
+                "Ended {ended} link(s) of {}; those browsers must be linked again.",
+                args[1]
+            );
+            Ok(())
+        }
+        Some("autostart") if args.len() == 2 && matches!(args[1].as_str(), "on" | "off") => {
+            if args[1] == "off" {
+                if seatline_companion::autostart::disable()? {
+                    println!("The Seatline web service no longer starts at login.");
+                } else {
+                    println!("The Seatline web service was not set to start at login.");
+                }
+                return Ok(());
+            }
+            let executable = seatline_companion::install::executable(&root)?
+                .ok_or_else(|| io::Error::other("run `seatline-companion install` first"))?;
+            let registration = seatline_companion::autostart::enable(&executable, false)?;
+            println!(
+                "The Seatline web service starts at login ({}).",
+                registration.display()
+            );
+            Ok(())
+        }
         Some("connect") if args.len() == 2 => {
             let grant = config::load_grant(&root, &args[1])?;
             tokio::runtime::Builder::new_current_thread()
@@ -104,6 +178,7 @@ fn run() -> io::Result<()> {
                     "denied"
                 },
             );
+            report_autostart(seatline_companion::autostart::sync(&root, false));
             Ok(())
         }
         Some("register-native") if args.len() >= 3 => {
@@ -132,6 +207,7 @@ fn run() -> io::Result<()> {
             if seatline_companion::install::executable(&root)?.is_some() {
                 seatline_companion::install::register(&root)?;
             }
+            report_autostart(seatline_companion::autostart::sync(&root, false));
             Ok(())
         }
         Some("install") if args.len() == 1 => {
@@ -158,6 +234,8 @@ fn run() -> io::Result<()> {
                 ),
                 Err(error) => eprintln!("Seatline: could not stop the running Seatline: {error}"),
             }
+            // The web service that was running is an older copy too: start this one in its place.
+            report_autostart(seatline_companion::autostart::sync(&root, true));
             Ok(())
         }
         Some("stop") if args.len() == 1 => {
@@ -225,8 +303,20 @@ fn run() -> io::Result<()> {
             }
         }
         _ => Err(io::Error::other(
-            "usage: seatline-companion install | stop | serve | connect APP | pair APP RELAY SITE [--open] | authorize APP PROVIDERS [EXTENSION_ORIGIN...] [SITE_ORIGIN...] [--relay=RELAY_ORIGIN] [--cache-title=TITLE] [--allow-provider-default] | register-native APP EXECUTABLE [ARGS...] | revoke APP | manifest",
+            "usage: seatline-companion install | stop | serve | web | link APP [SITE_ORIGIN] [--relay=RELAY_ORIGIN] [--open] | unlink APP | autostart on|off | connect APP | pair APP RELAY SITE [--open] | authorize APP PROVIDERS [EXTENSION_ORIGIN...] [SITE_ORIGIN...] [--relay=RELAY_ORIGIN] [--cache-title=TITLE] [--allow-provider-default] | register-native APP EXECUTABLE [ARGS...] | revoke APP | manifest",
         )),
+    }
+}
+
+/// Says what changed about starting the web service at login. It never fails
+/// the command that asked: authorizing or installing has already happened.
+fn report_autostart(result: io::Result<Option<String>>) {
+    match result {
+        Ok(Some(message)) => println!("{message}"),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("Seatline: could not set the web service to start at login: {error}")
+        }
     }
 }
 
