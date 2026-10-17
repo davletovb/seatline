@@ -5,9 +5,10 @@ provider contract to multiple independently authorized apps. It contains no
 Conclave orchestration, product storage, website hosting, or JavaScript runtime.
 
 The per-user broker uses a private Unix socket on Linux/macOS and a Windows
-named pipe. There is no local HTTP listener. App grants control providers, tool
-policy and exact extension/website origins. Sessions, cancellation and cleanup
-are scoped to the authenticated app; all apps share bounded scheduling.
+named pipe; it has no HTTP listener. The web service (below) answers one page on
+the loopback interface for authorized websites. App grants control providers,
+tool policy and exact extension/website origins. Sessions, cancellation and
+cleanup are scoped to the authenticated app; all apps share bounded scheduling.
 
 Build with `cargo build --release --locked -p seatline-companion`, then run the
 resulting executable with `install` once. CI attaches native binaries for review;
@@ -17,6 +18,12 @@ still install and sign in to their chosen provider CLIs separately.
 ```sh
 seatline-companion install
 seatline-companion authorize my_app codex,claude https://app.example.com --relay=https://relay.example.com
+```
+
+That is all a website needs: see [websites without `pair`](#websites-without-pair-the-web-service).
+`pair` still works for a one-off connection:
+
+```sh
 seatline-companion pair my_app https://relay.example.com https://app.example.com --open
 ```
 
@@ -46,6 +53,60 @@ It sends `{"type":"ping"}` every 25 s once authenticated and treats 75 s
 without any frame as a dead link, so a relay must answer `ping` with
 `{"type":"pong"}`. A relay otherwise only has to forward `data` envelopes
 between the two roles; it never needs to understand them.
+
+### Websites without `pair`: the web service
+
+`seatline-companion web` keeps authorized websites connected without anyone
+running `pair`. For each website an app is authorized for (an app, one of its
+website origins and one of its relays) it keeps one standing pairing, stored in
+`web/APP.json` in the data directory (owner-only), and keeps its helper side
+connected to the relay as `pair` does, probing every 15 s and backing off for at
+most 15 s, so a website finds Seatline again soon after sleep or a network change.
+
+The browser gets its side from one page on the loopback interface (port 27183,
+or `SEATLINE_WEB_PORT`):
+
+```text
+http://127.0.0.1:27183/connect?app=APP&origin=WEBSITE_ORIGIN&relay=RELAY_ORIGIN
+```
+
+The website opens it in a window of its own from a click. The page posts
+`{"type":"seatline-pairing","version":1,"app","relay","id","token","key"}` to the
+window that opened it, addressed to the website's origin, and closes. Opened any
+other way (no opener), it forwards to the website with the pairing in the
+fragment, as a `pair` link does. A pairing it cannot get from the relay is
+reported to an authorized website as `{"type":"seatline-pairing","version":1,
+"error":"relay_unavailable","message"}`. Chrome lets a public website open this
+window without the local network permission that a `fetch` or WebSocket to the
+loopback interface needs (checked with Chrome 147), and Safari, which refuses
+those outright from an HTTPS page, opens it too.
+
+What the page does and does not do:
+
+* It answers only a top-level navigation (`Sec-Fetch-Dest: document` and
+  `Sec-Fetch-Mode: navigate`, when the browser sends them) addressed to the
+  loopback host by name (`Host` is `127.0.0.1:PORT` or `localhost:PORT`), so no
+  page can embed or fetch it or reach it through DNS rebinding. It cannot be
+  framed, is never cached, and runs only its own script (a nonce in its CSP).
+* It hands a pairing only to an origin the app's grant names, and only by
+  addressing that origin. A website that is not authorized gets a page that says
+  how to authorize it, and is told nothing.
+* Opening it again hands over the same pairing; it never makes a second one for
+  a website. A pairing ends when the relay refuses it (expired or unknown) or the
+  app is revoked or reauthorized, and the next visit makes a new one.
+* Like a `pair` link, the pairing is a session credential for the website's
+  origin: script injection on that origin can read it.
+
+`install`, and `authorize` for an app with a website, register the service to
+start at login: a launch agent (`~/Library/LaunchAgents/com.seatline.web.plist`)
+on macOS, a systemd user service (`seatline-web.service`, or an XDG autostart
+entry without systemd) on Linux, a `Run` entry on Windows. It runs the installed
+copy with the `PATH` of the terminal `install` or `authorize` ran in; `install`
+restarts it on the new copy (on macOS and with systemd; elsewhere at the next
+login). `revoke` removes the registration once no app has a website left, and
+`seatline-companion autostart off` removes it at any time (`autostart on` adds it
+back). Nothing is registered for a data directory named with `SEATLINE_DATA_DIR`,
+or when `SEATLINE_NO_AUTOSTART=1`.
 
 ### Web transport protocol 2
 

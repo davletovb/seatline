@@ -14,6 +14,10 @@ pub mod wire;
 
 /// Hosted-app transport; needs the `web` feature (on by default).
 #[cfg(feature = "web")]
+pub mod autostart;
+#[cfg(feature = "web")]
+pub mod connect;
+#[cfg(feature = "web")]
 pub mod secure;
 #[cfg(feature = "web")]
 pub mod web;

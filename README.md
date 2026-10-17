@@ -16,8 +16,10 @@ It provides:
 Applications own conversation/product policy. Seatline owns provider execution mechanics.
 
 See the [shared companion setup and protocol](companion/README.md) for using one
-installation from multiple apps and extensions. The companion has no local HTTP
-listener and includes no JavaScript runtime or product orchestration.
+installation from multiple apps and extensions. The broker has no HTTP listener;
+the optional web service answers one connect page on the loopback interface for
+the websites a user has authorized. The companion includes no JavaScript runtime
+or product orchestration.
 
 ## Status
 

@@ -73,6 +73,38 @@ fn run() -> io::Result<()> {
                     args.len() == 5,
                 ))
         }
+        Some("web") if args.len() == 1 || (args.len() == 2 && args[1] == "--detach") => {
+            // Started at login by Windows, which gives it a console: start again without one.
+            #[cfg(windows)]
+            if args.len() == 2 {
+                return seatline_companion::autostart::detach();
+            }
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(seatline_companion::connect::serve(
+                    root,
+                    seatline_companion::connect::port()?,
+                ))
+        }
+        Some("autostart") if args.len() == 2 && matches!(args[1].as_str(), "on" | "off") => {
+            if args[1] == "off" {
+                if seatline_companion::autostart::disable()? {
+                    println!("The Seatline web service no longer starts at login.");
+                } else {
+                    println!("The Seatline web service was not set to start at login.");
+                }
+                return Ok(());
+            }
+            let executable = seatline_companion::install::executable(&root)?
+                .ok_or_else(|| io::Error::other("run `seatline-companion install` first"))?;
+            let registration = seatline_companion::autostart::enable(&executable, false)?;
+            println!(
+                "The Seatline web service starts at login ({}).",
+                registration.display()
+            );
+            Ok(())
+        }
         Some("connect") if args.len() == 2 => {
             let grant = config::load_grant(&root, &args[1])?;
             tokio::runtime::Builder::new_current_thread()
@@ -104,6 +136,7 @@ fn run() -> io::Result<()> {
                     "denied"
                 },
             );
+            report_autostart(seatline_companion::autostart::sync(&root, false));
             Ok(())
         }
         Some("register-native") if args.len() >= 3 => {
@@ -132,6 +165,7 @@ fn run() -> io::Result<()> {
             if seatline_companion::install::executable(&root)?.is_some() {
                 seatline_companion::install::register(&root)?;
             }
+            report_autostart(seatline_companion::autostart::sync(&root, false));
             Ok(())
         }
         Some("install") if args.len() == 1 => {
@@ -158,6 +192,8 @@ fn run() -> io::Result<()> {
                 ),
                 Err(error) => eprintln!("Seatline: could not stop the running Seatline: {error}"),
             }
+            // The web service that was running is an older copy too: start this one in its place.
+            report_autostart(seatline_companion::autostart::sync(&root, true));
             Ok(())
         }
         Some("stop") if args.len() == 1 => {
@@ -225,8 +261,20 @@ fn run() -> io::Result<()> {
             }
         }
         _ => Err(io::Error::other(
-            "usage: seatline-companion install | stop | serve | connect APP | pair APP RELAY SITE [--open] | authorize APP PROVIDERS [EXTENSION_ORIGIN...] [SITE_ORIGIN...] [--relay=RELAY_ORIGIN] [--cache-title=TITLE] [--allow-provider-default] | register-native APP EXECUTABLE [ARGS...] | revoke APP | manifest",
+            "usage: seatline-companion install | stop | serve | web | autostart on|off | connect APP | pair APP RELAY SITE [--open] | authorize APP PROVIDERS [EXTENSION_ORIGIN...] [SITE_ORIGIN...] [--relay=RELAY_ORIGIN] [--cache-title=TITLE] [--allow-provider-default] | register-native APP EXECUTABLE [ARGS...] | revoke APP | manifest",
         )),
+    }
+}
+
+/// Says what changed about starting the web service at login. It never fails
+/// the command that asked: authorizing or installing has already happened.
+fn report_autostart(result: io::Result<Option<String>>) {
+    match result {
+        Ok(Some(message)) => println!("{message}"),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("Seatline: could not set the web service to start at login: {error}")
+        }
     }
 }
 

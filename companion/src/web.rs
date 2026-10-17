@@ -91,47 +91,19 @@ pub async fn pair(root: &Path, app: &str, relay: &str, site: &str, launch: bool)
         ));
     }
     let _lock = config::lock(root, &format!("{app}-web.lock"))?;
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(io::Error::other)?;
-    let response = http
-        .post(relay.join("/pair").map_err(io::Error::other)?)
-        .json(&json!({"app":app,"origin":site.origin().ascii_serialization()}))
-        .send()
-        .await
-        .map_err(io::Error::other)?;
-    if !response.status().is_success() {
-        return Err(error("relay refused pairing"));
-    }
-    let mut response = response;
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(io::Error::other)? {
-        if bytes.len() + chunk.len() > 4096 {
-            return Err(error("invalid pairing response"));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    if bytes.len() > 4096 {
-        return Err(error("invalid pairing response"));
-    }
-    let pair: Value = serde_json::from_slice(&bytes)?;
-    for name in ["id", "helper", "browser"] {
-        if !pair[name]
-            .as_str()
-            .is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
-        {
-            return Err(error("invalid pairing response"));
-        }
-    }
-    let mut key_bytes = [0_u8; 32];
-    getrandom::fill(&mut key_bytes).map_err(|_| error("randomness unavailable"))?;
+    let pair = request_pairing(
+        &http_client()?,
+        app,
+        &relay,
+        &site.origin().ascii_serialization(),
+    )
+    .await?;
+    let key_bytes = new_key()?;
     let key = Aes256Gcm::new_from_slice(&key_bytes).map_err(|_| error("invalid key"))?;
     site.set_fragment(Some(&format!(
         "seatline={}:{}:{}",
-        pair["id"].as_str().unwrap(),
-        pair["browser"].as_str().unwrap(),
+        pair.id,
+        pair.browser,
         URL_SAFE_NO_PAD.encode(key_bytes)
     )));
     println!("Open this private pairing link:\n{site}");
@@ -148,25 +120,94 @@ pub async fn pair(root: &Path, app: &str, relay: &str, site: &str, launch: bool)
             let _ = std::fs::remove_file(page);
         });
     }
-    let mut endpoint = relay
-        .join(&format!(
-            "/channels/{}/helper",
-            pair["id"].as_str().unwrap()
-        ))
-        .map_err(io::Error::other)?;
-    endpoint
-        .set_scheme("wss")
-        .map_err(|_| error("invalid relay scheme"))?;
     run_channel(
         root,
         app,
         &grant.token,
-        endpoint.as_str(),
-        pair["helper"].as_str().unwrap(),
+        &helper_endpoint(&relay, &pair.id)?,
+        &pair.helper,
         &key,
         Timing::default(),
     )
     .await
+}
+
+/// What the relay hands out for one pairing: the channel and a credential for
+/// each side. The encryption key is never the relay's; see [`new_key`].
+pub struct Pairing {
+    pub id: String,
+    pub helper: String,
+    pub browser: String,
+}
+
+/// The client every pairing request goes through: short, and never redirected.
+pub fn http_client() -> io::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(io::Error::other)
+}
+
+/// A fresh pairing key, generated here and never sent to the relay.
+pub fn new_key() -> io::Result<[u8; 32]> {
+    let mut key = [0_u8; 32];
+    getrandom::fill(&mut key).map_err(|_| error("randomness unavailable"))?;
+    Ok(key)
+}
+
+/// Asks `relay` for a pairing between `app`'s helper and a browser on `origin`.
+/// The caller has checked that the app's grant names both.
+pub async fn request_pairing(
+    http: &reqwest::Client,
+    app: &str,
+    relay: &reqwest::Url,
+    origin: &str,
+) -> io::Result<Pairing> {
+    let response = http
+        .post(relay.join("/pair").map_err(io::Error::other)?)
+        .json(&json!({"app":app,"origin":origin}))
+        .send()
+        .await
+        .map_err(io::Error::other)?;
+    if !response.status().is_success() {
+        return Err(error(&format!(
+            "relay refused pairing (HTTP {})",
+            response.status().as_u16()
+        )));
+    }
+    let mut response = response;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(io::Error::other)? {
+        if bytes.len() + chunk.len() > 4096 {
+            return Err(error("invalid pairing response"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let pair: Value = serde_json::from_slice(&bytes)?;
+    let credential = |name: &str| {
+        pair[name]
+            .as_str()
+            .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(str::to_owned)
+            .ok_or_else(|| error("invalid pairing response"))
+    };
+    Ok(Pairing {
+        id: credential("id")?,
+        helper: credential("helper")?,
+        browser: credential("browser")?,
+    })
+}
+
+/// Where the helper side of pairing `id` connects.
+pub fn helper_endpoint(relay: &reqwest::Url, id: &str) -> io::Result<String> {
+    let mut endpoint = relay
+        .join(&format!("/channels/{id}/helper"))
+        .map_err(io::Error::other)?;
+    endpoint
+        .set_scheme("wss")
+        .map_err(|_| error("invalid relay scheme"))?;
+    Ok(endpoint.into())
 }
 
 /// Keeps the helper connected to the relay until the pairing can no longer
