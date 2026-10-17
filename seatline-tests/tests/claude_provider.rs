@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use seatline_core::exchange::SessionLoss;
 use seatline_core::protocol::{Authentication, Availability, Capability, ErrorCode};
-use seatline_core::turn::{Message, ReasoningEffort, Role, SessionPolicy, ToolPolicy, Turn};
+use seatline_core::turn::{
+    Message, ReasoningEffort, Role, SessionPolicy, SignInClassification, ToolPolicy, Turn,
+};
 use seatline_providers::claude::Claude;
 use seatline_providers::{Provider, Update};
 use serde_json::Value;
@@ -90,6 +92,58 @@ fn status_uses_shared_discovery_and_auth_exit_status() {
             .invocations()
             .iter()
             .all(|line| line == "auth status")
+    );
+}
+
+/// How the status names the sign-in.
+fn sign_in(claude: &Claude) -> (Authentication, Option<SignInClassification>) {
+    match &run_to_end(claude.status().as_mut())[0] {
+        Update::Status { status, .. } => (status.authentication, status.sign_in),
+        other => panic!("expected status, got {other:?}"),
+    }
+}
+
+#[test]
+fn what_claude_printed_is_its_answer_when_its_exit_cannot_say() {
+    let claude = FakeClaude::install(FIXTURES, "answers", "subscription");
+    let subscription = (
+        Authentication::Authenticated,
+        Some(SignInClassification::Subscription),
+    );
+    assert_eq!(sign_in(&claude.adapter()), subscription);
+
+    // It answered, then outstayed the time limit: stopped, but signed in.
+    claude.set("answers", "subscription-lingers");
+    let quick = support::CLAUDE_TEST_LIMITS;
+    let quick = seatline_providers::claude::Limits {
+        probe: Duration::from_millis(600),
+        ..quick
+    };
+    let began = Instant::now();
+    assert_eq!(sign_in(&claude.adapter_with(quick)), subscription);
+    assert!(began.elapsed() < Duration::from_secs(5));
+
+    // An exit code other than 0 or 1 says nothing; the answer still does.
+    claude.set("answers", "subscription-odd-exit");
+    assert_eq!(sign_in(&claude.adapter()), subscription);
+
+    // A notice ahead of the answer does not hide it.
+    claude.set("answers", "subscription-after-notice");
+    assert_eq!(sign_in(&claude.adapter()), subscription);
+
+    // Nothing printed and an unexpected exit is still unknown, and a refusal
+    // is still a refusal.
+    claude.set("answers", "broken");
+    assert_eq!(sign_in(&claude.adapter()), (Authentication::Unknown, None));
+    claude.set("answers", "hangs");
+    assert_eq!(
+        sign_in(&claude.adapter_with(quick)),
+        (Authentication::Unknown, None)
+    );
+    claude.set("answers", "signed-out");
+    assert_eq!(
+        sign_in(&claude.adapter()),
+        (Authentication::Unauthenticated, None)
     );
 }
 
