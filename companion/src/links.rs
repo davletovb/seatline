@@ -122,6 +122,15 @@ fn change<T>(
             Err(error) => return Err(error),
         }
     };
+    // A caller may hold a grant that was replaced while it waited (a link task of
+    // the old grant, a `link` that was talking to the relay): its links are not
+    // the current grant's, so it must not write over them.
+    let current = config::load_grant(root, &grant.app)?;
+    if !config::same_token(&current.token, &grant.token) {
+        return Err(io::Error::other(
+            "app authorization was replaced; link again",
+        ));
+    }
     let mut links = load(root, grant)?;
     let result = edit(&mut links);
     save(root, grant, links)?;
@@ -346,6 +355,41 @@ mod tests {
         config::grant_from_args(app, "codex", &args).unwrap()
     }
 
+    fn authorize(root: &Path, grant: &config::Grant) {
+        config::write_private(
+            &config::app_path(root, &grant.app).unwrap(),
+            &serde_json::to_vec(grant).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_holder_of_a_replaced_grant_cannot_write_over_the_new_grants_links() {
+        let root = root();
+        let site = [
+            "https://app.example.com",
+            "--relay=https://relay.example.com",
+        ];
+        let old = grant("my_app", &site);
+        authorize(&root, &old);
+        // Reauthorized while a task of the old grant was still connected.
+        let new = grant("my_app", &site);
+        authorize(&root, &new);
+        change(&root, &new, |links| {
+            links.push(link("https://app.example.com", 'a'))
+        })
+        .unwrap();
+        // The old task notices too late and tries to forget its link.
+        let stale = change(&root, &old, |links| links.clear());
+        assert!(stale.unwrap_err().to_string().contains("replaced"));
+        assert_eq!(
+            load(&root, &new).unwrap().len(),
+            1,
+            "the new grant's links survive"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn a_link_carries_the_browser_side_only() {
         let url = link("https://app.example.com", 'a').url();
@@ -371,6 +415,7 @@ mod tests {
                 "--relay=https://relay.example.com",
             ],
         );
+        authorize(&root, &first);
         change(&root, &first, |links| {
             links.push(link("https://app.example.com", 'a'))
         })
