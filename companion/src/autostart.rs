@@ -67,6 +67,20 @@ pub fn disable() -> io::Result<bool> {
     platform::disable()
 }
 
+/// Writes a login-item file. Its folder is shared with other programs, so it is
+/// created if missing but its permissions are left alone; the file holds no secret.
+#[cfg(unix)]
+fn write_registration(path: &Path, contents: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&temporary, contents)?;
+    std::fs::rename(&temporary, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temporary);
+    })
+}
+
 #[cfg(unix)]
 fn home() -> io::Result<PathBuf> {
     std::env::var_os("HOME")
@@ -168,7 +182,7 @@ mod platform {
 
     pub fn enable(executable: &Path, path: Option<&OsStr>, restart: bool) -> io::Result<PathBuf> {
         let agent = agent()?;
-        config::write_private(&agent, launch_agent(executable, path).as_bytes())?;
+        write_registration(&agent, &launch_agent(executable, path))?;
         let domain = domain()?;
         let service = format!("{domain}/{LABEL}");
         let loaded = launchctl(&[OsStr::new("print"), OsStr::new(&service)])?;
@@ -260,7 +274,7 @@ mod platform {
 
     pub fn enable(executable: &Path, path: Option<&OsStr>, restart: bool) -> io::Result<PathBuf> {
         let unit = unit()?;
-        config::write_private(&unit, systemd_unit(executable, path).as_bytes())?;
+        write_registration(&unit, &systemd_unit(executable, path))?;
         if systemctl(&["daemon-reload"])
             && systemctl(&["enable", UNIT])
             && systemctl(&[if restart { "restart" } else { "start" }, UNIT])
@@ -278,13 +292,12 @@ mod platform {
             .replace('`', "\\`")
             .replace('$', "\\$")
             .replace('%', "%%");
-        config::write_private(
+        write_registration(
             &entry,
-            format!(
+            &format!(
                 "[Desktop Entry]\nType=Application\nName=Seatline web connection\n\
                  Exec=\"{quoted}\" web\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n"
-            )
-            .as_bytes(),
+            ),
         )?;
         start_detached(executable)?;
         Ok(entry)
@@ -417,6 +430,30 @@ mod tests {
         assert!(unit.contains("ExecStart=\"/home/u/my seat%%line/seatline-companion\" web\n"));
         assert!(unit.contains("Environment=\"PATH=/usr/bin:/bin\"\n"));
         assert!(unit.contains("Restart=on-failure"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_registration_leaves_the_shared_folder_it_is_written_to_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = std::env::temp_dir().join(format!(
+            "seatline-registration-{}",
+            &config::random_token().unwrap()[..12]
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = folder.join("com.seatline.web.plist");
+        write_registration(&file, "first").unwrap();
+        write_registration(&file, "second").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "second");
+        let mode = std::fs::metadata(&folder).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+        assert_eq!(
+            std::fs::read_dir(&folder).unwrap().count(),
+            1,
+            "no temporary file is left"
+        );
+        let _ = std::fs::remove_dir_all(folder);
     }
 
     #[test]
