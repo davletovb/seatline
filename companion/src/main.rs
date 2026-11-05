@@ -558,11 +558,10 @@ async fn connection_loop(
         // The first thing the hub says to a connection is `ready`.
         let mut handshake = telemetry.zip(handshake_began).zip(handshake_app);
         while let Some(event) = events.recv().await {
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                wire::write_frame(&mut writer, &event),
-            )
-            .await??;
+            // Not a short limit: what waits for a slow client is bounded by size in
+            // the hub, and a client such as the web helper takes nothing while its
+            // network stalls (see `wire::CLIENT_STALL`).
+            wire::write_frame_within(&mut writer, &event, wire::CLIENT_STALL).await?;
             if let Some(((sink, began), app)) = handshake.take() {
                 sink.record(telemetry::handshake_record(
                     connection,

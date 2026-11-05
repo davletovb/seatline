@@ -2,9 +2,22 @@ use seatline_core::exchange::{SessionLoss, Update};
 use seatline_core::protocol::{ErrorCode, Failure};
 use serde_json::{Value, json};
 use std::io;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const MAX_FRAME: usize = 1024 * 1024;
+
+/// How long the broker waits for a client to take one frame before it decides
+/// the client is gone.
+///
+/// How much output may wait for a slow client is bounded by size, in the hub,
+/// so time only has to tell a client that is gone (hung, or holding a
+/// connection it never reads) from one that is slow. The web helper is a slow
+/// one at times: it passes events on to a relay over the network, and takes
+/// nothing while the network stalls. It decides itself when its relay is gone
+/// (`web::Timing::dead_after`, 75 s at most), and this is longer, so a stall it
+/// rides out does not cost it its connection here and every request on it.
+pub const CLIENT_STALL: Duration = Duration::from_secs(120);
 
 /// Every failure reason the broker or a provider adapter can put on the wire.
 /// The decoder accepts only these, so provider output can never be reflected
@@ -92,6 +105,18 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, value: &Value) -
     writer.write_u32_le(bytes.len() as u32).await?;
     writer.write_all(&bytes).await?;
     writer.flush().await
+}
+
+/// [`write_frame`], unless writing it takes longer than `limit`: then the
+/// client is taken to be gone, with [`io::ErrorKind::TimedOut`].
+pub async fn write_frame_within<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    value: &Value,
+    limit: Duration,
+) -> io::Result<()> {
+    tokio::time::timeout(limit, write_frame(writer, value))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the client stopped reading"))?
 }
 
 pub fn valid_id(value: &str) -> bool {
@@ -191,6 +216,33 @@ pub fn decode_update(value: Value) -> io::Result<Update> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_client_that_stops_reading_while_its_network_stalls_still_gets_the_frame() {
+        // A pipe much smaller than the frame, read by nobody for a minute: far
+        // longer than the 5 s the broker used to allow, within CLIENT_STALL.
+        let (mut broker, mut client) = tokio::io::duplex(1024);
+        let frame = json!({"id":"r","event":{"type":"delta","text":"x".repeat(64 * 1024)}});
+        let sent = frame.clone();
+        let writer =
+            tokio::spawn(async move { write_frame_within(&mut broker, &sent, CLIENT_STALL).await });
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(!writer.is_finished(), "the frame cannot have fit");
+        assert_eq!(read_frame(&mut client).await.unwrap(), frame);
+        writer.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_client_that_takes_nothing_for_the_stall_limit_is_given_up() {
+        let (mut broker, _client) = tokio::io::duplex(1024);
+        let frame = json!({"id":"r","event":{"type":"delta","text":"x".repeat(64 * 1024)}});
+        let began = tokio::time::Instant::now();
+        let error = write_frame_within(&mut broker, &frame, CLIENT_STALL)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(began.elapsed(), CLIENT_STALL);
+    }
 
     #[test]
     fn unsupported_service_tier_preserves_the_adapters_failure_over_the_wire() {

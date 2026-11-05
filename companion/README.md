@@ -156,7 +156,10 @@ cancelled. The broker never waits for a client: output its connection cannot
 take yet waits in the broker, in order, with adjacent text of one request
 joined, so a turn that prints many deltas at once (or two that stream
 together) costs a slower client such as the web helper fewer frames, not its
-connection. A client is closed as not reading once 4 MiB of its output waits.
+connection. A client is closed as not reading once 4 MiB of its output waits,
+or once it takes no frame for two minutes: longer than the web helper waits for
+its relay (at most 75 s), so a stalled network ends the helper's relay
+connection there, and its broker connection only with it.
 A client that connects when all 32 slots are taken receives
 `{"type":"busy"}` and the Rust client reports it as a retryable `QUEUE_FULL`. Revoking a
 grant cancels its connected requests within one second.

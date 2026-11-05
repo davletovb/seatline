@@ -20,7 +20,8 @@ pub struct Timing {
     pub connect: Duration,
     /// How often an authenticated connection is probed with a `ping` frame.
     pub ping_every: Duration,
-    /// A connection that has produced no frame at all for this long is dead.
+    /// A connection that has produced no frame at all for this long is dead,
+    /// and so is one that has taken nothing we sent for this long.
     pub dead_after: Duration,
     pub backoff_start: Duration,
     pub backoff_max: Duration,
@@ -293,6 +294,22 @@ async fn connect_relay(
         .map_err(Box::new)
 }
 
+/// Sends `message` to the relay, or ends the connection when the relay has
+/// taken none of it for `limit`. A relay that stopped taking data is as dead
+/// as one that stopped answering, and while a send waits nothing else here
+/// runs, not even the check for that: without a limit a stalled network would
+/// hold the helper until the operating system gave up on the connection, long
+/// after the broker had given up on the helper.
+async fn send_within<S>(socket: &mut S, message: Message, limit: Duration) -> Result<(), End>
+where
+    S: futures_util::Sink<Message, Error = tungstenite::Error> + Unpin,
+{
+    match tokio::time::timeout(limit, socket.send(message)).await {
+        Ok(sent) => sent.map_err(|failure| End::Retry(io::Error::other(failure))),
+        Err(_) => Err(End::retry("relay stopped taking data")),
+    }
+}
+
 async fn connection(
     root: &Path,
     app: &str,
@@ -322,12 +339,12 @@ async fn connection(
         }
         Ok(Ok(connected)) => connected,
     };
-    socket
-        .send(Message::Text(
-            json!({"type":"auth","token":helper}).to_string().into(),
-        ))
-        .await
-        .map_err(io::Error::other)?;
+    send_within(
+        &mut socket,
+        Message::Text(json!({"type":"auth","token":helper}).to_string().into()),
+        timing.dead_after,
+    )
+    .await?;
     let mut broker_writer: Option<BrokerWriter> = None;
     let mut broker_reader: Option<tokio::task::JoinHandle<()>> = None;
     let (output, mut events) = tokio::sync::mpsc::channel::<Value>(64);
@@ -352,7 +369,7 @@ async fn connection(
                         return Err(End::retry("relay stopped responding"));
                     }
                     if authenticated {
-                        socket.send(Message::Text(json!({"type":"ping"}).to_string().into())).await.map_err(io::Error::other)?;
+                        send_within(&mut socket, Message::Text(json!({"type":"ping"}).to_string().into()), timing.dead_after).await?;
                     }
                 },
                 event = events.recv(), if broker_writer.is_some() => {
@@ -361,7 +378,7 @@ async fn connection(
                     // Events that outlived their epoch are dropped, never sent under another.
                     let Some(current) = epoch.as_ref() else { continue };
                     sent = sent.checked_add(1).ok_or_else(|| End::fatal("sequence exhausted"))?;
-                    socket.send(Message::Text(secure::seal_frame(key,"helper",current,sent,&event)?.to_string().into())).await.map_err(io::Error::other)?;
+                    send_within(&mut socket, Message::Text(secure::seal_frame(key,"helper",current,sent,&event)?.to_string().into()), timing.dead_after).await?;
                 },
                 message = socket.next() => {
                     let Some(message) = message else { return Err(End::retry("relay disconnected")); };
@@ -416,7 +433,7 @@ async fn connection(
                                     }}
                                 }));
                                 let reply = secure::seal_hello(key, "helper", &current.helper, Some(&current.browser))?;
-                                socket.send(Message::Text(reply.to_string().into())).await.map_err(io::Error::other)?;
+                                send_within(&mut socket, Message::Text(reply.to_string().into()), timing.dead_after).await?;
                             } else {
                                 let Some(current) = epoch.as_ref() else {
                                     return Err(End::retry("data arrived before a handshake; the peer may speak an older protocol"));
@@ -833,6 +850,56 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A WebSocket over a pipe much smaller than one frame, and the far end of the pipe.
+    async fn narrow_socket() -> (
+        WebSocketStream<tokio::io::DuplexStream>,
+        tokio::io::DuplexStream,
+    ) {
+        let (near, far) = tokio::io::duplex(1024);
+        let socket =
+            WebSocketStream::from_raw_socket(near, tungstenite::protocol::Role::Client, None).await;
+        (socket, far)
+    }
+
+    fn large() -> Message {
+        Message::Text("x".repeat(64 * 1024).into())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_that_stops_taking_data_ends_the_connection_after_dead_after() {
+        let (mut socket, _far) = narrow_socket().await;
+        let began = tokio::time::Instant::now();
+        let Err(End::Retry(failure)) = send_within(&mut socket, large(), quick().dead_after).await
+        else {
+            panic!("a relay that takes nothing must end the connection, to be retried");
+        };
+        assert!(failure.to_string().contains("stopped taking data"));
+        assert_eq!(began.elapsed(), quick().dead_after);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_that_takes_the_data_late_but_within_dead_after_keeps_the_connection() {
+        let (mut socket, mut far) = narrow_socket().await;
+        let limit = Timing::default().dead_after;
+        let reader = tokio::spawn(async move {
+            // The network stalls for most of the limit, then drains.
+            tokio::time::sleep(limit - Duration::from_secs(5)).await;
+            let mut sink = Vec::new();
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut far, &mut sink).await;
+        });
+        assert!(send_within(&mut socket, large(), limit).await.is_ok());
+        drop(socket);
+        reader.await.unwrap();
+    }
+
+    #[test]
+    fn the_helper_gives_up_on_its_relay_before_the_broker_gives_up_on_the_helper() {
+        // The helper is the one that can tell a stalled network from a dead
+        // one, so it must decide first: the broker's limit for a client that
+        // takes nothing is longer than any helper's.
+        assert!(Timing::default().dead_after < crate::wire::CLIENT_STALL);
     }
 
     #[test]
