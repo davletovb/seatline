@@ -45,6 +45,17 @@ const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 /// exit on their own, once told to stop: a stop grace of Claude's (2 s) and a
 /// moment to kill.
 const REAPER_STOP_WAIT: Duration = Duration::from_secs(3);
+/// How much output a connection may have waiting for its writer before the
+/// hub decides it has stopped reading and closes it. The same bound the
+/// remote client and the service keep per request: far more than any answer,
+/// so only a client that is not reading reaches it, never a burst of small
+/// deltas from a turn that streams quickly.
+const MAX_UNSENT_BYTES: usize = seatline_core::backlog::MAX_UNREAD_BYTES;
+/// The most text one delta event carries, as long text is split for the wire.
+const DELTA_CHUNK: usize = 16 * 1024;
+/// Counted against every waiting event on top of its text, so many tiny
+/// events are bounded too (as `seatline_core::backlog` counts them).
+const EVENT_OVERHEAD: usize = 64;
 
 /// The hub's limits, by name, as telemetry reports a broker's configuration.
 pub fn limits() -> BTreeMap<&'static str, u64> {
@@ -89,6 +100,75 @@ pub enum Command {
 struct Connection {
     grant: Grant,
     output: tokio::sync::mpsc::Sender<Value>,
+    /// Events the output channel had no room for, oldest first, with what
+    /// each costs. The hub never waits for a connection's writer: a turn can
+    /// print many deltas at once (a provider that flushes in chunks, two turns
+    /// streaming together) faster than the writer takes them, which says
+    /// nothing about whether the client is reading. They wait here, in order,
+    /// until the channel has room, and adjacent text of one request is joined,
+    /// so a burst costs few frames. Only a backlog past [`MAX_UNSENT_BYTES`]
+    /// means the client stopped reading.
+    unsent: VecDeque<(Value, usize)>,
+    unsent_bytes: usize,
+}
+
+impl Connection {
+    fn new(grant: Grant, output: tokio::sync::mpsc::Sender<Value>) -> Self {
+        Self {
+            grant,
+            output,
+            unsent: VecDeque::new(),
+            unsent_bytes: 0,
+        }
+    }
+
+    /// Keeps `value` for the writer, after everything already waiting.
+    fn hold(&mut self, value: Value) {
+        let text = |value: &Value| {
+            (value["event"]["type"] == "delta")
+                .then(|| value["event"]["text"].as_str())
+                .flatten()
+                .map(str::len)
+        };
+        if let (Some(added), Some((last, cost))) = (text(&value), self.unsent.back_mut()) {
+            if last["id"] == value["id"]
+                && text(last).is_some_and(|held| held + added <= DELTA_CHUNK)
+            {
+                if let (Some(Value::String(held)), Some(more)) = (
+                    last.pointer_mut("/event/text"),
+                    value["event"]["text"].as_str(),
+                ) {
+                    held.push_str(more);
+                    *cost += added;
+                    self.unsent_bytes += added;
+                    return;
+                }
+            }
+        }
+        let cost = EVENT_OVERHEAD
+            + text(&value).unwrap_or_else(|| serde_json::to_string(&value).map_or(0, |s| s.len()));
+        self.unsent_bytes += cost;
+        self.unsent.push_back((value, cost));
+    }
+
+    /// Hands the writer what it has room for. `Err` when the writer is gone.
+    fn flush(&mut self) -> Result<bool, ()> {
+        let mut moved = false;
+        while let Some((value, cost)) = self.unsent.pop_front() {
+            match self.output.try_send(value) {
+                Ok(()) => {
+                    self.unsent_bytes -= cost;
+                    moved = true;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(value)) => {
+                    self.unsent.push_front((value, cost));
+                    break;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return Err(()),
+            }
+        }
+        Ok(moved)
+    }
 }
 // Providers outlive connections, including compatibility clients that open
 // one connection per exchange. Keep the originating grant alongside them so
@@ -310,11 +390,13 @@ impl Hub {
         })
     }
 
-    /// Whether nothing is queued or running, or still leaving: a turn that
-    /// finished at its provider's result can have a process left to exit.
+    /// Whether nothing is queued, running, still leaving (a turn that
+    /// finished at its provider's result can have a process left to exit) or
+    /// waiting to be handed to a connection's writer.
     fn quiet(&self) -> bool {
         self.queue.is_empty()
             && self.active.is_empty()
+            && !self.unsent()
             && self.ledger_jobs.is_empty()
             && self.cleanup.is_empty()
             && Reaper::shared().waiting() == 0
@@ -334,13 +416,8 @@ impl Hub {
                 if self.connections.len() >= MAX_CONNECTIONS {
                     return;
                 }
-                self.connections.insert(
-                    connection,
-                    Connection {
-                        grant: *grant,
-                        output,
-                    },
-                );
+                self.connections
+                    .insert(connection, Connection::new(*grant, output));
                 if !self.authorized(connection) {
                     self.close(connection);
                     return;
@@ -516,13 +593,48 @@ impl Hub {
     }
 
     fn emit(&mut self, connection: u64, value: Value) {
-        if self
-            .connections
-            .get(&connection)
-            .is_some_and(|entry| entry.output.try_send(value).is_err())
-        {
+        let Some(entry) = self.connections.get_mut(&connection) else {
+            return;
+        };
+        let value = if entry.unsent.is_empty() {
+            match entry.output.try_send(value) {
+                Ok(()) => return,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(value)) => value,
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    self.close(connection);
+                    return;
+                }
+            }
+        } else {
+            value
+        };
+        entry.hold(value);
+        if entry.unsent_bytes > MAX_UNSENT_BYTES {
             self.close(connection);
         }
+    }
+
+    /// Hands every connection's writer what it has room for of the events
+    /// waiting for it. Returns whether any moved.
+    fn flush_unsent(&mut self) -> bool {
+        let mut moved = false;
+        let mut gone = Vec::new();
+        for (connection, entry) in &mut self.connections {
+            match entry.flush() {
+                Ok(some) => moved |= some,
+                Err(()) => gone.push(*connection),
+            }
+        }
+        for connection in gone {
+            self.close(connection);
+        }
+        moved
+    }
+
+    fn unsent(&self) -> bool {
+        self.connections
+            .values()
+            .any(|entry| !entry.unsent.is_empty())
     }
 
     fn event(&mut self, request: &Request, update: Update) {
@@ -744,7 +856,11 @@ impl Hub {
             until = until.min(expires);
         }
         let timer = until.saturating_duration_since(now);
-        if !self.active.is_empty() || !self.cleanup.is_empty() || !self.ledger_jobs.is_empty() {
+        if !self.active.is_empty()
+            || !self.cleanup.is_empty()
+            || !self.ledger_jobs.is_empty()
+            || self.unsent()
+        {
             timer.min(Duration::from_millis(1 + self.quiet_ticks))
         } else {
             timer
@@ -765,7 +881,9 @@ impl Hub {
             }
             self.next_check = Instant::now() + Duration::from_secs(1);
         }
-        let mut progressed = self.poll_ledger();
+        // What waited for room goes first, so events stay in order.
+        let mut progressed = self.flush_unsent();
+        progressed |= self.poll_ledger();
         if Instant::now() >= self.next_prune {
             self.prune_revoked_sessions();
             self.next_prune = Instant::now() + PRUNE_INTERVAL;
@@ -2276,6 +2394,124 @@ mod tests {
             assert!(hub.supervisor.is_empty());
             std::fs::remove_dir_all(&hub.root).unwrap();
         }
+    }
+
+    /// A provider whose turn prints `count` deltas of `text` at once, as a
+    /// CLI that flushes its output in chunks does.
+    struct Streams {
+        count: usize,
+        text: &'static str,
+    }
+    impl Provider for Streams {
+        fn id(&self) -> &str {
+            "codex"
+        }
+        fn capabilities(&self) -> Capabilities {
+            codex::CAPABILITIES
+        }
+        fn timeouts(&self) -> Timeouts {
+            Fixture.timeouts()
+        }
+        fn status(&self) -> Box<dyn Exchange> {
+            Box::new(Scripted::new([Update::Completed]))
+        }
+        fn send(&self, _: Turn) -> Box<dyn Exchange> {
+            Box::new(Scripted::new(
+                std::iter::once(Update::Started)
+                    .chain((0..self.count).map(|_| Update::Delta(self.text.into())))
+                    .chain(std::iter::once(Update::Completed)),
+            ))
+        }
+    }
+
+    fn streamed_turn() -> Value {
+        let mut ephemeral = turn(None);
+        ephemeral["session"] = json!("ephemeral");
+        ephemeral
+    }
+
+    #[test]
+    fn a_burst_of_deltas_waits_for_a_slower_writer_and_the_connection_stays_open() {
+        // Two turns of one app stream together, far more events than the
+        // connection's channel holds, faster than its writer takes them.
+        let (mut hub, mut output) = setup();
+        install_provider(
+            &mut hub,
+            "first",
+            Box::new(Streams {
+                count: 1_000,
+                text: "tok ",
+            }),
+        );
+        request(&mut hub, 1, "a", "send", streamed_turn());
+        request(&mut hub, 1, "b", "send", streamed_turn());
+        let mut events = Vec::new();
+        let until = Instant::now() + Duration::from_secs(5);
+        while events
+            .iter()
+            .filter(|event: &&Value| event["event"]["type"] == "completed")
+            .count()
+            < 2
+        {
+            assert!(Instant::now() < until, "the turns did not finish");
+            hub.tick();
+            // The writer takes a few events between ticks.
+            for _ in 0..8 {
+                match output[0].try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(_) => break,
+                }
+            }
+        }
+        assert!(
+            hub.connections.contains_key(&1),
+            "a burst must not close the connection"
+        );
+        for id in ["a", "b"] {
+            let mine: Vec<_> = events.iter().filter(|e| e["id"] == id).collect();
+            let text: String = mine
+                .iter()
+                .filter(|e| e["event"]["type"] == "delta")
+                .map(|e| e["event"]["text"].as_str().unwrap())
+                .collect();
+            // Every delta, whole and in order, then the ending.
+            assert_eq!(text, "tok ".repeat(1_000));
+            assert_eq!(mine.last().unwrap()["event"]["type"], "completed");
+            // What waited was joined, so the burst took fewer frames.
+            let deltas = mine
+                .iter()
+                .filter(|e| e["event"]["type"] == "delta")
+                .count();
+            assert!(deltas < 1_000, "{deltas} delta events for {id}");
+            assert!(mine.iter().all(|e| {
+                e["event"]["text"]
+                    .as_str()
+                    .is_none_or(|t| t.len() <= DELTA_CHUNK)
+            }));
+        }
+        settle(&mut hub);
+        assert!(!hub.unsent());
+        std::fs::remove_dir_all(&hub.root).unwrap();
+    }
+
+    #[test]
+    fn a_connection_that_stops_reading_is_closed_once_its_output_passes_the_bound() {
+        let (mut hub, _output) = setup();
+        install_provider(
+            &mut hub,
+            "first",
+            Box::new(Streams {
+                count: 1_000,
+                text: Box::leak("x".repeat(8 * 1024).into_boxed_str()),
+            }),
+        );
+        request(&mut hub, 1, "a", "send", streamed_turn());
+        // Nothing reads: 8 MiB of answer cannot all wait.
+        wait_until(&mut hub, |hub| !hub.connections.contains_key(&1));
+        assert!(!hub.unsent());
+        settle(&mut hub);
+        assert!(hub.supervisor.is_empty());
+        std::fs::remove_dir_all(&hub.root).unwrap();
     }
 
     #[test]

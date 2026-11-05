@@ -332,6 +332,11 @@ impl Service {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_link_gives_up_on_its_relay_before_the_broker_gives_up_on_it() {
+        assert!(link_timing().dead_after < crate::wire::CLIENT_STALL);
+    }
+
     fn root() -> PathBuf {
         std::env::temp_dir().join(format!(
             "seatline-links-{}",
