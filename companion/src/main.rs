@@ -576,6 +576,51 @@ async fn connection_loop(
     tokio::select! { result = read => result, result = write => result }
 }
 
+/// How many of the broker's frames the bridge holds for an extension that has
+/// not taken them yet. The broker holds the rest, within its own bounds.
+const BRIDGE_QUEUE: usize = 64;
+
+/// Passes the broker's frames on to the extension's queue, in order, waiting
+/// while it is full. A turn can print many deltas at once, faster than an
+/// extension reads them: that must wait, not end the bridge and with it every
+/// request the extension has running. How much may wait for a slow extension
+/// the broker bounds (the hub's limit on what waits for a connection). Ends
+/// when the broker closes the connection, when the extension is gone, or when
+/// it has taken nothing for `stall`: while the bridge waits it cannot see the
+/// broker give up on it, so it gives up on the same terms
+/// (`wire::CLIENT_STALL`) rather than wait with no end.
+async fn pass_to_extension<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    output: &tokio::sync::mpsc::Sender<Value>,
+    stall: Duration,
+) -> io::Result<()> {
+    loop {
+        let frame = wire::read_frame(reader).await?;
+        tokio::time::timeout(stall, output.send(frame))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the extension stopped reading"))?
+            .map_err(|_| io::Error::other("the extension is gone"))?;
+    }
+}
+
+/// Writes queued frames to the extension, each as its four-byte length and its
+/// JSON, until the queue ends or the extension stops reading.
+fn write_to_extension(mut frames: tokio::sync::mpsc::Receiver<Value>, out: &mut impl Write) {
+    while let Some(value) = frames.blocking_recv() {
+        let Ok(bytes) = serde_json::to_vec(&value) else {
+            break;
+        };
+        if out
+            .write_all(&(bytes.len() as u32).to_le_bytes())
+            .and_then(|()| out.write_all(&bytes))
+            .and_then(|()| out.flush())
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
 async fn bridge(root: PathBuf, grant: Grant) -> io::Result<()> {
     let mut stream = client::connect(&root).await?;
     wire::write_frame(
@@ -608,32 +653,9 @@ async fn bridge(root: PathBuf, grant: Grant) -> io::Result<()> {
             }
         }
     });
-    let (output, events) = std::sync::mpsc::sync_channel::<Value>(64);
-    std::thread::spawn(move || {
-        let mut stdout = io::stdout().lock();
-        for value in events {
-            let Ok(bytes) = serde_json::to_vec(&value) else {
-                break;
-            };
-            if stdout
-                .write_all(&(bytes.len() as u32).to_le_bytes())
-                .and_then(|()| stdout.write_all(&bytes))
-                .and_then(|()| stdout.flush())
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-    let read = async {
-        loop {
-            output
-                .try_send(wire::read_frame(&mut reader).await?)
-                .map_err(|_| io::Error::other("bridge output full"))?;
-        }
-        #[allow(unreachable_code)]
-        Ok::<(), io::Error>(())
-    };
+    let (output, frames) = tokio::sync::mpsc::channel::<Value>(BRIDGE_QUEUE);
+    std::thread::spawn(move || write_to_extension(frames, &mut io::stdout().lock()));
+    let read = pass_to_extension(&mut reader, &output, wire::CLIENT_STALL);
     let write = async {
         while let Some(value) = input.recv().await {
             wire::write_frame(&mut writer, &value).await?;
@@ -641,4 +663,101 @@ async fn bridge(root: PathBuf, grant: Grant) -> io::Result<()> {
         Ok::<(), io::Error>(())
     };
     tokio::select! { result = read => result, result = write => result }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// An extension that takes what it is sent slowly.
+    struct SlowExtension(Arc<Mutex<Vec<u8>>>);
+    impl Write for SlowExtension {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            std::thread::sleep(Duration::from_micros(200));
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn frames_in(bytes: &[u8]) -> Vec<Value> {
+        let mut frames = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            let length = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+            frames.push(serde_json::from_slice(&bytes[at + 4..at + 4 + length]).unwrap());
+            at += 4 + length;
+        }
+        frames
+    }
+
+    #[tokio::test]
+    async fn a_burst_from_the_broker_waits_for_a_slower_extension_instead_of_ending_the_bridge() {
+        // Far more frames than the bridge's queue holds, sent at once.
+        const BURST: usize = 1_000;
+        let (mut broker, mut from_broker) = tokio::io::duplex(64 * 1024);
+        let sender = tokio::spawn(async move {
+            for n in 0..BURST {
+                let frame = json!({"id":"a","event":{"type":"delta","text":format!("{n} ")}});
+                wire::write_frame(&mut broker, &frame).await.unwrap();
+            }
+        });
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut extension = SlowExtension(written.clone());
+        let (output, frames) = tokio::sync::mpsc::channel(BRIDGE_QUEUE);
+        let writer = std::thread::spawn(move || write_to_extension(frames, &mut extension));
+        // The bridge ends only because the broker closed: every frame was passed on.
+        let ended = pass_to_extension(&mut from_broker, &output, wire::CLIENT_STALL)
+            .await
+            .unwrap_err();
+        assert_eq!(ended.kind(), io::ErrorKind::UnexpectedEof, "{ended}");
+        sender.await.unwrap();
+        drop(output);
+        writer.join().unwrap();
+        let delivered = frames_in(&written.lock().unwrap());
+        assert_eq!(delivered.len(), BURST);
+        for (n, frame) in delivered.iter().enumerate() {
+            assert_eq!(frame["event"]["text"], format!("{n} "));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_bridge_ends_once_the_extension_is_gone() {
+        let (mut broker, mut from_broker) = tokio::io::duplex(1024);
+        tokio::spawn(async move {
+            while wire::write_frame(&mut broker, &json!({"id":"a"}))
+                .await
+                .is_ok()
+            {}
+        });
+        let (output, frames) = tokio::sync::mpsc::channel(BRIDGE_QUEUE);
+        drop(frames);
+        let ended = pass_to_extension(&mut from_broker, &output, wire::CLIENT_STALL)
+            .await
+            .unwrap_err();
+        assert!(ended.to_string().contains("is gone"), "{ended}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_bridge_gives_up_on_an_extension_that_takes_nothing_as_the_broker_does() {
+        // The extension keeps its pipes open and reads nothing: the bridge must
+        // not wait for it for ever, any more than the broker waits for the bridge.
+        let (mut broker, mut from_broker) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            while wire::write_frame(&mut broker, &json!({"id":"a"}))
+                .await
+                .is_ok()
+            {}
+        });
+        let (output, _unread) = tokio::sync::mpsc::channel(BRIDGE_QUEUE);
+        let began = tokio::time::Instant::now();
+        let ended = pass_to_extension(&mut from_broker, &output, wire::CLIENT_STALL)
+            .await
+            .unwrap_err();
+        assert_eq!(ended.kind(), io::ErrorKind::TimedOut, "{ended}");
+        assert_eq!(began.elapsed(), wire::CLIENT_STALL);
+    }
 }
