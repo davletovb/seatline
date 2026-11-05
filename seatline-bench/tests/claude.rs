@@ -15,17 +15,21 @@ impl Fixture {
         let dir =
             private_fs::unique_child(Path::new(env!("CARGO_TARGET_TMPDIR")), "claude-bench-test");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::copy(
-            FAKE,
-            dir.join(if cfg!(windows) {
-                "claude.exe"
-            } else {
-                "claude"
-            }),
+        let fixture = Self(dir);
+        // A link, not a copy, as `seatline_fake_provider::harness` installs its
+        // fakes: a copy is open for writing while it is made, and a process that
+        // another test thread starts at that moment keeps it open until it
+        // executes, so running the fake fails with ETXTBSY ("Text file busy").
+        // These tests run the fake directly and need no identity of its own.
+        if std::fs::hard_link(FAKE, fixture.exe()).is_err() {
+            std::fs::copy(FAKE, fixture.exe()).unwrap();
+        }
+        std::fs::write(
+            fixture.0.join("claude-scenario"),
+            format!("print={behavior}\n"),
         )
         .unwrap();
-        std::fs::write(dir.join("claude-scenario"), format!("print={behavior}\n")).unwrap();
-        Self(dir)
+        fixture
     }
     fn exe(&self) -> PathBuf {
         self.0.join(if cfg!(windows) {
