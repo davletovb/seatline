@@ -583,20 +583,23 @@ const BRIDGE_QUEUE: usize = 64;
 /// Passes the broker's frames on to the extension's queue, in order, waiting
 /// while it is full. A turn can print many deltas at once, faster than an
 /// extension reads them: that must wait, not end the bridge and with it every
-/// request the extension has running. How much may wait for a slow extension,
-/// and for how long, the broker bounds (`wire::CLIENT_STALL` and the hub's
-/// limit on what waits for a connection). Ends when the broker closes the
-/// connection, or when the extension is gone.
+/// request the extension has running. How much may wait for a slow extension
+/// the broker bounds (the hub's limit on what waits for a connection). Ends
+/// when the broker closes the connection, when the extension is gone, or when
+/// it has taken nothing for `stall`: while the bridge waits it cannot see the
+/// broker give up on it, so it gives up on the same terms
+/// (`wire::CLIENT_STALL`) rather than wait with no end.
 async fn pass_to_extension<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
     output: &tokio::sync::mpsc::Sender<Value>,
+    stall: Duration,
 ) -> io::Result<()> {
     loop {
         let frame = wire::read_frame(reader).await?;
-        output
-            .send(frame)
+        tokio::time::timeout(stall, output.send(frame))
             .await
-            .map_err(|_| io::Error::other("the extension stopped reading"))?;
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the extension stopped reading"))?
+            .map_err(|_| io::Error::other("the extension is gone"))?;
     }
 }
 
@@ -652,7 +655,7 @@ async fn bridge(root: PathBuf, grant: Grant) -> io::Result<()> {
     });
     let (output, frames) = tokio::sync::mpsc::channel::<Value>(BRIDGE_QUEUE);
     std::thread::spawn(move || write_to_extension(frames, &mut io::stdout().lock()));
-    let read = pass_to_extension(&mut reader, &output);
+    let read = pass_to_extension(&mut reader, &output, wire::CLIENT_STALL);
     let write = async {
         while let Some(value) = input.recv().await {
             wire::write_frame(&mut writer, &value).await?;
@@ -707,7 +710,7 @@ mod tests {
         let (output, frames) = tokio::sync::mpsc::channel(BRIDGE_QUEUE);
         let writer = std::thread::spawn(move || write_to_extension(frames, &mut extension));
         // The bridge ends only because the broker closed: every frame was passed on.
-        let ended = pass_to_extension(&mut from_broker, &output)
+        let ended = pass_to_extension(&mut from_broker, &output, wire::CLIENT_STALL)
             .await
             .unwrap_err();
         assert_eq!(ended.kind(), io::ErrorKind::UnexpectedEof, "{ended}");
@@ -732,9 +735,29 @@ mod tests {
         });
         let (output, frames) = tokio::sync::mpsc::channel(BRIDGE_QUEUE);
         drop(frames);
-        let ended = pass_to_extension(&mut from_broker, &output)
+        let ended = pass_to_extension(&mut from_broker, &output, wire::CLIENT_STALL)
             .await
             .unwrap_err();
-        assert!(ended.to_string().contains("stopped reading"), "{ended}");
+        assert!(ended.to_string().contains("is gone"), "{ended}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_bridge_gives_up_on_an_extension_that_takes_nothing_as_the_broker_does() {
+        // The extension keeps its pipes open and reads nothing: the bridge must
+        // not wait for it for ever, any more than the broker waits for the bridge.
+        let (mut broker, mut from_broker) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            while wire::write_frame(&mut broker, &json!({"id":"a"}))
+                .await
+                .is_ok()
+            {}
+        });
+        let (output, _unread) = tokio::sync::mpsc::channel(BRIDGE_QUEUE);
+        let began = tokio::time::Instant::now();
+        let ended = pass_to_extension(&mut from_broker, &output, wire::CLIENT_STALL)
+            .await
+            .unwrap_err();
+        assert_eq!(ended.kind(), io::ErrorKind::TimedOut, "{ended}");
+        assert_eq!(began.elapsed(), wire::CLIENT_STALL);
     }
 }
