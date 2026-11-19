@@ -1075,22 +1075,18 @@ impl Hub {
             Class::Cleanup => self.policy.max_cleanup_running,
         };
         let same_class = |r: &&Request| Class::of(&r.method) == class;
-        if running.len() >= self.policy.max_running
-            || class_count >= class_limit
-            || running
+        running.len() < self.policy.max_running
+            && class_count < class_limit
+            && running
                 .iter()
                 .filter(|r| same_class(r) && r.app == request.app)
                 .count()
-                >= self.policy.max_app_running
-            || running
+                < self.policy.max_app_running
+            && running
                 .iter()
                 .filter(|r| same_class(r) && r.provider == request.provider)
                 .count()
-                >= self.policy.max_provider_running
-        {
-            return false;
-        }
-        true
+                < self.policy.max_provider_running
     }
 
     fn eligible(&self, index: usize, request: &Request) -> bool {
