@@ -18,6 +18,7 @@
 //! starts with Codex's directory.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -26,7 +27,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::{Cleanup, Exchange, Provider, Scripted, Timeouts, Update};
-use seatline_core::discovery::{CachedSearchPath, SearchPath};
+use seatline_core::discovery::{CachedSearchPath, FileStamp, SearchPath};
 use seatline_core::exchange::SessionLoss;
 use seatline_core::process::{Event, Exit, Process, ProcessSpec};
 use seatline_core::prompt;
@@ -199,11 +200,55 @@ impl Launch {
     }
 }
 
+/// Whether the installed Codex CLI knows `[agents].enabled = false` (`0.145+`).
+///
+/// Codex `0.171+` deprecated `[features].multi_agent` and requires
+/// `agents.enabled=false` so a model whose metadata selects a subagent version
+/// cannot re-enable subagent tools. Older builds (`<= 0.144`) lacked that key
+/// and failed TOML deserialization with the same `expected struct AgentRoleToml
+/// in agents` diagnostic as a malformed user role on a newer Codex. Gating the
+/// flag on `codex --version` avoids stderr parsing altogether; caching is keyed
+/// by executable path and launch-time [`FileStamp`] so an in-place upgrade
+/// never inherits a pre-0.145 answer.
+struct AgentsEnabledSupport {
+    cached: RefCell<Option<(PathBuf, FileStamp, bool)>>,
+}
+
+impl AgentsEnabledSupport {
+    fn new() -> Self {
+        Self {
+            cached: RefCell::new(None),
+        }
+    }
+
+    fn cached(&self, executable: &Path, stamp: Option<&FileStamp>) -> Option<bool> {
+        let stamp = stamp?;
+        self.cached
+            .borrow()
+            .as_ref()
+            .and_then(|(path, cached_stamp, supported)| {
+                (path == executable && cached_stamp == stamp).then_some(*supported)
+            })
+    }
+
+    fn remember(&self, executable: &Path, launch_stamp: FileStamp, supported: bool) {
+        // Re-verify the executable did not change while `--version` ran.
+        if FileStamp::read(executable).ok().flatten().as_ref() == Some(&launch_stamp) {
+            *self.cached.borrow_mut() = Some((executable.to_path_buf(), launch_stamp, supported));
+        }
+    }
+
+    fn forget(&self) {
+        self.cached.borrow_mut().take();
+    }
+}
+
 /// The Codex CLI adapter.
 pub struct Codex {
     search: CachedSearchPath,
     launch: Rc<Launch>,
     limits: Limits,
+    agents_enabled_support: Rc<AgentsEnabledSupport>,
 }
 
 impl Codex {
@@ -225,6 +270,7 @@ impl Codex {
             search: CachedSearchPath::new(search),
             launch: Rc::new(Launch::new(work_dir, std::env::vars_os().collect())),
             limits: LIMITS,
+            agents_enabled_support: Rc::new(AgentsEnabledSupport::new()),
         }
     }
 
@@ -312,6 +358,7 @@ impl Provider for Codex {
 
     fn invalidate_readiness(&self) {
         self.search.invalidate();
+        self.agents_enabled_support.forget();
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -388,6 +435,8 @@ impl Provider for Codex {
             return Box::new(Scripted::failed(error));
         }
 
+        let restrict_tools = request.tools != ToolPolicy::ProviderDefault;
+
         let mut turn = Turn {
             stage: Stage::Done,
             executable,
@@ -396,9 +445,13 @@ impl Provider for Codex {
             resume: request.continuation,
             session_policy: request.session,
             finish_grace: self.limits.finish,
+            probe_limit: self.limits.probe,
             // Page text and search results are attacker-controlled: a turn
             // that isn't left to the user's own configuration runs answer-only.
-            restrict_tools: request.tools != ToolPolicy::ProviderDefault,
+            restrict_tools,
+            agents_enabled_support: Rc::clone(&self.agents_enabled_support),
+            disable_agents: restrict_tools,
+            version_rechecks: 0,
             context_turn: request.tools == ToolPolicy::None,
             native_search: request.tools == ToolPolicy::NativeWebSearch,
             model: request.model,
@@ -429,7 +482,7 @@ impl Provider for Codex {
                 };
             }
             // The sign-in can't be checked; the request itself will tell.
-            Some(Err(_)) | None => turn.start(),
+            Some(Err(_)) | None => turn.prepare_and_start(),
         }
         Box::new(turn)
     }
@@ -595,6 +648,7 @@ fn exec_args(
         workspace,
         seatline_core::turn::SessionPolicy::Persistent,
         restrict_tools,
+        restrict_tools,
         context_turn,
         native_search,
         resume,
@@ -602,10 +656,12 @@ fn exec_args(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn exec_args_for_session(
     workspace: &Path,
     session_policy: seatline_core::turn::SessionPolicy,
     restrict_tools: bool,
+    disable_agents: bool,
     context_turn: bool,
     native_search: bool,
     resume: Option<&str>,
@@ -625,22 +681,33 @@ fn exec_args_for_session(
     }
     if restrict_tools {
         // Page text is attacker-controlled. A context turn is deliberately
-        // answer-only: no local shell/image tools, apps/plugins/hooks,
-        // web search, orchestrator MCP, or subagents. User-configured MCP
-        // servers are refused before this point because they are not all
-        // controlled by those feature gates.
+        // answer-only: no local shell/image/sleep tools, apps/plugins/hooks,
+        // web search, orchestrator MCP, code-mode host, or subagents.
+        // User-configured MCP servers are refused before this point because
+        // they are not all controlled by those feature gates.
         for setting in [
             "features.shell_tool=false",
             "features.view_image=false",
+            "features.image_generation=false",
+            "features.sleep_tool=false",
             "features.apps=false",
             "features.plugins=false",
             "features.hooks=false",
             "features.multi_agent=false",
             "features.multi_agent_v2=false",
             "features.standalone_web_search=false",
+            "features.daemon_auto_start=false",
+            "features.skill_search=false",
+            "features.code_mode_host=false",
             "orchestrator.mcp.enabled=false",
         ] {
             args.extend(["-c".into(), setting.into()]);
+        }
+        if disable_agents {
+            // Codex 0.149+ / 0.171+: `[features].multi_agent` is deprecated and
+            // `[agents].enabled = false` is required so model metadata cannot
+            // re-enable subagents.
+            args.extend(["-c".into(), "agents.enabled=false".into()]);
         }
         if context_turn {
             // Older Codex builds also honor these gates. Keep them for
@@ -761,8 +828,10 @@ fn classify_sign_in(
     let text = String::from_utf8_lossy(output).to_ascii_lowercase();
     Some(
         if text.lines().any(|line| {
-            line.trim().starts_with("logged in using an api key")
-                || line.trim().starts_with("logged in using api key")
+            let line = line.trim();
+            line.starts_with("logged in using an api key")
+                || line.starts_with("logged in using api key")
+                || line.starts_with("api key configured")
         }) {
             seatline_core::turn::SignInClassification::ApiKey
         } else if text
@@ -770,13 +839,19 @@ fn classify_sign_in(
             .any(|line| line.trim().starts_with("logged in using chatgpt"))
         {
             seatline_core::turn::SignInClassification::Subscription
+        } else if text
+            .lines()
+            .any(|line| line.trim().starts_with("logged in using amazon bedrock"))
+        {
+            seatline_core::turn::SignInClassification::Cloud
         } else {
             seatline_core::turn::SignInClassification::Unknown
         },
     )
 }
 
-/// One `conversation.send`: the sign-in probe, then the `codex exec` turn.
+/// One `conversation.send`: optional sign-in probe, optional version check for
+/// restricted turns, then the `codex exec` turn.
 struct Turn {
     stage: Stage,
     executable: PathBuf,
@@ -786,9 +861,15 @@ struct Turn {
     resume: Option<String>,
     session_policy: SessionPolicy,
     finish_grace: Duration,
+    probe_limit: Duration,
     /// Browser context or native search requires all unrelated Codex tool
     /// surfaces to be disabled.
     restrict_tools: bool,
+    agents_enabled_support: Rc<AgentsEnabledSupport>,
+    /// Whether `codex exec` will pass `-c agents.enabled=false`.
+    disable_agents: bool,
+    /// Bounds re-checking `--version` if the executable is replaced mid-probe.
+    version_rechecks: u8,
     /// Whether untrusted browser context is attached to this turn.
     context_turn: bool,
     /// Whether this same Codex turn may use its authenticated web search.
@@ -823,12 +904,59 @@ enum Stage {
         process: Process,
         give_up: Instant,
     },
+    CheckingVersion {
+        process: Process,
+        stamp: Option<FileStamp>,
+        give_up: Instant,
+        output: Vec<u8>,
+    },
     Running(LineStream),
     /// Finished: any process has been dropped, which reaps it.
     Done,
 }
 
 impl Turn {
+    /// Checks cached or live `codex --version` for restricted turns so
+    /// `-c agents.enabled=false` is omitted only on verified pre-`0.145`
+    /// executables, then starts `codex exec`.
+    fn prepare_and_start(&mut self) {
+        self.probe_over();
+        if !self.restrict_tools {
+            self.disable_agents = false;
+            return self.start();
+        }
+        let stamp = FileStamp::read(&self.executable).ok().flatten();
+        if let Some(supported) = self
+            .agents_enabled_support
+            .cached(&self.executable, stamp.as_ref())
+        {
+            self.disable_agents = supported;
+            return self.start();
+        }
+        let Ok(workspace) = self.launch.workspace() else {
+            return self.end(Update::Failed(NO_WORKSPACE));
+        };
+        match Process::spawn(
+            &self
+                .launch
+                .command(&workspace, &self.executable, ["--version"]),
+        ) {
+            Ok(mut process) => {
+                process.close_stdin();
+                self.stage = Stage::CheckingVersion {
+                    process,
+                    stamp,
+                    give_up: after(self.probe_limit),
+                    output: Vec::new(),
+                };
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.end(Update::Failed(NOT_INSTALLED))
+            }
+            Err(_) => self.end(Update::Failed(START_FAILED)),
+        }
+    }
+
     /// Starts `codex exec` and hands it the question.
     fn start(&mut self) {
         self.probe_over();
@@ -839,6 +967,7 @@ impl Turn {
             &workspace,
             self.session_policy,
             self.restrict_tools,
+            self.disable_agents,
             self.context_turn,
             self.native_search,
             self.resume.as_deref(),
@@ -857,8 +986,10 @@ impl Turn {
         }
         if let Some(tier) = self.service_tier {
             // Codex's explicit Standard request is `default`; omission can
-            // inherit Fast from the user's config. Fast also needs its feature
-            // gate enabled, otherwise Codex can silently drop the preference.
+            // inherit Fast or Ultrafast from the user's config. Fast also needs
+            // its feature gate enabled, otherwise Codex can silently drop the
+            // preference; Ultrafast is disabled for both Standard and Fast so
+            // Codex 0.171+'s independent `ultrafast_mode` gate cannot override.
             let (value, fast) = match tier {
                 ServiceTier::Standard => ("default", false),
                 ServiceTier::Fast => ("fast", true),
@@ -870,13 +1001,16 @@ impl Turn {
                     OsString::from(format!("service_tier=\"{value}\"")),
                     OsString::from("-c"),
                     OsString::from(format!("features.fast_mode={fast}")),
+                    OsString::from("-c"),
+                    OsString::from("features.ultrafast_mode=false"),
                 ],
             );
         }
         match Process::spawn(&self.launch.command(&workspace, &self.executable, args)) {
             Ok(mut process) => {
                 // The question goes on stdin: it can exceed the size one
-                // argument may have, and no shell ever sees it.
+                // argument may have, and no shell ever sees it. Drop the buffer
+                // immediately once written.
                 let _ = process.write(std::mem::take(&mut self.prompt).as_bytes());
                 process.close_stdin();
                 self.queue.push_back(Update::Launched);
@@ -1050,7 +1184,7 @@ impl Exchange for Turn {
                 // Checked first, so output that keeps coming can't put it off.
                 Stage::Probing { process, give_up } if Instant::now() >= *give_up => {
                     process.kill();
-                    self.start();
+                    self.prepare_and_start();
                 }
                 Stage::Probing { process, give_up } => {
                     match process.next_event(deadline.min(*give_up)) {
@@ -1058,7 +1192,7 @@ impl Exchange for Turn {
                             Authentication::Unauthenticated => {
                                 self.end(Update::Failed(NOT_SIGNED_IN));
                             }
-                            _ => self.start(),
+                            _ => self.prepare_and_start(),
                         },
                         // The probe's output names the account: never read.
                         Some(Event::Stdout(_) | Event::Stderr(_)) => {}
@@ -1067,6 +1201,62 @@ impl Exchange for Turn {
                         None => return None,
                     }
                 }
+                Stage::CheckingVersion {
+                    process, give_up, ..
+                } if Instant::now() >= *give_up => {
+                    process.kill();
+                    // Fail closed on timeout without caching.
+                    self.disable_agents = true;
+                    self.start();
+                }
+                Stage::CheckingVersion {
+                    process,
+                    stamp,
+                    give_up,
+                    output,
+                } => match process.next_event(deadline.min(*give_up)) {
+                    Some(Event::Exited(exit)) => {
+                        let launch_stamp = stamp.take();
+                        let parsed = exit
+                            .status
+                            .is_some_and(|status| status.success())
+                            .then(|| output::supports_agents_enabled_version(output))
+                            .flatten();
+                        let current_stamp = FileStamp::read(&self.executable).ok().flatten();
+                        if current_stamp != launch_stamp {
+                            // The binary changed while `--version` ran. Never
+                            // attribute the old binary's answer to the new one.
+                            if self.version_rechecks == 0 {
+                                self.version_rechecks += 1;
+                                self.prepare_and_start();
+                            } else {
+                                self.disable_agents = true;
+                                self.start();
+                            }
+                        } else if let Some(supported) = parsed {
+                            if let Some(launch_stamp) = launch_stamp {
+                                self.agents_enabled_support.remember(
+                                    &self.executable,
+                                    launch_stamp,
+                                    supported,
+                                );
+                            }
+                            self.disable_agents = supported;
+                            self.start();
+                        } else {
+                            // Fail closed when `--version` fails or is
+                            // unparseable, without caching the failure.
+                            self.disable_agents = true;
+                            self.start();
+                        }
+                    }
+                    Some(Event::Stdout(bytes)) => {
+                        crate::keep_bounded_output(output, &bytes, STATUS_OUTPUT_BYTES);
+                    }
+                    Some(Event::Stderr(_)) => {}
+                    None if Instant::now() >= *give_up => {}
+                    None => return None,
+                },
                 Stage::Running(stream) => {
                     // A finished turn has a fixed exit budget, even when
                     // stdout keeps arriving after its terminal provider event.
@@ -1130,8 +1320,8 @@ impl Exchange for Turn {
         self.queue.clear();
         match &mut self.stage {
             Stage::Running(stream) => stream.cancel(grace),
-            // The probe is harmless to kill, and nothing has started.
-            Stage::Probing { .. } => self.end(Update::Stopped),
+            // Probes are harmless to kill, and nothing has started.
+            Stage::Probing { .. } | Stage::CheckingVersion { .. } => self.end(Update::Stopped),
             Stage::Done if finished => self.queue.push_back(Update::Stopped),
             Stage::Done => {}
         }
@@ -1179,10 +1369,54 @@ mod tests {
             false,
             false,
             false,
+            false,
             None,
             None,
         );
         assert!(args.iter().any(|arg| arg == "--ephemeral"));
+    }
+
+    #[test]
+    fn agents_enabled_support_caches_per_executable_stamp_until_forgotten() {
+        let executable = std::env::current_exe().unwrap();
+        let stamp = FileStamp::read(&executable).unwrap().unwrap();
+        let support = AgentsEnabledSupport::new();
+        assert_eq!(support.cached(&executable, Some(&stamp)), None);
+        support.remember(&executable, stamp.clone(), false);
+        assert_eq!(support.cached(&executable, Some(&stamp)), Some(false));
+        assert_eq!(
+            support.cached(&executable.with_extension("other"), Some(&stamp)),
+            None
+        );
+        assert_eq!(support.cached(&executable, None), None);
+        support.forget();
+        assert_eq!(support.cached(&executable, Some(&stamp)), None);
+    }
+
+    #[test]
+    fn codex_0_171_sign_in_phrases_classify_without_false_matches() {
+        use seatline_core::turn::SignInClassification;
+        assert_eq!(
+            classify_sign_in(
+                Authentication::Authenticated,
+                b"API key configured - sk-proj***1234\n"
+            ),
+            Some(SignInClassification::ApiKey)
+        );
+        assert_eq!(
+            classify_sign_in(
+                Authentication::Authenticated,
+                b"Logged in using Amazon Bedrock AWS access keys\n"
+            ),
+            Some(SignInClassification::Cloud)
+        );
+        assert_eq!(
+            classify_sign_in(
+                Authentication::Authenticated,
+                b"Logged in using workload identity\n"
+            ),
+            Some(SignInClassification::Unknown)
+        );
     }
 
     #[test]

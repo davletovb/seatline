@@ -263,13 +263,19 @@ fn native_search_uses_codex_subscription_search_and_emits_sources() {
     for setting in [
         "features.shell_tool=false",
         "features.view_image=false",
+        "features.image_generation=false",
+        "features.sleep_tool=false",
         "features.apps=false",
         "features.plugins=false",
         "features.hooks=false",
         "features.multi_agent=false",
         "features.multi_agent_v2=false",
         "features.standalone_web_search=false",
+        "features.daemon_auto_start=false",
+        "features.skill_search=false",
+        "features.code_mode_host=false",
         "orchestrator.mcp.enabled=false",
+        "agents.enabled=false",
     ] {
         assert!(
             invocation.contains(&format!("-c {setting}")),
@@ -786,6 +792,7 @@ fn processing_tier_overrides_config_without_changing_model_effort_or_later_turns
         for setting in [
             format!("service_tier=\"{value}\""),
             format!("features.fast_mode={gate}"),
+            "features.ultrafast_mode=false".to_owned(),
             "model_reasoning_effort=\"xhigh\"".to_owned(),
         ] {
             assert_eq!(invocation.matches(&setting).count(), 1, "{invocation}");
@@ -809,6 +816,10 @@ fn processing_tier_overrides_config_without_changing_model_effort_or_later_turns
     let invocation = codex.invocations().last().unwrap().clone();
     assert!(!invocation.contains("service_tier"), "{invocation}");
     assert!(!invocation.contains("features.fast_mode"), "{invocation}");
+    assert!(
+        !invocation.contains("features.ultrafast_mode"),
+        "{invocation}"
+    );
     assert!(
         !invocation.contains("model_reasoning_effort"),
         "{invocation}"
@@ -1143,20 +1154,25 @@ fn a_tool_free_turn_keeps_its_text_off_the_command_line_and_defends_in_depth() {
     for setting in [
         "features.shell_tool=false",
         "features.view_image=false",
+        "features.image_generation=false",
+        "features.sleep_tool=false",
         "features.apps=false",
         "features.plugins=false",
         "features.hooks=false",
         "features.multi_agent=false",
         "features.multi_agent_v2=false",
         "features.standalone_web_search=false",
+        "features.daemon_auto_start=false",
+        "features.skill_search=false",
+        "features.code_mode_host=false",
         "features.web_search_request=false",
         "features.web_search_cached=false",
         "web_search=\"disabled\"",
         "orchestrator.mcp.enabled=false",
+        "agents.enabled=false",
     ] {
         assert!(command.contains(&format!("-c {setting}")), "{command}");
     }
-    assert!(!command.contains("agents.enabled"), "{command}");
     assert!(!command.contains("SECRET"), "{command}");
 
     let status = run_to_end(adapter.status().as_mut());
@@ -1164,6 +1180,271 @@ fn a_tool_free_turn_keeps_its_text_off_the_command_line_and_defends_in_depth() {
         panic!("expected a status, got {status:?}");
     };
     assert_eq!(status.capabilities.tool_isolation, Capability::Supported);
+}
+
+/// Replaces the fake `codex` binary in `codex.dir` with an independent copy
+/// that carries a distinct `FileStamp` on every OS, even while an earlier
+/// process is still executing the previous binary.
+fn replace_codex_executable(codex: &FakeCodex, generation: u64) {
+    let name = FakeCodex::file_name();
+    let executable = codex.dir.join(name);
+    let staged = codex.dir.join(format!("{name}.staged-{generation}"));
+    std::fs::copy(FIXTURES.provider(), &staged).unwrap();
+    let mtime = std::time::SystemTime::now()
+        .checked_sub(Duration::from_secs(60 * (generation + 1)))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&staged)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    if executable.exists() {
+        let backup = codex.dir.join(format!("{name}.old-{generation}"));
+        std::fs::rename(&executable, &backup).unwrap();
+    }
+    std::fs::rename(&staged, &executable).unwrap();
+}
+
+fn version_checks(codex: &FakeCodex) -> usize {
+    codex
+        .invocations()
+        .iter()
+        .filter(|line| line.starts_with("--version\t"))
+        .count()
+}
+
+#[test]
+fn a_codex_from_before_0_145_omits_agents_enabled_from_version_check_and_caches_it() {
+    let codex = FakeCodex::install(FIXTURES, "reject-agents-enabled-0135", "signed-in");
+    replace_codex_executable(&codex, 1);
+    codex.set_version("reject-agents-enabled-0135", "signed-in", "0.135.0");
+
+    let adapter = context_adapter(&codex);
+    let tool_free = |text: &str| Turn {
+        tools: ToolPolicy::None,
+        check_sign_in: false,
+        ..ask(text)
+    };
+
+    // First restricted turn checks `--version` once, sees pre-0.145, and runs
+    // `codex exec` directly without `-c agents.enabled=false` (zero failed
+    // exec launches), keeping the legacy multi_agent feature gates.
+    let first = run_to_end(adapter.send(tool_free("first")).as_mut());
+    assert_eq!(first.last(), Some(&Update::Completed), "{first:?}");
+    assert_eq!(answer_text(&first), "You asked: first");
+    assert_eq!(
+        first
+            .iter()
+            .filter(|update| **update == Update::Launched)
+            .count(),
+        1,
+        "{first:?}"
+    );
+    assert_eq!(version_checks(&codex), 1);
+    let runs = execs(&codex);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(!runs[0].contains("agents.enabled"), "{runs:?}");
+    assert!(
+        runs[0].contains("-c features.multi_agent=false"),
+        "{runs:?}"
+    );
+    assert!(
+        runs[0].contains("-c features.multi_agent_v2=false"),
+        "{runs:?}"
+    );
+
+    // Second turn reuses the cached version decision for this FileStamp.
+    let second = run_to_end(adapter.send(tool_free("second")).as_mut());
+    assert_eq!(second.last(), Some(&Update::Completed), "{second:?}");
+    assert_eq!(answer_text(&second), "You asked: second");
+    assert_eq!(version_checks(&codex), 1);
+    let runs = execs(&codex);
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert!(!runs[1].contains("agents.enabled"), "{runs:?}");
+
+    // Invalidating readiness forgets the cached version decision.
+    adapter.invalidate_readiness();
+    let third = run_to_end(adapter.send(tool_free("third")).as_mut());
+    assert_eq!(third.last(), Some(&Update::Completed), "{third:?}");
+    assert_eq!(version_checks(&codex), 2);
+    let runs = execs(&codex);
+    assert_eq!(runs.len(), 3, "{runs:?}");
+    assert!(!runs[2].contains("agents.enabled"), "{runs:?}");
+
+    // Upgrading the binary invalidates the FileStamp entry and re-enables
+    // `-c agents.enabled=false`.
+    codex.set_version("answers", "signed-in", "0.171.0");
+    replace_codex_executable(&codex, 2);
+    let fourth = run_to_end(adapter.send(tool_free("fourth")).as_mut());
+    assert_eq!(fourth.last(), Some(&Update::Completed), "{fourth:?}");
+    assert_eq!(version_checks(&codex), 3);
+    let runs = execs(&codex);
+    assert_eq!(runs.len(), 4, "{runs:?}");
+    assert!(runs[3].contains("-c agents.enabled=false"), "{runs:?}");
+
+    // ProviderDefault turns never run `--version` and never pass `agents.enabled`.
+    adapter.invalidate_readiness();
+    let default_turn = run_to_end(
+        adapter
+            .send(Turn {
+                tools: ToolPolicy::ProviderDefault,
+                check_sign_in: false,
+                ..ask("default")
+            })
+            .as_mut(),
+    );
+    assert_eq!(
+        default_turn.last(),
+        Some(&Update::Completed),
+        "{default_turn:?}"
+    );
+    assert_eq!(version_checks(&codex), 3);
+    assert!(!execs(&codex)[4].contains("agents.enabled"));
+}
+
+#[test]
+fn a_modern_codex_with_a_malformed_user_agent_role_never_drops_agents_enabled() {
+    let codex = FakeCodex::install(FIXTURES, "malformed-user-agent-role", "signed-in");
+    replace_codex_executable(&codex, 1);
+    codex.set_version("malformed-user-agent-role", "signed-in", "0.171.0");
+
+    let adapter = context_adapter(&codex);
+    let tool_free = |text: &str| Turn {
+        tools: ToolPolicy::None,
+        check_sign_in: false,
+        ..ask(text)
+    };
+
+    // On a modern Codex (>= 0.145), a malformed user `[agents]` role fails
+    // with the exact same `expected struct AgentRoleToml in agents` diagnostic;
+    // the adapter must fail normally and never retry without `agents.enabled=false`.
+    let failed = run_to_end(adapter.send(tool_free("broken")).as_mut());
+    assert_eq!(
+        failure(&failed),
+        (ErrorCode::ProviderFailed, "PROCESS_EXITED")
+    );
+    let runs = execs(&codex);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(runs[0].contains("-c agents.enabled=false"), "{runs:?}");
+
+    // Once the user fixes config.toml, the next restricted turn still passes
+    // `-c agents.enabled=false` (and reuses the cached version result).
+    codex.set_version("answers", "signed-in", "0.171.0");
+    let recovered = run_to_end(adapter.send(tool_free("fixed")).as_mut());
+    assert_eq!(recovered.last(), Some(&Update::Completed), "{recovered:?}");
+    assert_eq!(version_checks(&codex), 1);
+    let runs = execs(&codex);
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert!(runs[1].contains("-c agents.enabled=false"), "{runs:?}");
+}
+
+#[test]
+fn a_mid_probe_codex_upgrade_never_caches_the_old_version_for_the_new_binary() {
+    let codex = FakeCodex::install(FIXTURES, "reject-agents-enabled-0135", "signed-in");
+    replace_codex_executable(&codex, 1);
+    codex.set_version("reject-agents-enabled-0135", "signed-in", "slow-0.135.0");
+
+    let adapter = context_adapter(&codex);
+    let tool_free = |text: &str| Turn {
+        tools: ToolPolicy::None,
+        check_sign_in: false,
+        ..ask(text)
+    };
+
+    let mut exchange = adapter.send(tool_free("upgrade"));
+    let give_up = Instant::now() + Duration::from_secs(5);
+    while version_checks(&codex) == 0 {
+        assert!(
+            Instant::now() < give_up,
+            "fake codex --version never started"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // Upgrade the binary while the pre-0.145 `--version` probe is still running.
+    codex.set_version("answers", "signed-in", "0.171.0");
+    replace_codex_executable(&codex, 2);
+
+    let first = run_to_end(exchange.as_mut());
+    assert_eq!(first.last(), Some(&Update::Completed), "{first:?}");
+    assert_eq!(answer_text(&first), "You asked: upgrade");
+    // The adapter discarded the stale 0.135.0 result, re-probed the new binary,
+    // and launched `exec` with `-c agents.enabled=false`.
+    assert_eq!(version_checks(&codex), 2);
+    let runs = execs(&codex);
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(runs[0].contains("-c agents.enabled=false"), "{runs:?}");
+
+    // The new binary's `true` result was cached; a follow-up needs no probe.
+    let second = run_to_end(adapter.send(tool_free("after")).as_mut());
+    assert_eq!(second.last(), Some(&Update::Completed), "{second:?}");
+    assert_eq!(version_checks(&codex), 2);
+    let runs = execs(&codex);
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert!(runs[1].contains("-c agents.enabled=false"), "{runs:?}");
+}
+
+#[test]
+fn failed_unparseable_or_timed_out_codex_version_fails_closed_without_caching() {
+    let short_probe = Limits {
+        probe: Duration::from_millis(150),
+        ..TEST_LIMITS
+    };
+    for (behavior, limits) in [
+        ("fails", TEST_LIMITS),
+        ("garbled", TEST_LIMITS),
+        ("hangs", short_probe),
+    ] {
+        let codex = FakeCodex::install(FIXTURES, "answers", "signed-in");
+        replace_codex_executable(&codex, 1);
+        codex.set_version("answers", "signed-in", behavior);
+
+        let home = codex.dir.join("context-codex-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let adapter = codex.adapter_with(limits).with_environment([
+            (OsString::from("CODEX_HOME"), home.into_os_string()),
+            (
+                OsString::from("PATH"),
+                std::env::var_os("PATH").unwrap_or_default(),
+            ),
+        ]);
+        let tool_free = |text: &str| Turn {
+            tools: ToolPolicy::None,
+            check_sign_in: false,
+            ..ask(text)
+        };
+
+        // Unknown `--version` result fails closed (passes `agents.enabled=false`).
+        let first = run_to_end(adapter.send(tool_free("first")).as_mut());
+        assert_eq!(
+            first.last(),
+            Some(&Update::Completed),
+            "{behavior}: {first:?}"
+        );
+        assert_eq!(version_checks(&codex), 1, "{behavior}");
+        assert!(
+            execs(&codex)[0].contains("-c agents.enabled=false"),
+            "{behavior}: {:?}",
+            execs(&codex)
+        );
+
+        // Because the inconclusive probe was not cached, a subsequent turn
+        // re-probes the same executable.
+        codex.set_version("reject-agents-enabled-0135", "signed-in", "0.135.0");
+        let second = run_to_end(adapter.send(tool_free("second")).as_mut());
+        assert_eq!(
+            second.last(),
+            Some(&Update::Completed),
+            "{behavior}: {second:?}"
+        );
+        assert_eq!(version_checks(&codex), 2, "{behavior}");
+        assert!(
+            !execs(&codex)[1].contains("agents.enabled"),
+            "{behavior}: {:?}",
+            execs(&codex)
+        );
+    }
 }
 
 #[test]

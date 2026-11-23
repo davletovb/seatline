@@ -208,6 +208,37 @@ impl Launch {
             )
             .current_dir(workspace)
     }
+
+    /// `claude -p` for a turn: adds defense-in-depth environment switches
+    /// against agentic surfaces added to Claude Code 2.1.x headless mode
+    /// (fork subagents enabled by default in 2.1.302, deferred-tool execution
+    /// on `--resume` in 2.1.328, pre-approval shell startup in 2.1.327,
+    /// WebFetch, Advisor tool, MCP tasks, and prompt-triggered ultrathink on
+    /// non-provider-default turns). Older Claude builds ignore unknown env vars.
+    fn turn_command<I>(
+        &self,
+        workspace: &Path,
+        executable: &Path,
+        args: I,
+        disable_ultrathink: bool,
+    ) -> ProcessSpec
+    where
+        I: IntoIterator,
+        I::Item: Into<OsString>,
+    {
+        let mut spec = self
+            .command(workspace, executable, args)
+            .env("CLAUDE_CODE_DISABLE_DEFERRED_TOOL_RESUME", "1")
+            .env("CLAUDE_CODE_FORK_SUBAGENT", "0")
+            .env("CLAUDE_CODE_DISABLE_WEB_FETCH", "1")
+            .env("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")
+            .env("CLAUDE_CODE_DISABLE_MCP_TASKS", "1")
+            .env("CLAUDE_CODE_DISABLE_SHELL_HEAD_START", "1");
+        if disable_ultrathink {
+            spec = spec.env("CLAUDE_CODE_DISABLE_ULTRATHINK", "1");
+        }
+        spec
+    }
 }
 
 /// Whether turns are started without the user's own customizations, and what
@@ -254,9 +285,84 @@ impl Isolation {
             })
     }
 
-    fn remember_unsupported(&self, executable: &Path) {
-        if let Ok(Some(stamp)) = FileStamp::read(executable) {
-            *self.unsupported.borrow_mut() = Some((executable.to_path_buf(), stamp));
+    fn remember_unsupported(&self, executable: &Path, launch_stamp: Option<FileStamp>) {
+        if let Some(stamp) = launch_stamp {
+            if FileStamp::read(executable).ok().flatten().as_ref() == Some(&stamp) {
+                *self.unsupported.borrow_mut() = Some((executable.to_path_buf(), stamp));
+            }
+        }
+    }
+
+    fn forget(&self) {
+        self.unsupported.borrow_mut().take();
+    }
+}
+
+/// Which optional hardening flags (`--disable-slash-commands` from 2.0.60,
+/// `--no-chrome` from 2.0.72) an installed Claude executable does not know,
+/// keyed by its path and [`FileStamp`]. Only applied to turns that restrict
+/// tools ([`ToolPolicy::None`] / [`ToolPolicy::NativeWebSearch`]);
+/// [`ToolPolicy::ProviderDefault`] keeps user skills, commands, and Chrome.
+struct HardeningFlags {
+    unsupported: RefCell<Option<UnsupportedHardening>>,
+}
+
+struct UnsupportedHardening {
+    path: PathBuf,
+    stamp: FileStamp,
+    no_disable_slash_commands: bool,
+    no_chrome_unsupported: bool,
+}
+
+impl HardeningFlags {
+    fn new() -> Self {
+        Self {
+            unsupported: RefCell::new(None),
+        }
+    }
+
+    /// Returns `(disable_slash_commands, no_chrome)` to pass for a turn.
+    fn for_turn(&self, executable: &Path, restrict_tools: bool) -> (bool, bool) {
+        if !restrict_tools {
+            return (false, false);
+        }
+        let current = FileStamp::read(executable).ok().flatten();
+        match self.unsupported.borrow().as_ref() {
+            Some(entry) if entry.path == executable && current.as_ref() == Some(&entry.stamp) => (
+                !entry.no_disable_slash_commands,
+                !entry.no_chrome_unsupported,
+            ),
+            _ => (true, true),
+        }
+    }
+
+    fn remember_unsupported(
+        &self,
+        executable: &Path,
+        launch_stamp: Option<FileStamp>,
+        no_disable_slash_commands: bool,
+        no_chrome_unsupported: bool,
+    ) {
+        let Some(stamp) = launch_stamp else {
+            return;
+        };
+        if FileStamp::read(executable).ok().flatten().as_ref() != Some(&stamp) {
+            return;
+        }
+        let mut slot = self.unsupported.borrow_mut();
+        match slot.as_mut() {
+            Some(entry) if entry.path == executable && entry.stamp == stamp => {
+                entry.no_disable_slash_commands |= no_disable_slash_commands;
+                entry.no_chrome_unsupported |= no_chrome_unsupported;
+            }
+            _ => {
+                *slot = Some(UnsupportedHardening {
+                    path: executable.to_path_buf(),
+                    stamp,
+                    no_disable_slash_commands,
+                    no_chrome_unsupported,
+                });
+            }
         }
     }
 
@@ -271,6 +377,7 @@ pub struct Claude {
     limits: Limits,
     account_file: readiness::AccountFile,
     isolation: Rc<Isolation>,
+    hardening: Rc<HardeningFlags>,
     /// Waits for the processes of finished turns that keep no session: the
     /// process-wide one, unless a test asks for its own.
     reaper: Reaper,
@@ -292,6 +399,7 @@ impl Claude {
             limits: LIMITS,
             account_file: readiness::AccountFile::default(),
             isolation: Rc::new(Isolation::new(false)),
+            hardening: Rc::new(HardeningFlags::new()),
             reaper: Reaper::shared(),
         }
     }
@@ -389,6 +497,7 @@ impl Provider for Claude {
         self.search.invalidate();
         self.account_file.invalidate();
         self.isolation.forget();
+        self.hardening.forget();
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -449,7 +558,10 @@ impl Provider for Claude {
         if request.validate().is_err() {
             return Box::new(Scripted::failed(crate::INVALID_TURN));
         }
+        let restrict_tools = request.tools != ToolPolicy::ProviderDefault;
         let isolate = self.isolation.applies(&executable, request.tools);
+        let (disable_slash_commands, no_chrome) =
+            self.hardening.for_turn(&executable, restrict_tools);
 
         let mut turn = Turn {
             stage: Stage::Done,
@@ -465,7 +577,13 @@ impl Provider for Claude {
             model: request.model,
             reasoning_effort: request.reasoning_effort,
             isolation: Rc::clone(&self.isolation),
+            hardening: Rc::clone(&self.hardening),
             isolate,
+            disable_slash_commands,
+            no_chrome,
+            launch_stamp: None,
+            upgrade_retried: false,
+            disable_ultrathink: restrict_tools,
             native_search: request.tools == ToolPolicy::NativeWebSearch,
             queue: VecDeque::new(),
             sources: SourceCollector::new(ID),
@@ -716,6 +834,10 @@ fn classify_sign_in(output: &[u8]) -> seatline_core::turn::SignInClassification 
         .as_ref()
         .and_then(|value| value["authMethod"].as_str())
     {
+        // Only `claude.ai` proves a subscription sign-in. Claude Code emits
+        // `oauth_token` for any bearer-token source including
+        // `ANTHROPIC_AUTH_TOKEN`, token files, and profiles (which may bill
+        // per token via a gateway), so `oauth_token` must stay `Unknown`.
         Some("claude.ai") => SignInClassification::Subscription,
         Some("api_key" | "api_key_helper") => SignInClassification::ApiKey,
         Some("third_party") => SignInClassification::Cloud,
@@ -735,9 +857,12 @@ fn claude_args(resume: Option<&str>, model: Option<&str>, native_search: bool) -
         seatline_core::turn::SessionPolicy::Persistent,
         None,
         false,
+        false,
+        false,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn claude_args_for_session(
     resume: Option<&str>,
     model: Option<&str>,
@@ -745,6 +870,8 @@ fn claude_args_for_session(
     session_policy: seatline_core::turn::SessionPolicy,
     effort: Option<ReasoningEffort>,
     isolate: bool,
+    disable_slash_commands: bool,
+    no_chrome: bool,
 ) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "-p",
@@ -788,6 +915,16 @@ fn claude_args_for_session(
         // option of its own. `send` has already refused a level Claude lacks.
         args.push(format!("--effort={level}").into());
     }
+    // Placed after `--safe-mode` and `--effort` so older Claude builds that
+    // report only the first unknown option still trigger those fallbacks/errors
+    // first, and only passed on tool-restricted turns so `ProviderDefault`
+    // keeps user skills, slash commands, and Chrome configuration.
+    if disable_slash_commands {
+        args.push("--disable-slash-commands".into());
+    }
+    if no_chrome {
+        args.push("--no-chrome".into());
+    }
     if let Some(session) = resume {
         args.extend([OsString::from("--resume"), OsString::from(session)]);
     }
@@ -813,10 +950,21 @@ struct Turn {
     /// The effort to answer with, or `None` for Claude's own default.
     reasoning_effort: Option<ReasoningEffort>,
     isolation: Rc<Isolation>,
+    hardening: Rc<HardeningFlags>,
     /// Whether the run in progress was started with `--safe-mode`. The question
-    /// is kept until Claude starts, so that a Claude that does not know the
-    /// option can be asked again without it.
+    /// is kept until Claude starts, so that a Claude that does not know an
+    /// optional flag can be asked again without it.
     isolate: bool,
+    disable_slash_commands: bool,
+    no_chrome: bool,
+    /// Identity of `executable` captured before spawning the current child, so
+    /// an in-place upgrade while the old binary exits never caches a rejection
+    /// against the new binary.
+    launch_stamp: Option<FileStamp>,
+    /// Bounds mid-run upgrade retries so a continuously changing executable
+    /// cannot loop.
+    upgrade_retried: bool,
+    disable_ultrathink: bool,
     native_search: bool,
     queue: VecDeque<Update>,
     sources: SourceCollector,
@@ -851,6 +999,10 @@ enum Stage {
 }
 
 impl Turn {
+    fn may_retry_optional_flag(&self) -> bool {
+        self.isolate || self.disable_slash_commands || self.no_chrome
+    }
+
     /// Starts `claude -p` and hands it the question. `relaunch` says an earlier
     /// run of this turn was rejected before it began, so the application has
     /// already heard that a process was launched.
@@ -859,6 +1011,7 @@ impl Turn {
         let Ok(workspace) = self.launch.workspace() else {
             return self.end(Update::Failed(NO_WORKSPACE));
         };
+        self.launch_stamp = FileStamp::read(&self.executable).ok().flatten();
         let args = claude_args_for_session(
             self.resume.as_deref(),
             self.model.as_deref(),
@@ -866,6 +1019,8 @@ impl Turn {
             self.session_policy,
             self.reasoning_effort,
             self.isolate,
+            self.disable_slash_commands,
+            self.no_chrome,
         );
         let input = serde_json::json!({
             "type": "user",
@@ -876,12 +1031,17 @@ impl Turn {
         })
         .to_string()
             + "\n";
-        match Process::spawn(&self.launch.command(&workspace, &self.executable, args)) {
+        match Process::spawn(&self.launch.turn_command(
+            &workspace,
+            &self.executable,
+            args,
+            self.disable_ultrathink,
+        )) {
             Ok(mut process) => {
                 let _ = process.write(input.as_bytes());
                 process.close_stdin();
-                if !self.isolate {
-                    self.prompt.clear();
+                if !self.may_retry_optional_flag() {
+                    self.prompt = String::new();
                 }
                 if !relaunch {
                     self.queue.push_back(Update::Launched);
@@ -1199,11 +1359,57 @@ impl Exchange for Turn {
                                 && self.isolate
                                 && !self.cancelled
                                 && output::names_unknown_option(&stderr, "--safe-mode");
-                            if safe_mode_unknown {
-                                // Nothing ran. Ask again without the option, once,
-                                // and do not offer it to this executable again.
-                                self.isolation.remember_unsupported(&self.executable);
-                                self.isolate = false;
+                            let slash_commands_unknown = !self.started
+                                && self.disable_slash_commands
+                                && !self.cancelled
+                                && output::names_unknown_option(
+                                    &stderr,
+                                    "--disable-slash-commands",
+                                );
+                            let no_chrome_unknown = !self.started
+                                && self.no_chrome
+                                && !self.cancelled
+                                && output::names_unknown_option(&stderr, "--no-chrome");
+                            if safe_mode_unknown || slash_commands_unknown || no_chrome_unknown {
+                                let launch_stamp = self.launch_stamp.take();
+                                let current_stamp =
+                                    FileStamp::read(&self.executable).ok().flatten();
+                                if current_stamp != launch_stamp && !self.upgrade_retried {
+                                    // The executable was replaced while the old
+                                    // child exited: never attribute the old
+                                    // rejection to the new binary. Retry once
+                                    // against the new binary with full flags.
+                                    self.upgrade_retried = true;
+                                    self.start(true);
+                                    continue;
+                                }
+                                if safe_mode_unknown {
+                                    // Nothing ran. Ask again without the option, once,
+                                    // and do not offer it to this executable again.
+                                    self.isolation
+                                        .remember_unsupported(&self.executable, launch_stamp);
+                                    self.isolate = false;
+                                } else if slash_commands_unknown {
+                                    // Pre-2.0.60 lacks both `--disable-slash-commands`
+                                    // and `--no-chrome` (2.0.72); drop both at once so
+                                    // older builds retry only once.
+                                    self.hardening.remember_unsupported(
+                                        &self.executable,
+                                        launch_stamp,
+                                        true,
+                                        true,
+                                    );
+                                    self.disable_slash_commands = false;
+                                    self.no_chrome = false;
+                                } else if no_chrome_unknown {
+                                    self.hardening.remember_unsupported(
+                                        &self.executable,
+                                        launch_stamp,
+                                        false,
+                                        true,
+                                    );
+                                    self.no_chrome = false;
+                                }
                                 self.start(true);
                                 continue;
                             }
@@ -1270,6 +1476,8 @@ mod tests {
             SessionPolicy::Persistent,
             Some(ReasoningEffort::Xhigh),
             false,
+            false,
+            false,
         );
         let args: Vec<&str> = args.iter().map(|arg| arg.to_str().unwrap()).collect();
         let model = args
@@ -1311,6 +1519,8 @@ mod tests {
             SessionPolicy::Ephemeral,
             Some(ReasoningEffort::None),
             false,
+            false,
+            false,
         );
         assert!(
             !args
@@ -1329,6 +1539,8 @@ mod tests {
             seatline_core::turn::SessionPolicy::Ephemeral,
             None,
             false,
+            false,
+            false,
         );
         assert!(args.iter().any(|arg| arg == "--no-session-persistence"));
     }
@@ -1343,6 +1555,8 @@ mod tests {
                 SessionPolicy::Ephemeral,
                 Some(ReasoningEffort::Low),
                 isolate,
+                false,
+                false,
             )
             .iter()
             .any(|arg| arg == "--safe-mode")
@@ -1350,9 +1564,24 @@ mod tests {
         assert!(flag(true));
         assert!(!flag(false));
         // Still the safe stream-json arguments, with or without it.
-        let args = claude_args_for_session(None, None, true, SessionPolicy::Persistent, None, true);
+        let args = claude_args_for_session(
+            None,
+            None,
+            true,
+            SessionPolicy::Persistent,
+            None,
+            true,
+            true,
+            true,
+        );
         let args: Vec<&str> = args.iter().map(|arg| arg.to_str().unwrap()).collect();
-        for expected in ["--strict-mcp-config", "--safe-mode", "WebSearch"] {
+        for expected in [
+            "--strict-mcp-config",
+            "--safe-mode",
+            "--disable-slash-commands",
+            "--no-chrome",
+            "WebSearch",
+        ] {
             assert!(args.contains(&expected), "{expected}: {args:?}");
         }
     }
@@ -1360,6 +1589,7 @@ mod tests {
     #[test]
     fn only_an_enabled_isolation_that_the_executable_knows_applies_to_a_turn_without_tools() {
         let executable = std::env::current_exe().unwrap();
+        let stamp = FileStamp::read(&executable).unwrap();
         let off = Isolation::new(false);
         let on = Isolation::new(true);
         for tools in [ToolPolicy::None, ToolPolicy::NativeWebSearch] {
@@ -1370,7 +1600,7 @@ mod tests {
         assert!(!on.applies(&executable, ToolPolicy::ProviderDefault));
         // An executable that did not know the option is left alone, until it
         // changes or what was learned is forgotten.
-        on.remember_unsupported(&executable);
+        on.remember_unsupported(&executable, stamp);
         assert!(!on.applies(&executable, ToolPolicy::None));
         assert!(on.applies(&executable.with_extension("other"), ToolPolicy::None));
         on.forget();
@@ -1384,5 +1614,62 @@ mod tests {
         for model in MODELS {
             assert!(seatline_core::turn::is_model_id(&model.id), "{}", model.id);
         }
+    }
+
+    #[test]
+    fn hardening_flags_apply_only_to_restricted_turns_and_sit_after_effort() {
+        let executable = std::env::current_exe().unwrap();
+        let stamp = FileStamp::read(&executable).unwrap();
+        let flags = HardeningFlags::new();
+        assert_eq!(flags.for_turn(&executable, false), (false, false));
+        assert_eq!(flags.for_turn(&executable, true), (true, true));
+        flags.remember_unsupported(&executable, stamp.clone(), false, true);
+        assert_eq!(flags.for_turn(&executable, true), (true, false));
+        flags.remember_unsupported(&executable, stamp, true, true);
+        assert_eq!(flags.for_turn(&executable, true), (false, false));
+        flags.forget();
+        assert_eq!(flags.for_turn(&executable, true), (true, true));
+
+        let args = claude_args_for_session(
+            Some("session-1"),
+            Some("sonnet"),
+            false,
+            SessionPolicy::Persistent,
+            Some(ReasoningEffort::Low),
+            true,
+            true,
+            true,
+        );
+        let args: Vec<&str> = args.iter().map(|arg| arg.to_str().unwrap()).collect();
+        let safe_mode = args.iter().position(|arg| *arg == "--safe-mode").unwrap();
+        let effort = args.iter().position(|arg| *arg == "--effort=low").unwrap();
+        let slash = args
+            .iter()
+            .position(|arg| *arg == "--disable-slash-commands")
+            .unwrap();
+        let chrome = args.iter().position(|arg| *arg == "--no-chrome").unwrap();
+        let resume = args.iter().position(|arg| *arg == "--resume").unwrap();
+        assert!(safe_mode < effort && effort < slash && slash < chrome && chrome < resume);
+    }
+
+    #[test]
+    fn oauth_token_sign_in_stays_unknown_because_it_is_not_subscription_specific() {
+        use seatline_core::turn::SignInClassification;
+        assert_eq!(
+            classify_sign_in(br#"{"loggedIn":true,"authMethod":"oauth_token"}"#),
+            SignInClassification::Unknown
+        );
+        assert_eq!(
+            classify_sign_in(br#"{"loggedIn":true,"authMethod":"claude.ai"}"#),
+            SignInClassification::Subscription
+        );
+        assert_eq!(
+            classify_sign_in(br#"{"loggedIn":true,"authMethod":"api_key"}"#),
+            SignInClassification::ApiKey
+        );
+        assert_eq!(
+            classify_sign_in(br#"{"loggedIn":true,"authMethod":"third_party"}"#),
+            SignInClassification::Cloud
+        );
     }
 }

@@ -210,8 +210,23 @@ fn assert_isolated_environment() -> Result<(), ()> {
         ("GROK_DISABLE_API_KEY_AUTH", "1"),
         ("GROK_DISABLE_AUTOUPDATER", "1"),
         ("GROK_SUBAGENTS", "0"),
+        ("GROK_GOAL", "0"),
+        ("GROK_WRITE_FILE", "0"),
+        ("GROK_LSP_TOOLS", "0"),
         ("GROK_MEMORY", "0"),
+        ("GROK_WORKFLOWS", "0"),
         ("GROK_WEB_FETCH", "0"),
+        ("GROK_CRASH_HANDLER", "0"),
+        ("GROK_CLAUDE_SKILLS_ENABLED", "0"),
+        ("GROK_CLAUDE_RULES_ENABLED", "0"),
+        ("GROK_CLAUDE_AGENTS_ENABLED", "0"),
+        ("GROK_CLAUDE_MCPS_ENABLED", "0"),
+        ("GROK_CLAUDE_HOOKS_ENABLED", "0"),
+        ("GROK_CURSOR_SKILLS_ENABLED", "0"),
+        ("GROK_CURSOR_RULES_ENABLED", "0"),
+        ("GROK_CURSOR_AGENTS_ENABLED", "0"),
+        ("GROK_CURSOR_MCPS_ENABLED", "0"),
+        ("GROK_CURSOR_HOOKS_ENABLED", "0"),
     ] {
         if std::env::var_os(name).as_deref() != Some(OsStr::new(wanted)) {
             return Err(());

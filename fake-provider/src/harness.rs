@@ -212,6 +212,16 @@ impl FakeCodex {
         .expect("write the scenario");
     }
 
+    /// Chooses how the fake answers `codex exec`, `codex login status`, and
+    /// `codex --version`.
+    pub fn set_version(&self, exec: &str, login: &str, version: &str) {
+        std::fs::write(
+            self.dir.join("codex-scenario"),
+            format!("exec={exec}\nlogin={login}\nversion={version}\n"),
+        )
+        .expect("write the scenario");
+    }
+
     /// The Codex adapter, pointed at this directory, with short limits.
     pub fn adapter(&self) -> Codex {
         self.adapter_with(TEST_LIMITS)

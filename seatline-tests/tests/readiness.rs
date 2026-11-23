@@ -436,13 +436,16 @@ fn codex_classification_uses_only_known_status_phrases_and_never_exposes_output(
     let _fixture = fixture_lifetime();
     for (scenario, expected) in [
         ("signed-in", SignInClassification::ApiKey),
+        ("api-key-configured", SignInClassification::ApiKey),
         ("subscription", SignInClassification::Subscription),
+        ("bedrock", SignInClassification::Cloud),
+        ("workload-identity", SignInClassification::Unknown),
         ("unknown-account-text", SignInClassification::Unknown),
     ] {
         let fake = FakeCodex::install(FIXTURES, "answers", scenario);
         let mut check = fake.adapter().status();
         let updates = run_to_end(check.as_mut());
-        assert_eq!(state(&updates).sign_in, Some(expected));
+        assert_eq!(state(&updates).sign_in, Some(expected), "{scenario}");
         let encoded = serde_json::to_string(state(&updates)).unwrap();
         for private in [
             "sk-fake",
@@ -453,6 +456,25 @@ fn codex_classification_uses_only_known_status_phrases_and_never_exposes_output(
             assert!(!encoded.contains(private));
         }
     }
+}
+
+#[test]
+fn gemini_antigravity_settings_changes_invalidate_readiness() {
+    let _fixture = fixture_lifetime();
+    let fake = FakeGemini::install(FIXTURES);
+    independent_executable(&fake.dir, if cfg!(windows) { "agy.exe" } else { "agy" });
+    let ready = Ready::new(fake.adapter());
+    let check = || {
+        let updates = run_to_end(ready.prepare(CACHED).as_mut());
+        assert_eq!(updates.last(), Some(&Update::Completed), "{updates:?}");
+        state(&updates).readiness.unwrap().source
+    };
+    assert_eq!(check(), Source::Fresh);
+    assert_eq!(check(), Source::Cached);
+    let settings = fake.home.join(".gemini/antigravity-cli/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(&settings, r#"{"agentMode":"auto"}"#).unwrap();
+    assert_eq!(check(), Source::Fresh);
 }
 
 #[test]
@@ -496,12 +518,13 @@ fn claude_classification_uses_documented_auth_method_without_account_data() {
     let _fixture = fixture_lifetime();
     for (scenario, expected) in [
         ("subscription", SignInClassification::Subscription),
+        ("oauth-token", SignInClassification::Unknown),
         ("api-key", SignInClassification::ApiKey),
         ("signed-in", SignInClassification::Unknown),
     ] {
         let fake = FakeClaude::install(FIXTURES, "answers", scenario);
         let updates = run_to_end(fake.adapter().status().as_mut());
-        assert_eq!(state(&updates).sign_in, Some(expected));
+        assert_eq!(state(&updates).sign_in, Some(expected), "{scenario}");
         assert!(
             !serde_json::to_string(state(&updates))
                 .unwrap()

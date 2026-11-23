@@ -89,6 +89,13 @@ fn auth_status(behavior: &str) -> ExitCode {
             );
             ExitCode::SUCCESS
         }
+        "oauth-token" => {
+            let _ = writeln!(
+                io::stdout(),
+                r#"{{"loggedIn":true,"authMethod":"oauth_token","email":"{SECRET}"}}"#
+            );
+            ExitCode::SUCCESS
+        }
         "api-key" => {
             let _ = writeln!(
                 io::stdout(),
@@ -160,7 +167,14 @@ fn print_mode(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCod
     let unknown: &[&str] = match behavior {
         "no-effort-option" => &["--effort"],
         "no-safe-mode-option" | "slow-no-safe-mode-option" => &["--safe-mode"],
-        "no-newer-options" => &["--safe-mode", "--effort"],
+        "no-chrome-option" | "slow-no-chrome-option" => &["--no-chrome"],
+        "no-slash-commands-option" => &["--disable-slash-commands", "--no-chrome"],
+        "no-newer-options" => &[
+            "--safe-mode",
+            "--effort",
+            "--disable-slash-commands",
+            "--no-chrome",
+        ],
         _ => &[],
     };
     if let Some(option) = args

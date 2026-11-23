@@ -143,8 +143,8 @@ fn run(args: Vec<OsString>) -> Result<(), ()> {
         return Ok(());
     }
 
-    // Real `agy` (1.2.x) starts every turn by echoing the prompt as a
-    // `user_input` step, and can add `system_message` steps.
+    // Real `agy` starts every turn by echoing the prompt as a `user_input`
+    // step, and can add `system_message` and `checkpoint` steps.
     line(
         &mut stdout,
         &serde_json::json!({
@@ -162,6 +162,16 @@ fn run(args: Vec<OsString>) -> Result<(), ()> {
             "step_update":{
                 "conversation_id":session,"step_index":1,"state":"DONE",
                 "step_type":"system_message","text_delta":"Session ready."
+            }
+        }),
+    )?;
+    line(
+        &mut stdout,
+        &serde_json::json!({
+            "event":"step_update",
+            "step_update":{
+                "conversation_id":session,"step_index":2,"state":"DONE",
+                "step_type":"checkpoint","text_delta":"Checkpoint saved."
             }
         }),
     )?;

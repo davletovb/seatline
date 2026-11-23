@@ -19,14 +19,14 @@ Only **available and authenticated** results from a successfully completed check
 
 | Provider | Fresh readiness operation | Authentication/classification | Legacy `send` with `check_sign_in = true` |
 | --- | --- | --- | --- |
-| Codex | `codex login status` | Exit 0 authenticated, 1 unauthenticated, other exit/timeout unknown. A bounded output prefix recognizes the known ChatGPT or API-key status phrases; otherwise classification is unknown. | Fresh inline check; no `Status` update. Unknown/probe failure permits the turn to diagnose its own failure. |
-| Claude | `claude auth status` | Same exit mapping. Bounded JSON `authMethod`: `claude.ai` subscription, `api_key`/`api_key_helper` API key, `third_party` cloud, otherwise unknown. Older CLI output remains supported. | Fresh inline check; no `Status` update. Unknown/probe failure permits the turn to diagnose its own failure. |
+| Codex | `codex login status` | Exit 0 authenticated, 1 unauthenticated, other exit/timeout unknown. A bounded output prefix recognizes the known ChatGPT (`subscription`), API-key (`Logged in using [an] API key`, `API key configured` → `api_key`), and Amazon Bedrock (`cloud`) status phrases; workload identity and other unrecognized output stay `unknown`. | Fresh inline check; no `Status` update. Unknown/probe failure permits the turn to diagnose its own failure. |
+| Claude | `claude auth status` | Same exit mapping. Bounded JSON `authMethod`: `claude.ai` subscription, `api_key`/`api_key_helper` API key, `third_party` cloud; `oauth_token` (which covers `ANTHROPIC_AUTH_TOKEN`, token files, and profiles as well as setup tokens) and other values stay `unknown`. Older CLI output remains supported. | Fresh inline check; no `Status` update. Unknown/probe failure permits the turn to diagnose its own failure. |
 | Gemini (Antigravity) | `agy models` | Successful catalog check authenticated/cloud. Recognized authentication error unauthenticated. Other errors or timeout unavailable/unknown. | No inline check; generation reports authentication failures. |
 | Grok | `grok models` in an isolated probe workspace | Known OAuth login text authenticated/cloud. Known signed-out or disallowed key text unauthenticated. Unrecognized output unknown. Other failures or timeout unavailable/unknown. | No inline check; generation reports authentication failures. |
 
 Missing executables are `not_found/unknown`; an executable that cannot be launched or an invalid workspace is `unavailable/unknown`. Probe output and credential contents are never included in errors, status, or telemetry. The classification is a fixed enum; no email, account name, token or key prefix is exposed.
 
-The exit/auth-mode contract is grounded in the [official Codex CLI reference](https://developers.openai.com/codex/cli/reference/) and [Claude CLI reference](https://code.claude.com/docs/en/cli-reference), checked 2026-10-03. Gemini and Grok retain their existing adapter-specific model-list probes and deterministic fixtures; no stronger undocumented provider guarantee is assumed.
+The exit/auth-mode contract is grounded in the [official Codex CLI reference](https://developers.openai.com/codex/cli/reference/) and [Claude CLI reference](https://code.claude.com/docs/en/cli-reference), checked 2026-10-03 (updated 2026-11-22 for Codex 0.171 and Claude 2.1.330). Gemini and Grok retain their existing adapter-specific model-list probes and deterministic fixtures; no stronger undocumented provider guarantee is assumed.
 
 ## Preparation and sending
 
@@ -68,7 +68,7 @@ Before reuse, the adapter revalidates its workspace and fingerprints the executa
 | --- | --- |
 | Codex | Effective `CODEX_HOME` or home `.codex`: `auth.json`, `config.toml`, additional `*.config.toml` files and the directory; current tool-isolation capabilities. |
 | Claude | Effective config directory: `.credentials.json`, `settings.json`, `settings.local.json` and directory identity. Account/auth fields from home `.claude.json`, or `CLAUDE_CONFIG_DIR/.claude.json` for a relocated profile. |
-| Gemini | Home `.gemini/oauth_creds.json`, `settings.json`, and Antigravity CLI `auth.json`/`config.json`. |
+| Gemini | Home `.gemini/oauth_creds.json`, `settings.json`, and Antigravity CLI `auth.json`/`config.json`/`settings.json`. |
 | Grok | Effective `GROK_AUTH_PATH`, `GROK_HOME/auth.json`, or home `.grok/auth.json`. |
 
 File identity/canonical target, metadata and bounded content digests detect removal, replacement, account/config edits and creation of previously missing files. Digests are kept in memory and never serialized or debug-printed. Unreadable or oversized configuration disables caching. OS-keyring changes and server-side revocation may have no local file signal, so the 30-second ceiling still applies; request a fresh check after login/logout or an account change. `invalidate_readiness()` explicitly drops local cached evidence and executable discovery. Authentication failures from a subsequent turn also invalidate evidence. Failed/obsolete probes cannot repopulate an invalidated cache.

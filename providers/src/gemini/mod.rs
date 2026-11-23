@@ -324,6 +324,7 @@ impl Provider for Gemini {
                 home.join(".gemini/settings.json"),
                 home.join(".gemini/antigravity-cli/auth.json"),
                 home.join(".gemini/antigravity-cli/config.json"),
+                home.join(".gemini/antigravity-cli/settings.json"),
             ]
         });
         crate::readiness::Key::watch(&self.executable()?, files, self.capabilities())
@@ -1019,9 +1020,10 @@ impl Turn {
                 }
             }
             Ok(Line::OtherStep { .. }) => {
-                // The prompt echoed back, a system message, or an unclassified
-                // step: not answer text, and nothing the adapter lets act. The
-                // prompt is echoed before or after `init`, so either is fine.
+                // The prompt echoed back, a system message, a checkpoint, or an
+                // unclassified step: not answer text, and nothing the adapter
+                // lets act. The prompt is echoed before or after `init`, so
+                // either is fine.
                 self.queue.push_back(Update::Activity);
             }
             Ok(Line::Tool(tool)) => {

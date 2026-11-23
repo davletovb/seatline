@@ -100,10 +100,52 @@ impl Fixture {
             .collect()
     }
 
+    /// For each run so far: whether it carried `--disable-slash-commands` and
+    /// `--no-chrome`.
+    fn hardening_runs(&self) -> Vec<(bool, bool)> {
+        self.runs()
+            .iter()
+            .map(|run| {
+                let mut slash = false;
+                let mut chrome = false;
+                for arg in run.split(' ') {
+                    if arg == "--disable-slash-commands" {
+                        slash = true;
+                    } else if arg == "--no-chrome" {
+                        chrome = true;
+                    }
+                }
+                (slash, chrome)
+            })
+            .collect()
+    }
+
     /// A Claude that was replaced, as an upgrade does: once none is running.
     fn replace_executable(&self) {
         self.claude.assert_nothing_left_running();
         independent_executable(&self.claude.dir, FakeClaude::file_name());
+    }
+
+    /// Replaces the fake `claude` binary with an independent copy carrying a
+    /// distinct `FileStamp` on every OS, even while an earlier child is still
+    /// running the old executable.
+    fn replace_executable_in_place(&self, generation: u64) {
+        let name = FakeClaude::file_name();
+        let executable = self.claude.dir.join(name);
+        let staged = self.claude.dir.join(format!("{name}.staged-{generation}"));
+        std::fs::copy(FIXTURES.provider(), &staged).unwrap();
+        let mtime = std::time::SystemTime::now()
+            .checked_sub(Duration::from_secs(60 * (generation + 1)))
+            .unwrap_or(std::time::UNIX_EPOCH);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&staged)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let backup = self.claude.dir.join(format!("{name}.old-{generation}"));
+        std::fs::rename(&executable, &backup).unwrap();
+        std::fs::rename(&staged, &executable).unwrap();
     }
 }
 
@@ -282,6 +324,160 @@ fn cancelling_a_run_that_is_about_to_be_rejected_stops_the_turn_and_asks_nothing
     let updates = run_to_end(exchange.as_mut());
     assert_eq!(updates.last(), Some(&Update::Stopped), "{updates:?}");
     assert_eq!(fixture.safe_mode_runs(), [true]);
+}
+
+#[test]
+fn hardening_flags_apply_only_to_restricted_turns() {
+    let fixture = Fixture::new("answers");
+    let adapter = fixture.adapter();
+    for (tools, text) in [
+        (ToolPolicy::None, "plain"),
+        (ToolPolicy::NativeWebSearch, "search"),
+        (ToolPolicy::ProviderDefault, "default"),
+    ] {
+        let updates = run_to_end(
+            adapter
+                .send(Turn {
+                    tools,
+                    ..plain(text)
+                })
+                .as_mut(),
+        );
+        assert_eq!(updates.last(), Some(&Update::Completed), "{updates:?}");
+    }
+    assert_eq!(
+        fixture.hardening_runs(),
+        [(true, true), (true, true), (false, false)]
+    );
+}
+
+#[test]
+fn a_claude_from_before_no_chrome_drops_only_no_chrome_and_remembers_it() {
+    let fixture = Fixture::new("no-chrome-option");
+    let adapter = fixture.adapter();
+
+    let first = run_to_end(adapter.send(plain("first")).as_mut());
+    assert_eq!(first.last(), Some(&Update::Completed), "{first:?}");
+    assert_eq!(answer_text(&first), "You asked: first");
+    assert_eq!(
+        first
+            .iter()
+            .filter(|update| **update == Update::Launched)
+            .count(),
+        1,
+        "{first:?}"
+    );
+    assert_eq!(fixture.hardening_runs(), [(true, true), (true, false)]);
+
+    // Subsequent turns remember `--no-chrome` is unsupported while keeping
+    // `--disable-slash-commands`.
+    let second = run_to_end(adapter.send(plain("second")).as_mut());
+    assert_eq!(second.last(), Some(&Update::Completed), "{second:?}");
+    assert_eq!(
+        fixture.hardening_runs(),
+        [(true, true), (true, false), (true, false)]
+    );
+
+    // Invalidating readiness forgets the cached entry.
+    adapter.invalidate_readiness();
+    let third = run_to_end(adapter.send(plain("third")).as_mut());
+    assert_eq!(third.last(), Some(&Update::Completed), "{third:?}");
+    assert_eq!(
+        fixture.hardening_runs(),
+        [
+            (true, true),
+            (true, false),
+            (true, false),
+            (true, true),
+            (true, false),
+        ]
+    );
+
+    // Upgrading the binary re-enables `--no-chrome`.
+    fixture.claude.set("answers", "signed-in");
+    fixture.replace_executable();
+    let fourth = run_to_end(adapter.send(plain("fourth")).as_mut());
+    assert_eq!(fourth.last(), Some(&Update::Completed), "{fourth:?}");
+    assert_eq!(
+        fixture.hardening_runs(),
+        [
+            (true, true),
+            (true, false),
+            (true, false),
+            (true, true),
+            (true, false),
+            (true, true),
+        ]
+    );
+}
+
+#[test]
+fn a_claude_from_before_disable_slash_commands_drops_both_hardening_flags_in_one_retry() {
+    let fixture = Fixture::new("no-slash-commands-option");
+    let adapter = fixture.adapter();
+
+    let first = run_to_end(adapter.send(plain("first")).as_mut());
+    assert_eq!(first.last(), Some(&Update::Completed), "{first:?}");
+    assert_eq!(answer_text(&first), "You asked: first");
+    assert_eq!(
+        first
+            .iter()
+            .filter(|update| **update == Update::Launched)
+            .count(),
+        1,
+        "{first:?}"
+    );
+    // Dropping `--disable-slash-commands` also drops `--no-chrome` (2.0.72)
+    // so pre-2.0.60 builds pay only a single retry.
+    assert_eq!(fixture.hardening_runs(), [(true, true), (false, false)]);
+
+    let second = run_to_end(adapter.send(plain("second")).as_mut());
+    assert_eq!(second.last(), Some(&Update::Completed), "{second:?}");
+    assert_eq!(
+        fixture.hardening_runs(),
+        [(true, true), (false, false), (false, false)]
+    );
+}
+
+#[test]
+fn a_mid_run_claude_upgrade_never_caches_an_old_flag_rejection_for_the_new_binary() {
+    let fixture = Fixture::new("slow-no-chrome-option");
+    let adapter = fixture.adapter();
+
+    let mut exchange = adapter.send(plain("upgrade"));
+    let launched = exchange.next(Instant::now() + Duration::from_secs(5));
+    assert_eq!(launched, Some(Update::Launched));
+    let give_up = Instant::now() + Duration::from_secs(5);
+    while fixture.runs().is_empty() {
+        assert!(Instant::now() < give_up, "the fake never started");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // Upgrade the binary while the older child is about to reject `--no-chrome`.
+    fixture.claude.set("answers", "signed-in");
+    fixture.replace_executable_in_place(1);
+
+    let rest = run_to_end(exchange.as_mut());
+    assert_eq!(rest.last(), Some(&Update::Completed), "{rest:?}");
+    assert_eq!(answer_text(&rest), "You asked: upgrade");
+    assert_eq!(
+        rest.iter()
+            .filter(|update| **update == Update::Launched)
+            .count(),
+        0,
+        "{rest:?}"
+    );
+    // The adapter retried against the new binary with `--no-chrome` intact.
+    assert_eq!(fixture.hardening_runs(), [(true, true), (true, true)]);
+
+    // Follow-up turns still pass `--no-chrome` without retrying: the upgraded
+    // binary's cache was never poisoned.
+    let second = run_to_end(adapter.send(plain("after")).as_mut());
+    assert_eq!(second.last(), Some(&Update::Completed), "{second:?}");
+    assert_eq!(
+        fixture.hardening_runs(),
+        [(true, true), (true, true), (true, true)]
+    );
 }
 
 // ---- through the real broker -------------------------------------------------
