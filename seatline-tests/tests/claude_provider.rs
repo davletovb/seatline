@@ -473,6 +473,7 @@ fn claude_inherits_node_extra_ca_certs_but_not_arbitrary_secrets() {
     assert_eq!(value["env"]["NODE_EXTRA_CA_CERTS"], "/tmp/company-ca.pem");
     assert_eq!(value["env"]["HTTPS_PROXY"], "http://proxy.example");
     assert!(value["env"].get("SECRET_TOKEN").is_none());
+    assert_eq!(value["env"]["CLAUDE_CODE_DISABLE_FEATURE_FLAGS"], "1");
     assert_eq!(
         value["env"]["CLAUDE_CODE_DISABLE_DEFERRED_TOOL_RESUME"],
         "1"

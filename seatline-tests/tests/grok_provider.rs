@@ -345,8 +345,117 @@ fn host_scanner_and_tool_variables_are_overridden_to_isolated_values() {
         ("GROK_WRITE_FILE", std::path::PathBuf::from("1")),
         ("GROK_LSP_TOOLS", std::path::PathBuf::from("1")),
         ("GROK_CRASH_HANDLER", std::path::PathBuf::from("1")),
+        ("GROK_SANDBOX", std::path::PathBuf::from("off")),
     ]);
     let updates = run_to_end(adapter.send(ask("Say hello")).as_mut());
     assert_eq!(answer_text(&updates), "Grok answer");
     assert_eq!(updates.last(), Some(&Update::Completed));
+}
+
+#[test]
+fn partial_deltas_stream_incrementally_without_duplicating_the_assistant_frame() {
+    let fake = FakeGrok::install(FIXTURES);
+    let adapter = fake.adapter();
+
+    let updates = run_to_end(adapter.send(ask("Say hello")).as_mut());
+    let deltas: Vec<&str> = updates
+        .iter()
+        .filter_map(|update| match update {
+            Update::Delta(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(deltas.len() >= 2, "expected incremental deltas: {deltas:?}");
+    assert_eq!(answer_text(&updates), "Grok answer");
+    assert_eq!(updates.last(), Some(&Update::Completed));
+
+    // Older Grok builds that emit only the complete `assistant` frame still
+    // deliver the answer once without dropping it.
+    let fallback = run_to_end(adapter.send(model("grok-no-partials")).as_mut());
+    assert_eq!(answer_text(&fallback), "Grok answer");
+    assert_eq!(fallback.last(), Some(&Update::Completed));
+}
+
+#[test]
+fn streaming_tool_block_fails_closed_immediately() {
+    let fake = FakeGrok::install(FIXTURES);
+    let updates = run_to_end(fake.adapter().send(model("grok-stream-tool")).as_mut());
+    assert_eq!(
+        failure(&updates),
+        (ErrorCode::ProviderFailed, "PROVIDER_BOUNDARY_VIOLATION")
+    );
+}
+
+#[test]
+fn result_usage_sums_disjoint_buckets_and_omits_all_zero_usage() {
+    use seatline_core::turn::Usage;
+
+    let fake = FakeGrok::install(FIXTURES);
+    let adapter = fake.adapter();
+
+    let updates = run_to_end(adapter.send(ask("Say hello")).as_mut());
+    let usage = updates.iter().find_map(|update| match update {
+        Update::Usage(usage) => Some(*usage),
+        _ => None,
+    });
+    assert_eq!(
+        usage,
+        Some(Usage {
+            input_tokens: Some(550),
+            output_tokens: Some(25),
+            cached_input_tokens: Some(400),
+            cache_write_input_tokens: Some(50),
+            reasoning_output_tokens: None,
+        })
+    );
+
+    let zero = run_to_end(adapter.send(model("grok-zero-usage")).as_mut());
+    assert_eq!(zero.last(), Some(&Update::Completed));
+    assert!(
+        !zero.iter().any(|update| matches!(update, Update::Usage(_))),
+        "{zero:?}"
+    );
+}
+
+#[test]
+fn reasoning_effort_forwards_all_levels_and_maps_older_cli_rejection() {
+    use seatline_core::turn::ReasoningEffort;
+
+    let fake = FakeGrok::install(FIXTURES);
+    let adapter = fake.adapter();
+
+    for effort in [
+        ReasoningEffort::None,
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::Xhigh,
+        ReasoningEffort::Max,
+    ] {
+        let updates = run_to_end(
+            adapter
+                .send(Turn {
+                    reasoning_effort: Some(effort),
+                    ..ask("Say hello")
+                })
+                .as_mut(),
+        );
+        assert_eq!(updates.last(), Some(&Update::Completed), "{effort:?}");
+        let invocation = fake.invocations().last().unwrap().clone();
+        let wanted = format!("--reasoning-effort {}", effort.as_str());
+        assert!(invocation.contains(&wanted), "{invocation}");
+    }
+
+    let unsupported = run_to_end(
+        adapter
+            .send(Turn {
+                reasoning_effort: Some(ReasoningEffort::High),
+                ..model("grok-no-effort-flag")
+            })
+            .as_mut(),
+    );
+    assert_eq!(
+        failure(&unsupported),
+        (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+    );
 }

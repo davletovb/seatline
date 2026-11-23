@@ -822,3 +822,97 @@ fn pre_init_cleanup_scans_a_large_shared_tree_and_preserves_foreign_transcripts(
         "removed foreign data or missed the turn's transcript"
     );
 }
+
+#[test]
+fn reasoning_effort_forwards_supported_levels_and_normalizes_cli_or_model_refusals() {
+    use seatline_core::turn::ReasoningEffort;
+
+    let fake = FakeGemini::install(FIXTURES);
+    let adapter = fake.adapter();
+
+    for effort in [
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::Xhigh,
+        ReasoningEffort::Max,
+    ] {
+        let updates = run_to_end(
+            adapter
+                .send(Turn {
+                    reasoning_effort: Some(effort),
+                    ..ask("Say hello")
+                })
+                .as_mut(),
+        );
+        assert_eq!(updates.last(), Some(&Update::Completed), "{effort:?}");
+        let invocation = fake.invocations().last().unwrap().clone();
+        let wanted = format!("--effort {}", effort.as_str());
+        assert!(invocation.contains(&wanted), "{invocation}");
+    }
+
+    let flag_unknown = run_to_end(
+        adapter
+            .send(Turn {
+                reasoning_effort: Some(ReasoningEffort::High),
+                ..model("gemini-effort-flag-unknown")
+            })
+            .as_mut(),
+    );
+    assert_eq!(
+        failure(&flag_unknown),
+        (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+    );
+
+    let model_unsupported = run_to_end(
+        adapter
+            .send(Turn {
+                reasoning_effort: Some(ReasoningEffort::Max),
+                ..model("gemini-effort-model-unsupported")
+            })
+            .as_mut(),
+    );
+    assert_eq!(
+        failure(&model_unsupported),
+        (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+    );
+    assert_eq!(transcripts(&fake), 0);
+}
+
+#[test]
+fn result_usage_reports_cache_read_and_thinking_tokens() {
+    use seatline_core::turn::Usage;
+
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(fake.adapter().send(ask("Say hello")).as_mut());
+    assert_eq!(updates.last(), Some(&Update::Completed));
+    let usage = updates.iter().find_map(|update| match update {
+        Update::Usage(usage) => Some(*usage),
+        _ => None,
+    });
+    assert_eq!(
+        usage,
+        Some(Usage {
+            input_tokens: Some(17),
+            output_tokens: Some(9),
+            cached_input_tokens: Some(120),
+            cache_write_input_tokens: None,
+            reasoning_output_tokens: Some(45),
+        })
+    );
+}
+
+#[test]
+fn print_timeout_finished_reason_fails_closed_even_when_status_is_success() {
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(fake.adapter().send(model("gemini-print-timeout")).as_mut());
+    assert_eq!(
+        failure(&updates),
+        (ErrorCode::ProviderFailed, "PROVIDER_TIMEOUT")
+    );
+    assert_eq!(
+        transcripts(&fake),
+        0,
+        "timed-out turn leaked its Antigravity transcript"
+    );
+}

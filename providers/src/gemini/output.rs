@@ -42,7 +42,10 @@ pub enum Line {
         response: String,
         usage: Usage,
     },
-    ResultFailed(ErrorBody),
+    ResultFailed {
+        error: ErrorBody,
+        effort_unsupported: bool,
+    },
     Ignored,
 }
 
@@ -141,7 +144,19 @@ pub fn parse(line: &str) -> Result<Line, Malformed> {
                 .get("status")
                 .and_then(Value::as_str)
                 .ok_or(Malformed)?;
-            if status == "SUCCESS" {
+            // Antigravity v1.4.11+ sets `finished_reason` (`"print_timeout"`,
+            // `"interrupted"`, `"error"`) on early termination even when
+            // `status == "SUCCESS"`. Omitted (or empty) means clean completion.
+            let finished_reason = result
+                .get("finished_reason")
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.is_empty());
+            if finished_reason == Some("print_timeout") {
+                Line::ResultFailed {
+                    error: TIMEOUT,
+                    effort_unsupported: false,
+                }
+            } else if status == "SUCCESS" && finished_reason.is_none() {
                 let conversation_id = result
                     .get("conversation_id")
                     .and_then(Value::as_str)
@@ -166,6 +181,12 @@ pub fn parse(line: &str) -> Result<Line, Malformed> {
                         output_tokens: result
                             .pointer("/usage/output_tokens")
                             .and_then(Value::as_u64),
+                        cached_input_tokens: result
+                            .pointer("/usage/cache_read_tokens")
+                            .and_then(Value::as_u64),
+                        reasoning_output_tokens: result
+                            .pointer("/usage/thinking_tokens")
+                            .and_then(Value::as_u64),
                         ..Usage::default()
                     },
                 }
@@ -173,8 +194,12 @@ pub fn parse(line: &str) -> Result<Line, Malformed> {
                 let message = result
                     .get("error")
                     .and_then(Value::as_str)
+                    .or(finished_reason)
                     .unwrap_or(status);
-                Line::ResultFailed(provider_failure(message))
+                Line::ResultFailed {
+                    error: provider_failure(message),
+                    effort_unsupported: names_unsupported_effort(message),
+                }
             }
         }
         _ => Line::Ignored,
@@ -190,6 +215,12 @@ const AUTH_REJECTED: ErrorBody = ErrorBody {
 const RATE_LIMITED: ErrorBody = ErrorBody {
     code: ErrorCode::ProviderFailed,
     reason: "PROVIDER_RATE_LIMITED",
+    retryable: true,
+};
+
+const TIMEOUT: ErrorBody = ErrorBody {
+    code: ErrorCode::ProviderFailed,
+    reason: "PROVIDER_TIMEOUT",
     retryable: true,
 };
 
@@ -237,6 +268,32 @@ pub fn provider_failure(message: &str) -> ErrorBody {
     } else {
         UNAVAILABLE
     }
+}
+
+/// Whether Antigravity's pre-init stderr or error result says either the
+/// installed CLI does not know `--effort` or the chosen model does not accept
+/// the requested effort level.
+pub fn names_unsupported_effort(message: &str) -> bool {
+    message.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        let names_flag = lower.contains("--effort") || lower.contains("-effort");
+        let flag_rejected = names_flag
+            && (lower.contains("unknown flag")
+                || lower.contains("flag provided but not defined")
+                || lower.contains("unknown option")
+                || lower.contains("unrecognized option")
+                || lower.contains("unexpected argument")
+                || lower.contains("invalid argument")
+                || lower.contains("invalid value"));
+        let model_rejected = lower.contains("effort")
+            && (lower.contains("unsupported effort")
+                || lower.contains("invalid effort")
+                || lower.contains("effort isn't adjustable")
+                || lower.contains("effort is not adjustable")
+                || lower.contains("does not support")
+                || lower.contains("has no \""));
+        flag_rejected || model_rejected
+    })
 }
 
 #[cfg(test)]
@@ -383,6 +440,84 @@ mod tests {
                 r#"{"event":"step_update","step_update":{"step_type":"command","state":"ACTIVE"}}"#
             ),
             Ok(Line::UnexpectedStep)
+        );
+    }
+
+    #[test]
+    fn result_usage_reads_thinking_and_cache_read_tokens() {
+        let line = r#"{"event":"result","result":{"conversation_id":"agy-123","status":"SUCCESS","response":"done","usage":{"input_tokens":17,"output_tokens":9,"cache_read_tokens":120,"thinking_tokens":45,"total_tokens":191}}}"#;
+        assert_eq!(
+            parse(line),
+            Ok(Line::ResultSuccess {
+                conversation_id: Some("agy-123".to_owned()),
+                response: "done".to_owned(),
+                usage: Usage {
+                    input_tokens: Some(17),
+                    output_tokens: Some(9),
+                    cached_input_tokens: Some(120),
+                    cache_write_input_tokens: None,
+                    reasoning_output_tokens: Some(45),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn finished_reason_fails_closed_even_when_status_is_success() {
+        let timeout = r#"{"event":"result","result":{"conversation_id":"agy-123","status":"SUCCESS","response":"partial","finished_reason":"print_timeout"}}"#;
+        assert_eq!(
+            parse(timeout),
+            Ok(Line::ResultFailed {
+                error: TIMEOUT,
+                effort_unsupported: false,
+            })
+        );
+
+        let interrupted = r#"{"event":"result","result":{"conversation_id":"agy-123","status":"SUCCESS","response":"partial","finished_reason":"interrupted"}}"#;
+        assert_eq!(
+            parse(interrupted),
+            Ok(Line::ResultFailed {
+                error: UNAVAILABLE,
+                effort_unsupported: false,
+            })
+        );
+
+        let error_reason = r#"{"event":"result","result":{"conversation_id":"agy-123","status":"SUCCESS","response":"partial","finished_reason":"error"}}"#;
+        assert_eq!(
+            parse(error_reason),
+            Ok(Line::ResultFailed {
+                error: UNAVAILABLE,
+                effort_unsupported: false,
+            })
+        );
+    }
+
+    #[test]
+    fn unsupported_effort_cli_and_model_errors_are_recognized() {
+        for message in [
+            "Error: unknown flag: --effort\n",
+            "flag provided but not defined: -effort\n",
+            "gemini-2.5-flash has no \"max\" effort (available: low, medium, high)",
+            "effort isn't adjustable for gemini-2.5-flash",
+            "invalid effort level",
+        ] {
+            assert!(names_unsupported_effort(message), "{message}");
+        }
+        for message in [
+            "Usage:\n  agy --effort <level>   Set reasoning effort\n",
+            "best effort delivery failed",
+            "server error: connection reset",
+        ] {
+            assert!(!names_unsupported_effort(message), "{message}");
+        }
+
+        let model_err = r#"{"event":"result","result":{"status":"ERROR","error":"gemini-2.5-flash has no \"max\" effort (available: low, medium, high)"}}"#;
+        assert_eq!(
+            parse(model_err),
+            Ok(Line::ResultFailed {
+                error: UNAVAILABLE,
+                effort_unsupported: true,
+            })
         );
     }
 }

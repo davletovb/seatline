@@ -94,6 +94,15 @@ fn run(args: Vec<OsString>) -> Result<(), ()> {
         return Err(());
     }
 
+    if requested_model == "grok-no-effort-flag"
+        && args
+            .iter()
+            .any(|arg| arg.to_string_lossy().starts_with("--reasoning-effort"))
+    {
+        eprintln!("error: unexpected argument '--reasoning-effort' found");
+        return Err(());
+    }
+
     let cwd = std::env::current_dir().map_err(|_| ())?;
     let api_key_source = if requested_model == "grok-init-auth" {
         "user"
@@ -161,6 +170,14 @@ fn run(args: Vec<OsString>) -> Result<(), ()> {
             hang_briefly();
             return Ok(());
         }
+        "grok-stream-tool" => {
+            line(&serde_json::json!({
+                "type":"stream_event",
+                "event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"tool-1","name":"bash"}}
+            }))?;
+            hang_briefly();
+            return Ok(());
+        }
         "grok-result-auth" => {
             line(&serde_json::json!({
                 "type":"result","subtype":"error_during_execution","is_error":true,
@@ -180,13 +197,58 @@ fn run(args: Vec<OsString>) -> Result<(), ()> {
     } else {
         "Grok answer"
     };
+    if args.iter().any(|arg| arg == "--include-partial-messages")
+        && requested_model != "grok-no-partials"
+    {
+        let mid = answer.len() / 2;
+        let mid = (mid..=answer.len())
+            .find(|&index| answer.is_char_boundary(index))
+            .unwrap_or(answer.len());
+        line(&serde_json::json!({
+            "type":"stream_event",
+            "event":{"type":"message_start"}
+        }))?;
+        line(&serde_json::json!({
+            "type":"stream_event",
+            "event":{"type":"content_block_start","content_block":{"type":"text","text":""}}
+        }))?;
+        for chunk in [&answer[..mid], &answer[mid..]] {
+            line(&serde_json::json!({
+                "type":"stream_event",
+                "event":{"type":"content_block_delta","delta":{"type":"text_delta","text":chunk}}
+            }))?;
+        }
+        line(&serde_json::json!({
+            "type":"stream_event",
+            "event":{"type":"content_block_stop"}
+        }))?;
+        line(&serde_json::json!({
+            "type":"stream_event",
+            "event":{"type":"message_stop"}
+        }))?;
+    }
     line(&serde_json::json!({
         "type":"assistant",
         "message":{"content":[{"type":"thinking","thinking":"done"},{"type":"text","text":answer}]}
     }))?;
+    let usage = if requested_model == "grok-zero-usage" {
+        serde_json::json!({
+            "input_tokens":0,
+            "cache_read_input_tokens":0,
+            "cache_creation_input_tokens":0,
+            "output_tokens":0
+        })
+    } else {
+        serde_json::json!({
+            "input_tokens":100,
+            "cache_read_input_tokens":400,
+            "cache_creation_input_tokens":50,
+            "output_tokens":25
+        })
+    };
     line(&serde_json::json!({
         "type":"result","subtype":"success","is_error":false,
-        "result":answer,"stop_reason":"end_turn"
+        "result":answer,"stop_reason":"end_turn","usage":usage
     }))?;
     Ok(())
 }
@@ -227,6 +289,7 @@ fn assert_isolated_environment() -> Result<(), ()> {
         ("GROK_CURSOR_AGENTS_ENABLED", "0"),
         ("GROK_CURSOR_MCPS_ENABLED", "0"),
         ("GROK_CURSOR_HOOKS_ENABLED", "0"),
+        ("GROK_SANDBOX", "read-only"),
     ] {
         if std::env::var_os(name).as_deref() != Some(OsStr::new(wanted)) {
             return Err(());

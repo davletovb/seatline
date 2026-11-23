@@ -23,6 +23,7 @@ use serde_json::Value;
 
 use seatline_core::protocol::ErrorCode;
 use seatline_core::protocol::Failure as ErrorBody;
+use seatline_core::search::{MAX_SOURCES_PER_TURN, SearchResult};
 use seatline_core::turn::Usage;
 
 /// One line of Codex output, reduced to what the adapter needs.
@@ -31,9 +32,9 @@ pub enum Line {
     ThreadStarted(String),
     TurnStarted,
     AgentMessage(String),
-    /// A web search started, ran, or finished. It reports only the query,
-    /// never results.
-    WebSearch,
+    /// A web search started, ran, or finished. Codex `0.171+` may attach
+    /// structured search hits on completion; older builds carry none.
+    WebSearch(Vec<SearchResult>),
     /// Work in progress, with nothing to show.
     Progress,
     TurnCompleted(Usage),
@@ -108,12 +109,39 @@ pub fn parse(line: &str) -> Result<Line, Malformed> {
                         .ok_or(Malformed)?
                         .to_owned(),
                 ),
-                (_, "web_search") => Line::WebSearch,
+                ("item.completed", "web_search") => Line::WebSearch(parse_web_search_results(item)),
+                (_, "web_search") => Line::WebSearch(Vec::new()),
                 _ => Line::Progress,
             }
         }
         _ => Line::Ignored,
     })
+}
+
+/// Extracts bounded, SEC-05 validated search results from Codex `0.171+`
+/// `WebSearchItem.results` entries (`{url, title, snippet, ...}`).
+fn parse_web_search_results(item: &Value) -> Vec<SearchResult> {
+    let Some(entries) = item.get("results").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let url = entry.get("url").and_then(Value::as_str)?;
+            let title = entry.get("title").and_then(Value::as_str).unwrap_or("");
+            let snippet = entry.get("snippet").and_then(Value::as_str).unwrap_or("");
+            let source_name = entry
+                .get("source_name")
+                .or_else(|| entry.get("site_name"))
+                .and_then(Value::as_str);
+            let age = entry
+                .get("age")
+                .or_else(|| entry.get("published_at"))
+                .and_then(Value::as_str);
+            SearchResult::new(title, url, snippet, source_name, age)
+        })
+        .take(MAX_SOURCES_PER_TURN)
+        .collect()
 }
 
 const AUTH_REJECTED: ErrorBody = ErrorBody {
@@ -155,17 +183,47 @@ pub fn turn_failure(message: &str) -> ErrorBody {
     }
 }
 
-/// Whether `codex --version` reports a Codex release that knows
-/// `[agents].enabled = false` (`0.145.0` and later, or a `0.0.0` local dev
-/// build). Returns `None` when the output does not name a parseable version,
-/// so callers can fail closed without caching an unknown result.
+/// Version-gated Codex CLI isolation capabilities parsed from `codex --version`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct VersionCapabilities {
+    /// `0.145.0`+ (or `0.0.0` local dev): knows `[agents].enabled = false`.
+    pub(super) agents_enabled: bool,
+    /// `0.122.0`+ (or `0.0.0` local dev): knows `codex exec --ignore-rules`.
+    pub(super) ignore_rules: bool,
+}
+
+impl VersionCapabilities {
+    /// Fallback when `--version` fails, times out, or is unparseable: fail
+    /// closed on `agents.enabled=false` while omitting `--ignore-rules` so an
+    /// unknown pre-0.122 binary is never broken by an unrecognized CLI flag.
+    pub(super) const FAIL_CLOSED_UNKNOWN: Self = Self {
+        agents_enabled: true,
+        ignore_rules: false,
+    };
+}
+
+fn at_least_minor(
+    major: u64,
+    minor: u64,
+    patch: u64,
+    has_prerelease: bool,
+    required_minor: u64,
+) -> bool {
+    major > 0
+        || minor > required_minor
+        || (minor == required_minor && (patch > 0 || !has_prerelease))
+}
+
+/// Parses `codex --version` output into version-gated isolation capabilities.
+/// Returns `None` when the output does not name a parseable version, so
+/// callers can fall back to [`VersionCapabilities::FAIL_CLOSED_UNKNOWN`]
+/// without caching an unknown result.
 ///
 /// Pre-`0.145` Codex releases lacked `AgentsToml.enabled` and flattened unknown
 /// keys under `[agents]` into `BTreeMap<String, AgentRoleToml>`, rejecting
 /// `-c agents.enabled=false` with `expected struct AgentRoleToml in agents`.
-/// Gating on `--version` avoids parsing stderr, where a malformed user role on
-/// a newer Codex produces the exact same diagnostic.
-pub(super) fn supports_agents_enabled_version(output: &[u8]) -> Option<bool> {
+/// Pre-`0.122` releases lacked `codex exec --ignore-rules`.
+pub(super) fn parse_version_capabilities(output: &[u8]) -> Option<VersionCapabilities> {
     let text = std::str::from_utf8(output).ok()?;
     for token in text.split_whitespace() {
         let token = token.strip_prefix('v').unwrap_or(token);
@@ -185,11 +243,15 @@ pub(super) fn supports_agents_enabled_version(output: &[u8]) -> Option<bool> {
             patch.parse::<u64>(),
         ) {
             if (major, minor, patch) == (0, 0, 0) {
-                return Some(true);
+                return Some(VersionCapabilities {
+                    agents_enabled: true,
+                    ignore_rules: true,
+                });
             }
-            return Some(
-                major > 0 || minor > 145 || (minor == 145 && (patch > 0 || !has_prerelease)),
-            );
+            return Some(VersionCapabilities {
+                agents_enabled: at_least_minor(major, minor, patch, has_prerelease, 145),
+                ignore_rules: at_least_minor(major, minor, patch, has_prerelease, 122),
+            });
         }
     }
     None
@@ -238,11 +300,23 @@ mod tests {
     }
 
     #[test]
-    fn web_search_items_are_searches_without_fake_results() {
+    fn web_search_items_extract_structured_results_when_present_and_filter_hostile_urls() {
         let line = r#"{"type":"item.completed","item":{"id":"search_1","type":"web_search","query":"rust","action":{"type":"search","query":"rust"}}}"#;
-        assert_eq!(parse(line), Ok(Line::WebSearch));
+        assert_eq!(parse(line), Ok(Line::WebSearch(Vec::new())));
         let started = r#"{"type":"item.started","item":{"id":"search_1","type":"web_search","query":"","action":{"type":"other"}}}"#;
-        assert_eq!(parse(started), Ok(Line::WebSearch));
+        assert_eq!(parse(started), Ok(Line::WebSearch(Vec::new())));
+
+        let structured = r#"{"type":"item.completed","item":{"id":"search_2","type":"web_search","query":"rust","action":{"type":"search","query":"rust"},"results":[{"type":"text_result","url":"https://example.com/rust","title":"Rust <b>Docs</b>","snippet":"Systems language","site_name":"Example","published_at":"2026-11-20"},{"type":"text_result","url":"javascript:alert(1)","title":"Bad"},{"type":"text_result","url":"https://user:pass@example.com/secret","title":"Creds"}]}}"#;
+        assert_eq!(
+            parse(structured),
+            Ok(Line::WebSearch(vec![SearchResult {
+                title: "Rust Docs".to_owned(),
+                url: "https://example.com/rust".to_owned(),
+                snippet: "Systems language".to_owned(),
+                source_name: Some("Example".to_owned()),
+                age: Some("2026-11-20".to_owned()),
+            }]))
+        );
     }
     #[test]
     fn a_resumed_turn_reports_the_same_thread() {
@@ -400,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_version_gates_agents_enabled_from_0_145_onwards() {
+    fn codex_version_gates_agents_enabled_and_ignore_rules() {
         for version in [
             b"codex-cli 0.145.0\n".as_slice(),
             b"codex-cli 0.145.1\n",
@@ -413,27 +487,48 @@ mod tests {
             b"codex-cli 0.0.0\n",
         ] {
             assert_eq!(
-                supports_agents_enabled_version(version),
-                Some(true),
+                parse_version_capabilities(version),
+                Some(VersionCapabilities {
+                    agents_enabled: true,
+                    ignore_rules: true,
+                }),
                 "{}",
                 String::from_utf8_lossy(version)
             );
         }
         for version in [
-            b"codex-cli 0.135.0\n".as_slice(),
+            b"codex-cli 0.122.0\n".as_slice(),
+            b"codex-cli 0.135.0\n",
             b"codex-cli 0.142.0\n",
             b"codex-cli 0.144.6\n",
             b"codex-cli 0.145.0-alpha.1\n",
         ] {
             assert_eq!(
-                supports_agents_enabled_version(version),
-                Some(false),
+                parse_version_capabilities(version),
+                Some(VersionCapabilities {
+                    agents_enabled: false,
+                    ignore_rules: true,
+                }),
+                "{}",
+                String::from_utf8_lossy(version)
+            );
+        }
+        for version in [
+            b"codex-cli 0.121.0\n".as_slice(),
+            b"codex-cli 0.122.0-alpha.1\n",
+        ] {
+            assert_eq!(
+                parse_version_capabilities(version),
+                Some(VersionCapabilities {
+                    agents_enabled: false,
+                    ignore_rules: false,
+                }),
                 "{}",
                 String::from_utf8_lossy(version)
             );
         }
         for unparseable in [b"".as_slice(), b"codex-cli\n", b"not-a-version\n", b"\xff"] {
-            assert_eq!(supports_agents_enabled_version(unparseable), None);
+            assert_eq!(parse_version_capabilities(unparseable), None);
         }
     }
 }

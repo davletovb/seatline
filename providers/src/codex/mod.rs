@@ -200,41 +200,52 @@ impl Launch {
     }
 }
 
-/// Whether the installed Codex CLI knows `[agents].enabled = false` (`0.145+`).
+/// Version-gated Codex CLI isolation capabilities (`agents.enabled=false` from
+/// `0.145+`, `--ignore-rules` from `0.122+`).
 ///
 /// Codex `0.171+` deprecated `[features].multi_agent` and requires
 /// `agents.enabled=false` so a model whose metadata selects a subagent version
 /// cannot re-enable subagent tools. Older builds (`<= 0.144`) lacked that key
 /// and failed TOML deserialization with the same `expected struct AgentRoleToml
-/// in agents` diagnostic as a malformed user role on a newer Codex. Gating the
-/// flag on `codex --version` avoids stderr parsing altogether; caching is keyed
-/// by executable path and launch-time [`FileStamp`] so an in-place upgrade
-/// never inherits a pre-0.145 answer.
-struct AgentsEnabledSupport {
-    cached: RefCell<Option<(PathBuf, FileStamp, bool)>>,
+/// in agents` diagnostic as a malformed user role on a newer Codex. Codex
+/// `0.122+` also supports `codex exec --ignore-rules` to skip user/project
+/// execpolicy `.rules` files. Gating both on `codex --version` avoids stderr
+/// parsing; caching is keyed by executable path and launch-time [`FileStamp`]
+/// so an in-place upgrade never inherits an older binary's answer.
+struct VersionSupport {
+    cached: RefCell<Option<(PathBuf, FileStamp, output::VersionCapabilities)>>,
 }
 
-impl AgentsEnabledSupport {
+impl VersionSupport {
     fn new() -> Self {
         Self {
             cached: RefCell::new(None),
         }
     }
 
-    fn cached(&self, executable: &Path, stamp: Option<&FileStamp>) -> Option<bool> {
+    fn cached(
+        &self,
+        executable: &Path,
+        stamp: Option<&FileStamp>,
+    ) -> Option<output::VersionCapabilities> {
         let stamp = stamp?;
         self.cached
             .borrow()
             .as_ref()
-            .and_then(|(path, cached_stamp, supported)| {
-                (path == executable && cached_stamp == stamp).then_some(*supported)
+            .and_then(|(path, cached_stamp, caps)| {
+                (path == executable && cached_stamp == stamp).then_some(*caps)
             })
     }
 
-    fn remember(&self, executable: &Path, launch_stamp: FileStamp, supported: bool) {
+    fn remember(
+        &self,
+        executable: &Path,
+        launch_stamp: FileStamp,
+        caps: output::VersionCapabilities,
+    ) {
         // Re-verify the executable did not change while `--version` ran.
         if FileStamp::read(executable).ok().flatten().as_ref() == Some(&launch_stamp) {
-            *self.cached.borrow_mut() = Some((executable.to_path_buf(), launch_stamp, supported));
+            *self.cached.borrow_mut() = Some((executable.to_path_buf(), launch_stamp, caps));
         }
     }
 
@@ -248,7 +259,7 @@ pub struct Codex {
     search: CachedSearchPath,
     launch: Rc<Launch>,
     limits: Limits,
-    agents_enabled_support: Rc<AgentsEnabledSupport>,
+    version_support: Rc<VersionSupport>,
 }
 
 impl Codex {
@@ -270,7 +281,7 @@ impl Codex {
             search: CachedSearchPath::new(search),
             launch: Rc::new(Launch::new(work_dir, std::env::vars_os().collect())),
             limits: LIMITS,
-            agents_enabled_support: Rc::new(AgentsEnabledSupport::new()),
+            version_support: Rc::new(VersionSupport::new()),
         }
     }
 
@@ -358,7 +369,7 @@ impl Provider for Codex {
 
     fn invalidate_readiness(&self) {
         self.search.invalidate();
-        self.agents_enabled_support.forget();
+        self.version_support.forget();
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -449,8 +460,9 @@ impl Provider for Codex {
             // Page text and search results are attacker-controlled: a turn
             // that isn't left to the user's own configuration runs answer-only.
             restrict_tools,
-            agents_enabled_support: Rc::clone(&self.agents_enabled_support),
+            version_support: Rc::clone(&self.version_support),
             disable_agents: restrict_tools,
+            ignore_rules: false,
             version_rechecks: 0,
             context_turn: request.tools == ToolPolicy::None,
             native_search: request.tools == ToolPolicy::NativeWebSearch,
@@ -649,6 +661,7 @@ fn exec_args(
         seatline_core::turn::SessionPolicy::Persistent,
         restrict_tools,
         restrict_tools,
+        restrict_tools,
         context_turn,
         native_search,
         resume,
@@ -662,6 +675,7 @@ fn exec_args_for_session(
     session_policy: seatline_core::turn::SessionPolicy,
     restrict_tools: bool,
     disable_agents: bool,
+    ignore_rules: bool,
     context_turn: bool,
     native_search: bool,
     resume: Option<&str>,
@@ -680,6 +694,11 @@ fn exec_args_for_session(
         args.push("--ephemeral".into());
     }
     if restrict_tools {
+        if ignore_rules {
+            // Codex 0.122+: skip user and project execpolicy `.rules` files so
+            // pre-approved shell rules never apply on tool-restricted turns.
+            args.push("--ignore-rules".into());
+        }
         // Page text is attacker-controlled. A context turn is deliberately
         // answer-only: no local shell/image/sleep tools, apps/plugins/hooks,
         // web search, orchestrator MCP, code-mode host, or subagents.
@@ -865,9 +884,11 @@ struct Turn {
     /// Browser context or native search requires all unrelated Codex tool
     /// surfaces to be disabled.
     restrict_tools: bool,
-    agents_enabled_support: Rc<AgentsEnabledSupport>,
+    version_support: Rc<VersionSupport>,
     /// Whether `codex exec` will pass `-c agents.enabled=false`.
     disable_agents: bool,
+    /// Whether `codex exec` will pass `--ignore-rules` (`0.122+`).
+    ignore_rules: bool,
     /// Bounds re-checking `--version` if the executable is replaced mid-probe.
     version_rechecks: u8,
     /// Whether untrusted browser context is attached to this turn.
@@ -916,21 +937,27 @@ enum Stage {
 }
 
 impl Turn {
+    fn apply_version_caps(&mut self, caps: output::VersionCapabilities) {
+        self.disable_agents = caps.agents_enabled;
+        self.ignore_rules = caps.ignore_rules;
+    }
+
     /// Checks cached or live `codex --version` for restricted turns so
-    /// `-c agents.enabled=false` is omitted only on verified pre-`0.145`
-    /// executables, then starts `codex exec`.
+    /// `-c agents.enabled=false` (`0.145+`) and `--ignore-rules` (`0.122+`)
+    /// match the installed executable, then starts `codex exec`.
     fn prepare_and_start(&mut self) {
         self.probe_over();
         if !self.restrict_tools {
             self.disable_agents = false;
+            self.ignore_rules = false;
             return self.start();
         }
         let stamp = FileStamp::read(&self.executable).ok().flatten();
-        if let Some(supported) = self
-            .agents_enabled_support
+        if let Some(caps) = self
+            .version_support
             .cached(&self.executable, stamp.as_ref())
         {
-            self.disable_agents = supported;
+            self.apply_version_caps(caps);
             return self.start();
         }
         let Ok(workspace) = self.launch.workspace() else {
@@ -968,6 +995,7 @@ impl Turn {
             self.session_policy,
             self.restrict_tools,
             self.disable_agents,
+            self.ignore_rules,
             self.context_turn,
             self.native_search,
             self.resume.as_deref(),
@@ -986,13 +1014,13 @@ impl Turn {
         }
         if let Some(tier) = self.service_tier {
             // Codex's explicit Standard request is `default`; omission can
-            // inherit Fast or Ultrafast from the user's config. Fast also needs
-            // its feature gate enabled, otherwise Codex can silently drop the
-            // preference; Ultrafast is disabled for both Standard and Fast so
-            // Codex 0.171+'s independent `ultrafast_mode` gate cannot override.
-            let (value, fast) = match tier {
-                ServiceTier::Standard => ("default", false),
-                ServiceTier::Fast => ("fast", true),
+            // inherit Fast or Ultrafast from the user's config. Fast and
+            // Ultrafast have independent feature gates in Codex 0.171+, so set
+            // both explicitly for every requested tier.
+            let (value, fast, ultrafast) = match tier {
+                ServiceTier::Standard => ("default", false, false),
+                ServiceTier::Fast => ("fast", true, false),
+                ServiceTier::Ultrafast => ("ultrafast", false, true),
             };
             args.splice(
                 1..1,
@@ -1002,7 +1030,7 @@ impl Turn {
                     OsString::from("-c"),
                     OsString::from(format!("features.fast_mode={fast}")),
                     OsString::from("-c"),
-                    OsString::from("features.ultrafast_mode=false"),
+                    OsString::from(format!("features.ultrafast_mode={ultrafast}")),
                 ],
             );
         }
@@ -1058,9 +1086,16 @@ impl Turn {
                     self.show_message(text);
                 }
             }
-            Ok(Line::WebSearch) => {
+            Ok(Line::WebSearch(results)) => {
                 // What came before a search was narration.
                 self.held = None;
+                if self.native_search {
+                    for result in results {
+                        if let Some(source) = self.sources.push(result) {
+                            self.queue.push_back(Update::Source(source));
+                        }
+                    }
+                }
                 self.queue.push_back(Update::Activity);
             }
             Ok(Line::Progress) => self.queue.push_back(Update::Activity),
@@ -1206,7 +1241,7 @@ impl Exchange for Turn {
                 } if Instant::now() >= *give_up => {
                     process.kill();
                     // Fail closed on timeout without caching.
-                    self.disable_agents = true;
+                    self.apply_version_caps(output::VersionCapabilities::FAIL_CLOSED_UNKNOWN);
                     self.start();
                 }
                 Stage::CheckingVersion {
@@ -1220,7 +1255,7 @@ impl Exchange for Turn {
                         let parsed = exit
                             .status
                             .is_some_and(|status| status.success())
-                            .then(|| output::supports_agents_enabled_version(output))
+                            .then(|| output::parse_version_capabilities(output))
                             .flatten();
                         let current_stamp = FileStamp::read(&self.executable).ok().flatten();
                         if current_stamp != launch_stamp {
@@ -1230,23 +1265,24 @@ impl Exchange for Turn {
                                 self.version_rechecks += 1;
                                 self.prepare_and_start();
                             } else {
-                                self.disable_agents = true;
+                                self.apply_version_caps(
+                                    output::VersionCapabilities::FAIL_CLOSED_UNKNOWN,
+                                );
                                 self.start();
                             }
-                        } else if let Some(supported) = parsed {
+                        } else if let Some(caps) = parsed {
                             if let Some(launch_stamp) = launch_stamp {
-                                self.agents_enabled_support.remember(
-                                    &self.executable,
-                                    launch_stamp,
-                                    supported,
-                                );
+                                self.version_support
+                                    .remember(&self.executable, launch_stamp, caps);
                             }
-                            self.disable_agents = supported;
+                            self.apply_version_caps(caps);
                             self.start();
                         } else {
                             // Fail closed when `--version` fails or is
                             // unparseable, without caching the failure.
-                            self.disable_agents = true;
+                            self.apply_version_caps(
+                                output::VersionCapabilities::FAIL_CLOSED_UNKNOWN,
+                            );
                             self.start();
                         }
                     }
@@ -1370,6 +1406,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             None,
             None,
         );
@@ -1377,13 +1414,17 @@ mod tests {
     }
 
     #[test]
-    fn agents_enabled_support_caches_per_executable_stamp_until_forgotten() {
+    fn version_support_caches_per_executable_stamp_until_forgotten() {
         let executable = std::env::current_exe().unwrap();
         let stamp = FileStamp::read(&executable).unwrap().unwrap();
-        let support = AgentsEnabledSupport::new();
+        let support = VersionSupport::new();
+        let caps = output::VersionCapabilities {
+            agents_enabled: false,
+            ignore_rules: true,
+        };
         assert_eq!(support.cached(&executable, Some(&stamp)), None);
-        support.remember(&executable, stamp.clone(), false);
-        assert_eq!(support.cached(&executable, Some(&stamp)), Some(false));
+        support.remember(&executable, stamp.clone(), caps);
+        assert_eq!(support.cached(&executable, Some(&stamp)), Some(caps));
         assert_eq!(
             support.cached(&executable.with_extension("other"), Some(&stamp)),
             None

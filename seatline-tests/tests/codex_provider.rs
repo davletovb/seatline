@@ -770,10 +770,11 @@ fn processing_tier_overrides_config_without_changing_model_effort_or_later_turns
         (OsString::from("PATH"), std::env::var_os("PATH").unwrap()),
     ]);
     assert_eq!(adapter.capabilities().service_tier, Capability::Supported);
-    for (tier, value, gate) in [
-        (ServiceTier::Fast, "fast", "true"),
-        (ServiceTier::Standard, "default", "false"),
-        (ServiceTier::Fast, "fast", "true"),
+    for (tier, value, fast_gate, ultrafast_gate) in [
+        (ServiceTier::Fast, "fast", "true", "false"),
+        (ServiceTier::Ultrafast, "ultrafast", "false", "true"),
+        (ServiceTier::Standard, "default", "false", "false"),
+        (ServiceTier::Fast, "fast", "true", "false"),
     ] {
         let updates = run_to_end(
             adapter
@@ -791,8 +792,8 @@ fn processing_tier_overrides_config_without_changing_model_effort_or_later_turns
         let invocation = codex.invocations().last().unwrap().clone();
         for setting in [
             format!("service_tier=\"{value}\""),
-            format!("features.fast_mode={gate}"),
-            "features.ultrafast_mode=false".to_owned(),
+            format!("features.fast_mode={fast_gate}"),
+            format!("features.ultrafast_mode={ultrafast_gate}"),
             "model_reasoning_effort=\"xhigh\"".to_owned(),
         ] {
             assert_eq!(invocation.matches(&setting).count(), 1, "{invocation}");
@@ -1245,6 +1246,7 @@ fn a_codex_from_before_0_145_omits_agents_enabled_from_version_check_and_caches_
     let runs = execs(&codex);
     assert_eq!(runs.len(), 1, "{runs:?}");
     assert!(!runs[0].contains("agents.enabled"), "{runs:?}");
+    assert!(runs[0].contains("--ignore-rules"), "{runs:?}");
     assert!(
         runs[0].contains("-c features.multi_agent=false"),
         "{runs:?}"
@@ -1262,6 +1264,7 @@ fn a_codex_from_before_0_145_omits_agents_enabled_from_version_check_and_caches_
     let runs = execs(&codex);
     assert_eq!(runs.len(), 2, "{runs:?}");
     assert!(!runs[1].contains("agents.enabled"), "{runs:?}");
+    assert!(runs[1].contains("--ignore-rules"), "{runs:?}");
 
     // Invalidating readiness forgets the cached version decision.
     adapter.invalidate_readiness();
@@ -1271,6 +1274,7 @@ fn a_codex_from_before_0_145_omits_agents_enabled_from_version_check_and_caches_
     let runs = execs(&codex);
     assert_eq!(runs.len(), 3, "{runs:?}");
     assert!(!runs[2].contains("agents.enabled"), "{runs:?}");
+    assert!(runs[2].contains("--ignore-rules"), "{runs:?}");
 
     // Upgrading the binary invalidates the FileStamp entry and re-enables
     // `-c agents.enabled=false`.
@@ -1282,8 +1286,21 @@ fn a_codex_from_before_0_145_omits_agents_enabled_from_version_check_and_caches_
     let runs = execs(&codex);
     assert_eq!(runs.len(), 4, "{runs:?}");
     assert!(runs[3].contains("-c agents.enabled=false"), "{runs:?}");
+    assert!(runs[3].contains("--ignore-rules"), "{runs:?}");
 
-    // ProviderDefault turns never run `--version` and never pass `agents.enabled`.
+    // A pre-0.122 Codex omits both `-c agents.enabled=false` and `--ignore-rules`.
+    codex.set_version("answers", "signed-in", "0.121.0");
+    replace_codex_executable(&codex, 3);
+    let legacy = run_to_end(adapter.send(tool_free("legacy")).as_mut());
+    assert_eq!(legacy.last(), Some(&Update::Completed), "{legacy:?}");
+    assert_eq!(version_checks(&codex), 4);
+    let runs = execs(&codex);
+    assert_eq!(runs.len(), 5, "{runs:?}");
+    assert!(!runs[4].contains("agents.enabled"), "{runs:?}");
+    assert!(!runs[4].contains("--ignore-rules"), "{runs:?}");
+
+    // ProviderDefault turns never run `--version`, never pass `agents.enabled`,
+    // and never pass `--ignore-rules`.
     adapter.invalidate_readiness();
     let default_turn = run_to_end(
         adapter
@@ -1299,8 +1316,9 @@ fn a_codex_from_before_0_145_omits_agents_enabled_from_version_check_and_caches_
         Some(&Update::Completed),
         "{default_turn:?}"
     );
-    assert_eq!(version_checks(&codex), 3);
-    assert!(!execs(&codex)[4].contains("agents.enabled"));
+    assert_eq!(version_checks(&codex), 4);
+    assert!(!execs(&codex)[5].contains("agents.enabled"));
+    assert!(!execs(&codex)[5].contains("--ignore-rules"));
 }
 
 #[test]
@@ -1415,7 +1433,8 @@ fn failed_unparseable_or_timed_out_codex_version_fails_closed_without_caching() 
             ..ask(text)
         };
 
-        // Unknown `--version` result fails closed (passes `agents.enabled=false`).
+        // Unknown `--version` result fails closed (passes `agents.enabled=false`,
+        // omits `--ignore-rules` so older CLIs never choke on an unknown flag).
         let first = run_to_end(adapter.send(tool_free("first")).as_mut());
         assert_eq!(
             first.last(),
@@ -1425,6 +1444,11 @@ fn failed_unparseable_or_timed_out_codex_version_fails_closed_without_caching() 
         assert_eq!(version_checks(&codex), 1, "{behavior}");
         assert!(
             execs(&codex)[0].contains("-c agents.enabled=false"),
+            "{behavior}: {:?}",
+            execs(&codex)
+        );
+        assert!(
+            !execs(&codex)[0].contains("--ignore-rules"),
             "{behavior}: {:?}",
             execs(&codex)
         );
@@ -1444,7 +1468,37 @@ fn failed_unparseable_or_timed_out_codex_version_fails_closed_without_caching() 
             "{behavior}: {:?}",
             execs(&codex)
         );
+        assert!(
+            execs(&codex)[1].contains("--ignore-rules"),
+            "{behavior}: {:?}",
+            execs(&codex)
+        );
     }
+}
+
+#[test]
+fn structured_web_search_results_ground_a_turn_without_markdown_links_and_filter_hostile_urls() {
+    let codex = FakeCodex::install(FIXTURES, "search-structured", "signed-in");
+    let updates = visible(&run_to_end(
+        context_adapter(&codex)
+            .send(Turn {
+                tools: ToolPolicy::NativeWebSearch,
+                ..ask("what is new?")
+            })
+            .as_mut(),
+    ));
+    assert_eq!(updates.last(), Some(&Update::Completed), "{updates:?}");
+    let sources: Vec<_> = updates
+        .iter()
+        .filter_map(|update| match update {
+            Update::Source(source) => Some(source.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sources.len(), 1, "{sources:?}");
+    assert_eq!(sources[0].url, "https://example.com/structured-hit");
+    assert_eq!(sources[0].title, "Structured Codex Hit");
+    assert_eq!(sources[0].snippet, "From WebSearchItem.results");
 }
 
 #[test]

@@ -286,17 +286,42 @@ fn exec(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCode> {
         )?;
     }
     if native_search {
-        // Real Codex exec reports the search query/action here, not results.
+        let web_search = if behavior == "search-structured" {
+            json!({
+                "id": "search_1",
+                "type": "web_search",
+                "query": prompt.trim(),
+                "action": {"type": "search", "query": prompt.trim()},
+                "results": [
+                    {
+                        "type": "text_result",
+                        "ref_id": "turn0search0",
+                        "url": "https://example.com/structured-hit",
+                        "title": "Structured Codex Hit",
+                        "snippet": "From WebSearchItem.results"
+                    },
+                    {
+                        "type": "text_result",
+                        "ref_id": "turn0search1",
+                        "url": "javascript:alert(1)",
+                        "title": "Hostile"
+                    }
+                ]
+            })
+        } else {
+            // Older Codex exec reports only the search query/action here, not results.
+            json!({
+                "id": "search_1",
+                "type": "web_search",
+                "query": prompt.trim(),
+                "action": {"type": "search", "query": prompt.trim()}
+            })
+        };
         emit(
             &mut out,
             &json!({
                 "type": "item.completed",
-                "item": {
-                    "id": "search_1",
-                    "type": "web_search",
-                    "query": prompt.trim(),
-                    "action": {"type": "search", "query": prompt.trim()}
-                }
+                "item": web_search
             }),
         )?;
     }
@@ -412,7 +437,8 @@ fn exec(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCode> {
                 format!(
                     "You asked: {prompt}\n\n[--config=evil $(touch pwned) <b>bold</b>](https://example.com/codex-hostile) [run](javascript:alert(1)) https://user@evil.example/ https://example.com/codex-hostile"
                 )
-            } else if native_search && behavior != "search-no-links" {
+            } else if native_search && !matches!(behavior, "search-no-links" | "search-structured")
+            {
                 format!(
                     "You asked: {prompt}\n\n[Codex search result](https://example.com/codex-search)"
                 )

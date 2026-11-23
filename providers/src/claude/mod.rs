@@ -202,6 +202,10 @@ impl Launch {
             .args(args)
             .envs(self.inherited.iter().cloned())
             .env("DISABLE_AUTOUPDATER", "1")
+            // Skips startup GrowthBook/feature-flag network fetches on Claude
+            // Code 2.1.319+ without disabling telemetry (only affects Remote
+            // Control and auto-mode classifier fallback, neither used in `-p`).
+            .env("CLAUDE_CODE_DISABLE_FEATURE_FLAGS", "1")
             .env(
                 "PATH",
                 environment::search_path_for(executable, self.path.as_deref()),
