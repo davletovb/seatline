@@ -54,7 +54,11 @@ fn unsupported_service_tiers_are_refused_before_direct_or_readiness_processes() 
                 Fixture::Grok(fake) => Box::new(fake.adapter()),
                 Fixture::Codex(_) => unreachable!(),
             });
-            for tier in [ServiceTier::Standard, ServiceTier::Fast] {
+            for tier in [
+                ServiceTier::Standard,
+                ServiceTier::Fast,
+                ServiceTier::Ultrafast,
+            ] {
                 let request = Turn {
                     service_tier: Some(tier),
                     ..rig.ask("hi")
@@ -85,30 +89,36 @@ fn unsupported_service_tiers_are_refused_before_direct_or_readiness_processes() 
 }
 
 #[test]
-fn adapters_refuse_an_effort_choice_they_cannot_honor_without_launching() {
-    for kind in [Kind::Gemini, Kind::Grok] {
+fn every_provider_supports_reasoning_effort_and_refuses_unsupported_levels_before_launching() {
+    for kind in ALL {
+        let rig = Rig::new(kind, Behaviour::Answers);
+        assert_eq!(
+            rig.provider.capabilities().reasoning_effort,
+            Capability::Supported,
+            "{kind:?}"
+        );
+    }
+
+    // Claude and Gemini have no `none` level. Neither a status probe nor a
+    // generation may launch, even when readiness would fail because the
+    // executable is absent: the answer to a level an adapter lacks does not
+    // depend on the machine.
+    for kind in [Kind::Claude, Kind::Gemini] {
         for missing in [false, true] {
             let rig = if missing {
                 Rig::without_executable(kind)
             } else {
                 Rig::new(kind, Behaviour::Answers)
             };
-            assert_eq!(
-                rig.provider.capabilities().reasoning_effort,
-                Capability::Unsupported
-            );
-            let request = Turn {
-                reasoning_effort: Some(ReasoningEffort::Low),
-                ..rig.ask("hi")
-            };
-            // Neither status probes nor generations may launch, even when readiness
-            // would fail because the executable is absent or the account is signed out.
             let ready = Ready::boxed(match &rig.fixture {
                 Fixture::Claude(fake) => Box::new(fake.adapter()),
                 Fixture::Gemini(fake) => Box::new(fake.adapter()),
-                Fixture::Grok(fake) => Box::new(fake.adapter()),
-                Fixture::Codex(_) => unreachable!(),
+                _ => unreachable!(),
             });
+            let request = Turn {
+                reasoning_effort: Some(ReasoningEffort::None),
+                ..rig.ask("hi")
+            };
             for mut exchange in [
                 rig.provider.send(request.clone()),
                 ready.send_with_readiness(request.clone(), Freshness::Fresh),
@@ -124,58 +134,25 @@ fn adapters_refuse_an_effort_choice_they_cannot_honor_without_launching() {
                 let updates = run_to_end(exchange.as_mut());
                 assert_eq!(
                     failure(&updates),
-                    (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+                    (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED"),
+                    "{kind:?}"
                 );
-                assert_eq!(rig.command_lines(), "");
+                assert_eq!(rig.command_lines(), "", "{kind:?}");
                 rig.assert_nothing_left();
             }
         }
     }
-}
 
-#[test]
-fn claude_takes_every_effort_but_none_and_refuses_that_one_before_any_probe_or_launch() {
-    for missing in [false, true] {
-        let rig = if missing {
-            Rig::without_executable(Kind::Claude)
-        } else {
-            Rig::new(Kind::Claude, Behaviour::Answers)
-        };
-        assert_eq!(
-            rig.provider.capabilities().reasoning_effort,
-            Capability::Supported
-        );
-        let ready = Ready::boxed(match &rig.fixture {
-            Fixture::Claude(fake) => Box::new(fake.adapter()),
-            _ => unreachable!(),
-        });
+    // Codex and Grok accept `none` as well as `low..max`.
+    for kind in [Kind::Codex, Kind::Grok] {
+        let rig = Rig::new(kind, Behaviour::Answers);
         let request = Turn {
             reasoning_effort: Some(ReasoningEffort::None),
             ..rig.ask("hi")
         };
-        // Claude has no such level. Neither a status probe nor a generation may
-        // launch, even when readiness would fail because the executable is
-        // absent: the answer to a level it lacks does not depend on the machine.
-        for mut exchange in [
-            rig.provider.send(request.clone()),
-            ready.send_with_readiness(request.clone(), Freshness::Fresh),
-            ready.send_with_readiness_policy(
-                request,
-                Freshness::Fresh,
-                SignInPolicy::try_from(vec![
-                    seatline_core::turn::SignInClassification::Subscription,
-                ])
-                .unwrap(),
-            ),
-        ] {
-            let updates = run_to_end(exchange.as_mut());
-            assert_eq!(
-                failure(&updates),
-                (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
-            );
-            assert_eq!(rig.command_lines(), "");
-            rig.assert_nothing_left();
-        }
+        let updates = run_to_end(rig.provider.send(request).as_mut());
+        assert_eq!(updates.last(), Some(&Update::Completed), "{kind:?}");
+        rig.assert_nothing_left();
     }
 }
 

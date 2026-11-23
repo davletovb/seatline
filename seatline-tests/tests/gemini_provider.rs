@@ -822,3 +822,147 @@ fn pre_init_cleanup_scans_a_large_shared_tree_and_preserves_foreign_transcripts(
         "removed foreign data or missed the turn's transcript"
     );
 }
+
+#[test]
+fn reasoning_effort_forwards_supported_levels_and_normalizes_cli_or_model_refusals() {
+    use seatline_core::turn::ReasoningEffort;
+
+    let fake = FakeGemini::install(FIXTURES);
+    let adapter = fake.adapter();
+
+    for effort in [
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::Xhigh,
+        ReasoningEffort::Max,
+    ] {
+        let updates = run_to_end(
+            adapter
+                .send(Turn {
+                    reasoning_effort: Some(effort),
+                    ..ask("Say hello")
+                })
+                .as_mut(),
+        );
+        assert_eq!(updates.last(), Some(&Update::Completed), "{effort:?}");
+        let invocation = fake.invocations().last().unwrap().clone();
+        let wanted = format!("--effort {}", effort.as_str());
+        assert!(invocation.contains(&wanted), "{invocation}");
+    }
+
+    let flag_unknown = run_to_end(
+        adapter
+            .send(Turn {
+                reasoning_effort: Some(ReasoningEffort::High),
+                ..model("gemini-effort-flag-unknown")
+            })
+            .as_mut(),
+    );
+    assert_eq!(
+        failure(&flag_unknown),
+        (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+    );
+
+    let model_unsupported = run_to_end(
+        adapter
+            .send(Turn {
+                reasoning_effort: Some(ReasoningEffort::Max),
+                ..model("gemini-effort-model-unsupported")
+            })
+            .as_mut(),
+    );
+    assert_eq!(
+        failure(&model_unsupported),
+        (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+    );
+
+    let runtime_conflict = run_to_end(
+        adapter
+            .send(Turn {
+                reasoning_effort: Some(ReasoningEffort::High),
+                ..model("gemini-effort-conflict-runtime")
+            })
+            .as_mut(),
+    );
+    assert_eq!(
+        failure(&runtime_conflict),
+        (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+    );
+
+    // Matching embedded effort omits the redundant `--effort` flag.
+    let matching = run_to_end(
+        adapter
+            .send(Turn {
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                ..model("gemini-3.8-flash-medium")
+            })
+            .as_mut(),
+    );
+    assert_eq!(matching.last(), Some(&Update::Completed), "{matching:?}");
+    let matching_invocation = fake.invocations().last().unwrap().clone();
+    assert!(matching_invocation.contains("--model gemini-3.8-flash-medium"));
+    assert!(!matching_invocation.contains("--effort"));
+
+    // Conflicting embedded effort and `--effort` is refused before any probe
+    // or launch, both directly and through Ready.
+    let before = fake.invocations().len();
+    let conflicting_request = Turn {
+        reasoning_effort: Some(ReasoningEffort::High),
+        ..model("gemini-3.8-flash-medium")
+    };
+    let ready = seatline_providers::readiness::Ready::boxed(Box::new(fake.adapter()));
+    for mut exchange in [
+        adapter.send(conflicting_request.clone()),
+        ready.send_with_readiness(
+            conflicting_request,
+            seatline_core::readiness::Freshness::Fresh,
+        ),
+    ] {
+        let updates = run_to_end(exchange.as_mut());
+        assert_eq!(
+            failure(&updates),
+            (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+        );
+    }
+    assert_eq!(fake.invocations().len(), before);
+    assert_eq!(transcripts(&fake), 0);
+}
+
+#[test]
+fn result_usage_reports_cache_read_and_thinking_tokens() {
+    use seatline_core::turn::Usage;
+
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(fake.adapter().send(ask("Say hello")).as_mut());
+    assert_eq!(updates.last(), Some(&Update::Completed));
+    let usage = updates.iter().find_map(|update| match update {
+        Update::Usage(usage) => Some(*usage),
+        _ => None,
+    });
+    assert_eq!(
+        usage,
+        Some(Usage {
+            input_tokens: Some(137),
+            output_tokens: Some(54),
+            cached_input_tokens: Some(120),
+            cache_write_input_tokens: None,
+            reasoning_output_tokens: Some(45),
+        })
+    );
+}
+
+#[test]
+fn print_timeout_finished_reason_fails_closed_even_when_status_is_success() {
+    let fake = FakeGemini::install(FIXTURES);
+    let updates = run_to_end(fake.adapter().send(model("gemini-print-timeout")).as_mut());
+    assert_eq!(
+        failure(&updates),
+        (ErrorCode::ProviderFailed, "PROVIDER_TIMEOUT")
+    );
+    assert_eq!(
+        transcripts(&fake),
+        0,
+        "timed-out turn leaked its Antigravity transcript"
+    );
+}

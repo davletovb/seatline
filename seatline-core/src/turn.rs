@@ -101,12 +101,14 @@ impl ReasoningEffort {
 
 /// A requested processing tier, independent of the model's reasoning budget.
 /// Omission leaves the provider's configured tier in charge. An explicit
-/// Standard choice overrides a provider configuration that prefers Fast.
+/// Standard choice overrides a provider configuration that prefers Fast or
+/// Ultrafast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceTier {
     Standard,
     Fast,
+    Ultrafast,
 }
 
 impl ServiceTier {
@@ -114,6 +116,7 @@ impl ServiceTier {
         match self {
             Self::Standard => "standard",
             Self::Fast => "fast",
+            Self::Ultrafast => "ultrafast",
         }
     }
 }
@@ -335,7 +338,11 @@ mod tests {
         let turn: Turn = serde_json::from_value(old.clone()).unwrap();
         assert_eq!(turn.service_tier, None);
         assert_eq!(serde_json::to_value(turn).unwrap(), old);
-        for tier in [ServiceTier::Standard, ServiceTier::Fast] {
+        for tier in [
+            ServiceTier::Standard,
+            ServiceTier::Fast,
+            ServiceTier::Ultrafast,
+        ] {
             let mut value = old.clone();
             value["service_tier"] = serde_json::json!(tier.as_str());
             let turn: Turn = serde_json::from_value(value.clone()).unwrap();

@@ -118,8 +118,10 @@ pub struct Capabilities {
     /// that refusal for them.
     #[serde(default = "unknown_capability")]
     pub reasoning_effort: Capability,
-    /// The adapter can forward an explicit Standard/Fast tier. Availability
-    /// still depends on the installed CLI, selected model and account.
+    /// The adapter can forward an explicit Standard/Fast/Ultrafast tier.
+    /// Availability still depends on the installed CLI, selected model and
+    /// account. Older companions under `PROTOCOL_VERSION = 1` already report
+    /// `Supported` for Standard/Fast and reject `"ultrafast"` as unknown.
     #[serde(default = "unknown_capability")]
     pub service_tier: Capability,
     pub cancellation: Capability,

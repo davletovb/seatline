@@ -134,6 +134,18 @@ pub trait Provider {
         self.capabilities().reasoning_effort == Capability::Unsupported
     }
 
+    /// Whether a turn naming `model` and `effort` is refused without launching
+    /// anything (for example when a model slug already encodes a different
+    /// effort variant). Defaults to [`Self::refuses_reasoning_effort`].
+    fn refuses_reasoning_effort_for_model(
+        &self,
+        model: Option<&str>,
+        effort: ReasoningEffort,
+    ) -> bool {
+        let _ = model;
+        self.refuses_reasoning_effort(effort)
+    }
+
     /// Starts checking availability, authentication, and capabilities. The
     /// exchange reports one `Status` and then `Completed`.
     fn status(&self) -> Box<dyn Exchange>;

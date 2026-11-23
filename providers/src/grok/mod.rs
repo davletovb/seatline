@@ -30,7 +30,9 @@ use seatline_core::protocol::{
     Authentication, Availability, Capabilities, Capability, ErrorCode, ModelOption, ProviderState,
 };
 use seatline_core::stream::{BUSY_LIMIT, LineStream, Output};
-use seatline_core::turn::{Namespace, SessionPolicy, ToolPolicy, Turn as TurnRequest};
+use seatline_core::turn::{
+    Namespace, ReasoningEffort, SessionPolicy, ToolPolicy, Turn as TurnRequest,
+};
 use seatline_platform::discovery;
 use seatline_platform::environment;
 use seatline_platform::forget;
@@ -53,11 +55,11 @@ const STALE_WORKSPACE_AFTER: Duration = Duration::from_secs(15 * 60);
 const LEGACY_STALE_WORKSPACE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub const CAPABILITIES: Capabilities = Capabilities {
-    streaming: Capability::Unsupported,
+    streaming: Capability::Supported,
     continuation: Capability::Supported,
     web_search: Capability::Unsupported,
     model_selection: Capability::Supported,
-    reasoning_effort: Capability::Unsupported,
+    reasoning_effort: Capability::Supported,
     service_tier: Capability::Unsupported,
     cancellation: Capability::Supported,
     tool_isolation: Capability::Supported,
@@ -262,6 +264,13 @@ impl Launch {
             .env("GROK_FEEDBACK_ENABLED", "false")
             .env("GROK_FOLDER_TRUST", "0")
             .env("GROK_PROMPT_SUGGESTIONS", "false")
+            // Do not set `GROK_SANDBOX=read-only` (and `environment::inherit`
+            // strips any host `GROK_SANDBOX`): `GROK_HOME` is a private temp
+            // directory while `GROK_AUTH_PATH` points at the user's credential
+            // file so OAuth refreshes can lock `auth.json.lock` and atomically
+            // replace `auth.json` in its original directory. `read-only` limits
+            // writes to `$GROK_HOME` + temp (breaking OAuth renewal) and on
+            // Linux also requires `bubblewrap` for hook write-deny.
             .current_dir(cwd);
         if let Some(auth_path) = &self.auth_path {
             spec = spec.env("GROK_AUTH_PATH", auth_path.as_os_str());
@@ -430,9 +439,6 @@ impl Provider for Grok {
     }
 
     fn send(&self, request: TurnRequest) -> Box<dyn Exchange> {
-        if request.reasoning_effort.is_some() {
-            return Box::new(Scripted::failed(crate::REASONING_EFFORT_UNSUPPORTED));
-        }
         if request.service_tier.is_some() {
             return Box::new(Scripted::failed(crate::SERVICE_TIER_UNSUPPORTED));
         }
@@ -475,7 +481,11 @@ impl Provider for Grok {
             Err(_) => return Box::new(Scripted::failed(NO_WORKSPACE)),
         };
 
-        let args = grok_args(&workspace, request.model.as_deref());
+        let args = grok_args(
+            &workspace,
+            request.model.as_deref(),
+            request.reasoning_effort,
+        );
         let expected_cwd = workspace.path().to_path_buf();
         let spec = self
             .launch
@@ -491,9 +501,13 @@ impl Provider for Grok {
             queue: VecDeque::from([Update::Launched]),
             expected_cwd,
             requested_model: request.model,
+            requested_effort: request.reasoning_effort.is_some(),
             initialized: false,
             cancelled: false,
             saw_text: false,
+            streamed_in_message: false,
+            messages: 0,
+            break_before_text: false,
             outcome: None,
             finish_by: None,
             result_at: None,
@@ -768,7 +782,11 @@ impl Drop for TurnWorkspace {
     }
 }
 
-fn grok_args(workspace: &TurnWorkspace, model: Option<&str>) -> Vec<OsString> {
+fn grok_args(
+    workspace: &TurnWorkspace,
+    model: Option<&str>,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("--prompt-file"),
         workspace.prompt.as_os_str().to_os_string(),
@@ -796,6 +814,12 @@ fn grok_args(workspace: &TurnWorkspace, model: Option<&str>) -> Vec<OsString> {
     if let Some(model) = model {
         args.extend([OsString::from("--model"), OsString::from(model)]);
     }
+    if let Some(effort) = reasoning_effort {
+        args.extend([
+            OsString::from("--reasoning-effort"),
+            OsString::from(effort.as_str()),
+        ]);
+    }
     args
 }
 
@@ -806,9 +830,15 @@ struct Turn {
     queue: VecDeque<Update>,
     expected_cwd: PathBuf,
     requested_model: Option<String>,
+    requested_effort: bool,
     initialized: bool,
     cancelled: bool,
     saw_text: bool,
+    /// Partial `text_delta` frames already streamed the current message's text,
+    /// so the trailing full `assistant` frame for that message must not repeat it.
+    streamed_in_message: bool,
+    messages: usize,
+    break_before_text: bool,
     outcome: Option<Result<(), ErrorBody>>,
     finish_by: Option<Instant>,
     /// When Grok's final result was read: for telemetry.
@@ -822,6 +852,21 @@ impl Turn {
         self.outcome = Some(Err(error));
         self.finish_by = None;
         self.stream.cancel(Duration::ZERO);
+    }
+
+    fn show_text(&mut self, mut text: String) {
+        if text.is_empty() {
+            return;
+        }
+        if self.messages == 0 {
+            self.messages = 1;
+        }
+        if self.break_before_text && self.saw_text {
+            text.insert_str(0, "\n\n");
+        }
+        self.break_before_text = false;
+        self.saw_text = true;
+        self.queue.push_back(Update::Delta(text));
     }
 
     fn on_line(&mut self, line: &str) {
@@ -862,6 +907,27 @@ impl Turn {
                 self.initialized = true;
                 self.queue.push_back(Update::Started);
             }
+            Ok(Line::MessageStart) => {
+                if !self.initialized {
+                    return self.fail(MALFORMED_OUTPUT);
+                }
+                self.streamed_in_message = false;
+                if self.messages > 0 {
+                    self.break_before_text = true;
+                }
+                self.messages += 1;
+                self.queue.push_back(Update::Activity);
+            }
+            Ok(Line::TextDelta(text)) => {
+                if !self.initialized {
+                    return self.fail(MALFORMED_OUTPUT);
+                }
+                if !text.is_empty() {
+                    self.streamed_in_message = true;
+                    self.show_text(text);
+                }
+            }
+            Ok(Line::ForbiddenTool) => self.fail(BOUNDARY_VIOLATION),
             Ok(Line::Assistant {
                 text,
                 activity,
@@ -873,27 +939,44 @@ impl Turn {
                 if forbidden_tool {
                     return self.fail(BOUNDARY_VIOLATION);
                 }
-                if !text.is_empty() {
-                    self.saw_text = true;
-                    self.queue.push_back(Update::Delta(text));
-                } else if activity {
-                    self.queue.push_back(Update::Activity);
+                // Keep `streamed_in_message` set across all `assistant` frames
+                // belonging to the same message (split thinking/text blocks);
+                // only `Line::MessageStart` resets it for the next message.
+                if !self.streamed_in_message {
+                    if !text.is_empty() {
+                        if self.saw_text {
+                            self.break_before_text = true;
+                        }
+                        self.show_text(text);
+                    } else if activity {
+                        self.queue.push_back(Update::Activity);
+                    }
                 }
             }
-            Ok(Line::ResultSuccess { text }) => {
+            Ok(Line::ResultSuccess { text, usage }) => {
                 if !self.initialized {
                     return self.fail(MALFORMED_OUTPUT);
                 }
                 if !self.saw_text && !text.is_empty() {
-                    self.queue.push_back(Update::Delta(text));
+                    self.show_text(text);
+                }
+                if usage.input_tokens.is_some() || usage.output_tokens.is_some() {
+                    self.queue.push_back(Update::Usage(usage));
                 }
                 self.result_at.get_or_insert_with(Instant::now);
                 self.outcome = Some(Ok(()));
                 self.finish_by = Some(private_fs::after(FINISH_GRACE));
             }
-            Ok(Line::ResultFailed(error)) => {
+            Ok(Line::ResultFailed {
+                error,
+                effort_unsupported,
+            }) => {
                 self.result_at.get_or_insert_with(Instant::now);
-                self.fail(error)
+                if self.requested_effort && effort_unsupported {
+                    self.fail(crate::REASONING_EFFORT_UNSUPPORTED);
+                } else {
+                    self.fail(error);
+                }
             }
             Ok(Line::Activity) if self.initialized => self.queue.push_back(Update::Activity),
             Ok(Line::Activity | Line::Ignored) => {}
@@ -912,8 +995,14 @@ impl Turn {
                 Update::Failed(MALFORMED_OUTPUT)
             }
             None => {
-                let failure =
-                    output::provider_failure(&String::from_utf8_lossy(self.stream.stderr_tail()));
+                let stderr = String::from_utf8_lossy(self.stream.stderr_tail());
+                if !self.initialized
+                    && self.requested_effort
+                    && output::names_unsupported_effort(&stderr)
+                {
+                    return Update::Failed(crate::REASONING_EFFORT_UNSUPPORTED);
+                }
+                let failure = output::provider_failure(&stderr);
                 if failure.reason == "PROVIDER_UNAVAILABLE" {
                     Update::Failed(PROCESS_EXITED)
                 } else {
@@ -1051,7 +1140,7 @@ mod tests {
             agent: PathBuf::from("/tmp/my-app-grok/agent.md"),
             owner: owner_file(&Namespace::fixed("my-app").unwrap()),
         };
-        let args = grok_args(&workspace, Some("grok-4.6"));
+        let args = grok_args(&workspace, Some("grok-4.6"), Some(ReasoningEffort::High));
         let rendered: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
         assert!(
             rendered
@@ -1062,6 +1151,11 @@ mod tests {
             rendered
                 .windows(2)
                 .any(|pair| pair == ["--model", "grok-4.6"])
+        );
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair == ["--reasoning-effort", "high"])
         );
         assert!(rendered.contains(&std::borrow::Cow::Borrowed("streaming-messages-json")));
         assert!(
@@ -1090,11 +1184,12 @@ mod tests {
 
     #[test]
     fn capabilities_match_the_provider_contract() {
-        assert_eq!(CAPABILITIES.streaming, Capability::Unsupported);
+        assert_eq!(CAPABILITIES.streaming, Capability::Supported);
         assert_eq!(CAPABILITIES.continuation, Capability::Supported);
         assert_eq!(CAPABILITIES.web_search, Capability::Unsupported);
         assert_eq!(CAPABILITIES.tool_isolation, Capability::Supported);
         assert_eq!(CAPABILITIES.model_selection, Capability::Supported);
+        assert_eq!(CAPABILITIES.reasoning_effort, Capability::Supported);
         assert_eq!(CAPABILITIES.cancellation, Capability::Supported);
     }
 
@@ -1118,7 +1213,7 @@ mod tests {
             agent: PathBuf::from("/tmp/my-app-grok/agent.md"),
             owner: owner_file(&Namespace::fixed("my-app").unwrap()),
         };
-        let args = grok_args(&workspace, None);
+        let args = grok_args(&workspace, None, None);
         let rendered: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
         assert!(
             rendered
@@ -1131,6 +1226,7 @@ mod tests {
                 .any(|pair| pair == ["--disallowed-tools", "Agent,search_tool,use_tool"])
         );
         assert!(rendered.contains(&std::borrow::Cow::Borrowed("--disable-web-search")));
+        assert!(!rendered.iter().any(|arg| arg == "--reasoning-effort"));
         std::mem::forget(workspace);
     }
 

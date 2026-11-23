@@ -215,12 +215,20 @@ impl Launch {
     /// on `--resume` in 2.1.328, pre-approval shell startup in 2.1.327,
     /// WebFetch, Advisor tool, MCP tasks, and prompt-triggered ultrathink on
     /// non-provider-default turns). Older Claude builds ignore unknown env vars.
+    ///
+    /// When `disable_feature_flags` is true (opt-in isolated restricted turns),
+    /// sets `CLAUDE_CODE_DISABLE_FEATURE_FLAGS=1` (`2.1.319+`), which disables
+    /// all GrowthBook remote feature-flag fetches (serving cached/default gate
+    /// values without disabling telemetry). `auth status`, `ProviderDefault`,
+    /// and non-isolated turns keep GrowthBook enabled so account-synced
+    /// customizations and remote kill switches remain active.
     fn turn_command<I>(
         &self,
         workspace: &Path,
         executable: &Path,
         args: I,
         disable_ultrathink: bool,
+        disable_feature_flags: bool,
     ) -> ProcessSpec
     where
         I: IntoIterator,
@@ -236,6 +244,9 @@ impl Launch {
             .env("CLAUDE_CODE_DISABLE_SHELL_HEAD_START", "1");
         if disable_ultrathink {
             spec = spec.env("CLAUDE_CODE_DISABLE_ULTRATHINK", "1");
+        }
+        if disable_feature_flags {
+            spec = spec.env("CLAUDE_CODE_DISABLE_FEATURE_FLAGS", "1");
         }
         spec
     }
@@ -1036,6 +1047,7 @@ impl Turn {
             &self.executable,
             args,
             self.disable_ultrathink,
+            self.isolate,
         )) {
             Ok(mut process) => {
                 let _ = process.write(input.as_bytes());

@@ -208,8 +208,22 @@ see which happened or check the level against the model. An application should
 word the setting as a preference; one that has to know what ran cannot learn it
 from Claude's CLI today.
 
-Gemini and Grok refuse explicit effort with `REASONING_EFFORT_UNSUPPORTED`
-before launching anything, including readiness probes on checked-send paths.
+Gemini (`agy`) supports `low`, `medium`, `high`, `xhigh` and `max`, passed via
+`--effort <level>`. Like Claude, Antigravity has no `none`, so `none` is refused
+with `REASONING_EFFORT_UNSUPPORTED` before launching anything, including
+readiness probes on checked-send paths. Antigravity's `agy models` catalog also
+lists effort-qualified slugs such as `gemini-3.8-flash-medium`: when a turn
+specifies both an effort-qualified slug and a conflicting `reasoning_effort`,
+Seatline refuses it with `REASONING_EFFORT_UNSUPPORTED` before launching
+anything (when they agree, the redundant `--effort` flag is omitted). Older
+`agy` CLIs that reject `--effort` and models that reject a specific effort
+level are normalized to `REASONING_EFFORT_UNSUPPORTED`.
+
+Grok supports `none`, `low`, `medium`, `high`, `xhigh` and `max`, passed via
+`--reasoning-effort <level>`. Both older `grok` CLIs that reject
+`--reasoning-effort` and newer CLIs or models that reject an effort level via
+stderr or a terminal JSON error result are normalized to
+`REASONING_EFFORT_UNSUPPORTED`.
 Applications own whether this comes from a saved setting and which default
 they choose; Seatline does not impose a writing-specific budget.
 
@@ -221,20 +235,26 @@ capability and send an explicit budget only when it is `Supported` (`true` on
 the wire); omit it for `Unknown` or `Unsupported`. See the official [Codex config
 reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
-The optional generic `turn.service_tier` accepts `standard` or `fast`.
-Omission/null retains the provider's configured tier. An explicit Standard
-request overrides a globally configured Fast preference. Codex receives
-`-c 'service_tier="default"' -c 'features.fast_mode=false'` for Standard, or
-`-c 'service_tier="fast"' -c 'features.fast_mode=true'` for Fast. These
-invocation-only overrides leave model, reasoning effort and user config
-unchanged; Codex maps Fast to its priority request tier.
+The optional generic `turn.service_tier` accepts `standard`, `fast`, or
+`ultrafast`. Omission/null retains the provider's configured tier. An explicit
+Standard request overrides a globally configured Fast or Ultrafast preference.
+Codex receives `-c 'service_tier="default"' -c 'features.fast_mode=false' -c 'features.ultrafast_mode=false'`
+for Standard, `-c 'service_tier="fast"' -c 'features.fast_mode=true' -c 'features.ultrafast_mode=false'`
+for Fast, or `-c 'service_tier="ultrafast"' -c 'features.fast_mode=false' -c 'features.ultrafast_mode=true'`
+for Ultrafast. These invocation-only overrides leave model, reasoning effort
+and user config unchanged; Codex maps Fast to its priority request tier.
 
 `status.capabilities.service_tier` describes adapter forwarding support, not
 availability for every installed CLI, model, plan or workspace. Applications
-must require Supported (`true`) before sending either explicit tier; older
+must require Supported (`true`) before sending an explicit tier; older
 status records deserialize as Unknown and older companions reject the new
-turn field. Claude/Gemini/Grok refuse either explicit tier with
-`SERVICE_TIER_UNSUPPORTED` before executable discovery or readiness probes.
+turn field. Because `PROTOCOL_VERSION` stays `1`, a shared companion built
+before `ultrafast` was added already reports `service_tier: true` for Codex
+and will reject `"ultrafast"` as an unknown tier value; applications sending
+`"ultrafast"` should require a companion built with `ServiceTier::Ultrafast`
+support (or handle an invalid-request refusal from an older companion).
+Claude/Gemini/Grok refuse any explicit tier with `SERVICE_TIER_UNSUPPORTED`
+before executable discovery or readiness probes.
 Rust callers updating their pin add `service_tier: None` to full `Turn`
 literals and the field to full `Capabilities` literals. There is no automatic
 retry using another tier. See the official [Codex speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed)

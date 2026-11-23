@@ -275,7 +275,7 @@ fn every_adapter_reports_when_it_read_the_providers_result_and_what_it_used() {
     assert!(matches!(reason, EndReason::Failed(_)), "{reason:?}");
     assert_eq!(timeline.tail_us(), None);
 
-    // Antigravity (Gemini): totals only.
+    // Antigravity (Gemini): input, output, cached read, and thinking tokens.
     let gemini = FakeGemini::install(FIXTURES);
     let turn = Turn {
         model: Some("gemini-test".to_owned()),
@@ -289,13 +289,15 @@ fn every_adapter_reports_when_it_read_the_providers_result_and_what_it_used() {
     assert_eq!(
         timeline.usage(),
         Some(Usage {
-            input_tokens: Some(17),
-            output_tokens: Some(9),
-            ..Usage::default()
+            input_tokens: Some(137),
+            output_tokens: Some(54),
+            cached_input_tokens: Some(120),
+            cache_write_input_tokens: None,
+            reasoning_output_tokens: Some(45),
         })
     );
 
-    // Grok.
+    // Grok: Messages API disjoint input buckets summed into input_tokens.
     let grok = FakeGrok::install(FIXTURES);
     let turn = Turn {
         model: Some("grok-4.6".to_owned()),
@@ -304,4 +306,14 @@ fn every_adapter_reports_when_it_read_the_providers_result_and_what_it_used() {
     let (reason, timeline) = timed(|| grok.adapter().send(turn.clone()), Kind::Send);
     assert_eq!(reason, EndReason::Completed);
     assert!(timeline.tail_us().is_some());
+    assert_eq!(
+        timeline.usage(),
+        Some(Usage {
+            input_tokens: Some(550),
+            output_tokens: Some(25),
+            cached_input_tokens: Some(400),
+            cache_write_input_tokens: Some(50),
+            reasoning_output_tokens: None,
+        })
+    );
 }

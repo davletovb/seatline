@@ -29,7 +29,7 @@ use seatline_core::protocol::{
 use seatline_core::search::{NATIVE_SEARCH_NO_SOURCES, SourceCollector, codex_message_sources};
 use seatline_core::stream::{BUSY_LIMIT, LineStream, Output};
 use seatline_core::turn::{
-    Namespace, SessionPolicy, ToolPolicy, Turn as TurnRequest, is_cleanup_group,
+    Namespace, ReasoningEffort, SessionPolicy, ToolPolicy, Turn as TurnRequest, is_cleanup_group,
 };
 use seatline_platform::discovery;
 use seatline_platform::environment;
@@ -55,7 +55,7 @@ pub const CAPABILITIES: Capabilities = Capabilities {
     continuation: Capability::Supported,
     web_search: Capability::Supported,
     model_selection: Capability::Supported,
-    reasoning_effort: Capability::Unsupported,
+    reasoning_effort: Capability::Supported,
     service_tier: Capability::Unsupported,
     cancellation: Capability::Supported,
     tool_isolation: Capability::Supported,
@@ -226,6 +226,9 @@ impl Launch {
                 environment::search_path_for(executable, self.path.as_deref()),
             )
             .env("AGY_CLI_DISABLE_AUTO_UPDATE", "true")
+            // Skips bundled ripgrep extraction on cold start (`agy` 1.5.5+);
+            // Seatline's agents expose no file or grep tools.
+            .env("ANTIGRAVITY_DISABLE_EMBEDDED_RIPGREP", "true")
             .current_dir(cwd)
     }
 }
@@ -341,6 +344,21 @@ impl Provider for Gemini {
         true
     }
 
+    fn refuses_reasoning_effort(&self, effort: ReasoningEffort) -> bool {
+        effort_level(effort).is_none()
+    }
+
+    fn refuses_reasoning_effort_for_model(
+        &self,
+        model: Option<&str>,
+        effort: ReasoningEffort,
+    ) -> bool {
+        self.refuses_reasoning_effort(effort)
+            || model
+                .and_then(model_embedded_effort)
+                .is_some_and(|embedded| embedded != effort)
+    }
+
     fn invalidate_readiness(&self) {
         self.search.invalidate();
     }
@@ -398,7 +416,9 @@ impl Provider for Gemini {
     }
 
     fn send(&self, request: TurnRequest) -> Box<dyn Exchange> {
-        if request.reasoning_effort.is_some() {
+        if request.reasoning_effort.is_some_and(|effort| {
+            self.refuses_reasoning_effort_for_model(request.model.as_deref(), effort)
+        }) {
             return Box::new(Scripted::failed(crate::REASONING_EFFORT_UNSUPPORTED));
         }
         if request.service_tier.is_some() {
@@ -479,7 +499,7 @@ impl Provider for Gemini {
         .to_string()
             + "
 ";
-        let args = agy_args(&agent, request.model.as_deref());
+        let args = agy_args(&agent, request.model.as_deref(), request.reasoning_effort);
         let spec = self.launch.command(workspace.path(), &executable, args);
         Box::new(Turn {
             stream: None,
@@ -499,6 +519,7 @@ impl Provider for Gemini {
             queue: VecDeque::new(),
             cleanup_group,
             expected_agent: agent,
+            requested_effort: request.reasoning_effort.is_some(),
             initialized: false,
             antigravity_conversation: None,
             cancelled: false,
@@ -871,6 +892,7 @@ struct Turn {
     /// Groups this turn's cleanup records with the others of its group.
     cleanup_group: String,
     expected_agent: String,
+    requested_effort: bool,
     initialized: bool,
     antigravity_conversation: Option<String>,
     cancelled: bool,
@@ -1087,9 +1109,16 @@ impl Turn {
                 self.outcome = Some(outcome);
                 self.finish_by = Some(private_fs::after(FINISH_GRACE));
             }
-            Ok(Line::ResultFailed(error)) => {
+            Ok(Line::ResultFailed {
+                error,
+                effort_unsupported,
+            }) => {
                 self.result_at.get_or_insert_with(Instant::now);
-                self.fail(error)
+                if self.requested_effort && effort_unsupported {
+                    self.fail(crate::REASONING_EFFORT_UNSUPPORTED);
+                } else {
+                    self.fail(error);
+                }
             }
             Ok(Line::Ignored) => {}
         }
@@ -1226,7 +1255,14 @@ impl Turn {
                     .stream
                     .as_ref()
                     .map_or(&[][..], LineStream::stderr_tail);
-                let failure = output::provider_failure(&String::from_utf8_lossy(stderr));
+                let stderr = String::from_utf8_lossy(stderr);
+                if !self.initialized
+                    && self.requested_effort
+                    && output::names_unsupported_effort(&stderr)
+                {
+                    return Update::Failed(crate::REASONING_EFFORT_UNSUPPORTED);
+                }
+                let failure = output::provider_failure(&stderr);
                 if failure.reason == "PROVIDER_UNAVAILABLE" {
                     Update::Failed(PROCESS_EXITED)
                 } else {
@@ -1411,7 +1447,42 @@ fn clean_runtime(
     first_error.map_or(Ok(()), Err)
 }
 
-fn agy_args(agent: &str, model: Option<&str>) -> Vec<OsString> {
+/// Returns the reasoning effort encoded in an Antigravity effort-qualified model
+/// slug such as `gemini-3.8-flash-medium` or `gemini-4-neon-xhigh`, if any.
+fn model_embedded_effort(model: &str) -> Option<ReasoningEffort> {
+    let (prefix, suffix) = model.rsplit_once('-')?;
+    if prefix.is_empty() {
+        return None;
+    }
+    match suffix.to_ascii_lowercase().as_str() {
+        "low" => Some(ReasoningEffort::Low),
+        "medium" => Some(ReasoningEffort::Medium),
+        "high" => Some(ReasoningEffort::High),
+        "xhigh" => Some(ReasoningEffort::Xhigh),
+        "max" => Some(ReasoningEffort::Max),
+        _ => None,
+    }
+}
+
+/// The level `agy --effort` takes for `effort`, or `None` when Antigravity has
+/// no such level. Antigravity accepts `low` through `max` and has no `none`, so
+/// `ReasoningEffort::None` is refused before any probe or launch.
+fn effort_level(effort: ReasoningEffort) -> Option<&'static str> {
+    match effort {
+        ReasoningEffort::None => None,
+        ReasoningEffort::Low => Some("low"),
+        ReasoningEffort::Medium => Some("medium"),
+        ReasoningEffort::High => Some("high"),
+        ReasoningEffort::Xhigh => Some("xhigh"),
+        ReasoningEffort::Max => Some("max"),
+    }
+}
+
+fn agy_args(
+    agent: &str,
+    model: Option<&str>,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("--input-format"),
         OsString::from("stream-json"),
@@ -1425,6 +1496,17 @@ fn agy_args(agent: &str, model: Option<&str>) -> Vec<OsString> {
     ];
     if let Some(model) = model {
         args.extend([OsString::from("--model"), OsString::from(model)]);
+    }
+    // When the model slug already embeds the matching effort (e.g.
+    // `gemini-3.8-flash-medium` with `Medium`), omit the redundant `--effort`
+    // flag. Conflicting pairs are rejected before launch.
+    let matches_embedded = model
+        .and_then(model_embedded_effort)
+        .is_some_and(|embedded| Some(embedded) == reasoning_effort);
+    if !matches_embedded {
+        if let Some(level) = reasoning_effort.and_then(effort_level) {
+            args.extend([OsString::from("--effort"), OsString::from(level)]);
+        }
     }
     args
 }
@@ -1630,7 +1712,11 @@ mod tests {
     #[test]
     fn arguments_use_stream_json_a_private_agent_and_keep_prompt_out_of_argv() {
         let search_agent = agent_name(&Namespace::fixed("my-app").unwrap(), true);
-        let args = agy_args(&search_agent, Some("gemini-3-pro"));
+        let args = agy_args(
+            &search_agent,
+            Some("gemini-3-pro"),
+            Some(ReasoningEffort::High),
+        );
         let strings: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
         assert!(
             strings
@@ -1642,6 +1728,7 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair == ["--model", "gemini-3-pro"])
         );
+        assert!(strings.windows(2).any(|pair| pair == ["--effort", "high"]));
         assert!(strings.contains(&std::borrow::Cow::Borrowed("--sandbox")));
         assert_eq!(
             strings.iter().filter(|arg| **arg == "stream-json").count(),
@@ -1652,6 +1739,26 @@ mod tests {
                 .iter()
                 .any(|arg| arg.contains("Current user question"))
         );
+        assert!(effort_level(ReasoningEffort::None).is_none());
+        let no_effort = agy_args(&search_agent, None, None);
+        assert!(!no_effort.iter().any(|arg| arg == "--effort"));
+
+        // Matching embedded effort omits the redundant `--effort` flag.
+        assert_eq!(
+            model_embedded_effort("gemini-3.8-flash-medium"),
+            Some(ReasoningEffort::Medium)
+        );
+        assert_eq!(
+            model_embedded_effort("gemini-4-neon-xhigh"),
+            Some(ReasoningEffort::Xhigh)
+        );
+        assert_eq!(model_embedded_effort("gemini-3-pro"), None);
+        let matching = agy_args(
+            &search_agent,
+            Some("gemini-3.8-flash-medium"),
+            Some(ReasoningEffort::Medium),
+        );
+        assert!(!matching.iter().any(|arg| arg == "--effort"));
     }
 
     #[test]
@@ -1678,6 +1785,7 @@ mod tests {
         assert_eq!(CAPABILITIES.web_search, Capability::Supported);
         assert_eq!(CAPABILITIES.tool_isolation, Capability::Supported);
         assert_eq!(CAPABILITIES.model_selection, Capability::Supported);
+        assert_eq!(CAPABILITIES.reasoning_effort, Capability::Supported);
         assert_eq!(CAPABILITIES.cancellation, Capability::Supported);
     }
 

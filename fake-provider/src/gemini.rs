@@ -21,6 +21,11 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
 }
 
 fn run(args: Vec<OsString>) -> Result<(), ()> {
+    if std::env::var_os("ANTIGRAVITY_DISABLE_EMBEDDED_RIPGREP").as_deref()
+        != Some(OsStr::new("true"))
+    {
+        return Err(());
+    }
     if args.first().is_some_and(|arg| arg == OsStr::new("models")) {
         crate::record("agy", "probes", "models\n");
         match crate::readiness_scenario("agy").as_str() {
@@ -90,6 +95,12 @@ fn run(args: Vec<OsString>) -> Result<(), ()> {
 
     if model.as_deref() == Some("gemini-auth-fail") {
         eprintln!("authentication required");
+        return Err(());
+    }
+    if model.as_deref() == Some("gemini-effort-flag-unknown")
+        && value_after(&args, "--effort").is_some()
+    {
+        eprintln!("Error: unknown flag: --effort");
         return Err(());
     }
 
@@ -175,6 +186,64 @@ fn run(args: Vec<OsString>) -> Result<(), ()> {
             }
         }),
     )?;
+
+    if model.as_deref() == Some("gemini-effort-model-unsupported") {
+        let level = value_after(&args, "--effort").unwrap_or_else(|| "max".to_owned());
+        line(
+            &mut stdout,
+            &serde_json::json!({
+                "event":"result",
+                "result":{
+                    "conversation_id":session,
+                    "status":"ERROR",
+                    "error":format!("gemini-effort-model-unsupported has no \"{level}\" effort (available: low, medium, high)")
+                }
+            }),
+        )?;
+        return Err(());
+    }
+
+    if model.as_deref() == Some("gemini-effort-conflict-runtime") {
+        let level = value_after(&args, "--effort").unwrap_or_else(|| "high".to_owned());
+        line(
+            &mut stdout,
+            &serde_json::json!({
+                "event":"result",
+                "result":{
+                    "conversation_id":session,
+                    "status":"ERROR",
+                    "error":format!("invalid model selection (--model \"gemini-effort-conflict-runtime\" --effort \"{level}\"): --model gemini-effort-conflict-runtime conflicts with --effort={level}")
+                }
+            }),
+        )?;
+        return Err(());
+    }
+
+    if model.as_deref() == Some("gemini-print-timeout") {
+        line(
+            &mut stdout,
+            &serde_json::json!({
+                "event":"step_update",
+                "step_update":{
+                    "conversation_id":session,"step_index":10,"state":"ACTIVE",
+                    "step_type":"agent_response","text_delta":"Partial before timeout"
+                }
+            }),
+        )?;
+        line(
+            &mut stdout,
+            &serde_json::json!({
+                "event":"result",
+                "result":{
+                    "conversation_id":session,
+                    "status":"SUCCESS",
+                    "response":"Partial before timeout",
+                    "finished_reason":"print_timeout"
+                }
+            }),
+        )?;
+        return Ok(());
+    }
 
     if model.as_deref() == Some("gemini-unknown-step") {
         line(
@@ -297,7 +366,13 @@ fn run(args: Vec<OsString>) -> Result<(), ()> {
                 "conversation_id":session,
                 "status":"SUCCESS",
                 "response":answer,
-                "usage":{"input_tokens":17,"output_tokens":9,"total_tokens":26}
+                "usage":{
+                    "input_tokens":17,
+                    "output_tokens":54,
+                    "cache_read_tokens":120,
+                    "thinking_tokens":45,
+                    "total_tokens":71
+                }
             }
         }),
     )?;

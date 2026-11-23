@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use seatline_core::protocol::ErrorCode;
 use seatline_core::protocol::Failure as ErrorBody;
+use seatline_core::turn::Usage;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Line {
@@ -15,6 +16,10 @@ pub enum Line {
         skills: Vec<String>,
         all_mcp_disabled: bool,
     },
+    MessageStart,
+    TextDelta(String),
+    /// A streaming content block started a forbidden client or server tool.
+    ForbiddenTool,
     Assistant {
         text: String,
         activity: bool,
@@ -22,8 +27,12 @@ pub enum Line {
     },
     ResultSuccess {
         text: String,
+        usage: Usage,
     },
-    ResultFailed(ErrorBody),
+    ResultFailed {
+        error: ErrorBody,
+        effort_unsupported: bool,
+    },
     Activity,
     Ignored,
 }
@@ -79,29 +88,116 @@ pub fn parse(line: &str) -> Result<Line, Malformed> {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_owned(),
+                    usage: parse_usage(event.get("usage")),
                 }
             } else {
-                let message = event
+                let error_messages: Vec<&str> = event
                     .get("errors")
                     .and_then(Value::as_array)
-                    .and_then(|errors| errors.first())
-                    .and_then(|error| {
-                        error
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .or_else(|| error.as_str())
+                    .map(|errors| {
+                        errors
+                            .iter()
+                            .filter_map(|error| {
+                                error
+                                    .get("message")
+                                    .and_then(Value::as_str)
+                                    .or_else(|| error.as_str())
+                            })
+                            .collect()
                     })
-                    .or_else(|| event.get("result").and_then(Value::as_str))
                     .unwrap_or_default();
-                Line::ResultFailed(provider_failure(message))
+                let top_level = event.get("result").and_then(Value::as_str);
+                let primary = error_messages
+                    .first()
+                    .copied()
+                    .or(top_level)
+                    .unwrap_or_default();
+                let effort_unsupported = error_messages
+                    .iter()
+                    .copied()
+                    .chain(top_level)
+                    .any(names_unsupported_effort);
+                Line::ResultFailed {
+                    error: provider_failure(primary),
+                    effort_unsupported,
+                }
             }
         }
-        // The adapter does not expose token-level Grok streaming yet, but partial
-        // frames prove that the provider is still making progress and must
-        // refresh the idle timer.
-        "stream_event" => Line::Activity,
+        "stream_event" => parse_stream_event(&event)?,
         _ => Line::Ignored,
     })
+}
+
+fn parse_stream_event(event: &Value) -> Result<Line, Malformed> {
+    let nested = event
+        .get("event")
+        .filter(|value| value.is_object())
+        .ok_or(Malformed)?;
+    Ok(
+        match nested
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "message_start" => Line::MessageStart,
+            "content_block_start" => match nested
+                .pointer("/content_block/type")
+                .and_then(Value::as_str)
+            {
+                Some("tool_use" | "tool_result" | "server_tool_use" | "web_search_tool_result") => {
+                    Line::ForbiddenTool
+                }
+                Some("text" | "thinking" | "redacted_thinking") | None => Line::Activity,
+                Some(_) => return Err(Malformed),
+            },
+            "content_block_delta" => match nested.get("delta").and_then(Value::as_object) {
+                Some(delta) if delta.get("type").and_then(Value::as_str) == Some("text_delta") => {
+                    Line::TextDelta(
+                        delta
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .ok_or(Malformed)?
+                            .to_owned(),
+                    )
+                }
+                _ => Line::Activity,
+            },
+            _ => Line::Activity,
+        },
+    )
+}
+
+/// Grok's `streaming-messages-json` reports the three Messages API prompt-side
+/// buckets disjoint (`input_tokens` uncached, `cache_read_input_tokens`,
+/// `cache_creation_input_tokens`), counts reasoning tokens within
+/// `output_tokens`, and falls back to all zeros when the turn's usage ledger is
+/// absent or incomplete: read an all-zero object as unknown.
+fn parse_usage(usage: Option<&Value>) -> Usage {
+    let Some(usage) = usage.filter(|value| value.is_object()) else {
+        return Usage::default();
+    };
+    let input = usage.get("input_tokens").and_then(Value::as_u64);
+    let cache_creation = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64);
+    let cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_u64);
+    let output = usage.get("output_tokens").and_then(Value::as_u64);
+    let reasoning = usage.get("reasoning_tokens").and_then(Value::as_u64);
+    let total_input = input
+        .unwrap_or(0)
+        .saturating_add(cache_creation.unwrap_or(0))
+        .saturating_add(cache_read.unwrap_or(0));
+    if total_input == 0 && output.unwrap_or(0) == 0 {
+        return Usage::default();
+    }
+    Usage {
+        input_tokens: (input.is_some() || cache_creation.is_some() || cache_read.is_some())
+            .then_some(total_input),
+        output_tokens: output,
+        cached_input_tokens: cache_read,
+        cache_write_input_tokens: cache_creation,
+        reasoning_output_tokens: reasoning,
+    }
 }
 
 fn required_string(event: &Value, key: &str) -> Result<String, Malformed> {
@@ -247,6 +343,40 @@ pub fn provider_failure(message: &str) -> ErrorBody {
     }
 }
 
+/// Whether Grok's pre-init stderr or terminal error result says either the
+/// installed CLI rejected `--reasoning-effort` / `--effort` or the chosen
+/// model / API does not support the requested reasoning effort level.
+pub fn names_unsupported_effort(message: &str) -> bool {
+    message.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        let names_flag = lower.contains("--reasoning-effort") || lower.contains("--effort");
+        let flag_rejected = names_flag
+            && (lower.contains("unexpected argument")
+                || lower.contains("unknown option")
+                || lower.contains("unrecognized option")
+                || lower.contains("invalid value")
+                || lower.contains("unknown effort level")
+                || lower.contains("no active model to apply effort")
+                || lower.contains("does not support")
+                || lower.contains("not supported"));
+        let names_effort = lower.contains("reasoning effort")
+            || lower.contains("reasoning_effort")
+            || lower.contains("reasoningeffort")
+            || lower.contains("effort level")
+            || lower.contains("effort levels");
+        let model_rejected = names_effort
+            && (lower.contains("unknown effort level")
+                || lower.contains("does not support")
+                || lower.contains("doesn't support")
+                || lower.contains("not supported")
+                || lower.contains("unsupported")
+                || lower.contains("invalid")
+                || lower.contains("no selectable effort")
+                || lower.contains("rejected"));
+        flag_rejected || model_rejected
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,10 +447,98 @@ mod tests {
     }
 
     #[test]
-    fn partial_frames_are_activity() {
+    fn partial_frames_stream_text_and_reject_forbidden_tools() {
+        assert_eq!(
+            parse(r#"{"type":"stream_event","event":{"type":"message_start"}}"#).unwrap(),
+            Line::MessageStart
+        );
+        assert_eq!(
+            parse(r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi "}}}"#).unwrap(),
+            Line::TextDelta("hi ".to_owned())
+        );
+        assert_eq!(
+            parse(r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"..."}}}"#).unwrap(),
+            Line::Activity
+        );
         assert_eq!(
             parse(r#"{"type":"stream_event","event":{"type":"content_block_delta"}}"#).unwrap(),
             Line::Activity
+        );
+        for block in [
+            "tool_use",
+            "tool_result",
+            "server_tool_use",
+            "web_search_tool_result",
+        ] {
+            let line = format!(
+                r#"{{"type":"stream_event","event":{{"type":"content_block_start","content_block":{{"type":"{block}"}}}}}}"#
+            );
+            assert_eq!(parse(&line).unwrap(), Line::ForbiddenTool, "{block}");
+        }
+        assert!(
+            parse(r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"future_exec_block"}}}"#).is_err()
+        );
+        assert!(parse(r#"{"type":"stream_event"}"#).is_err());
+        assert!(
+            parse(r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":7}}}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn result_usage_sums_disjoint_input_buckets_and_treats_all_zeros_as_unknown() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"input_tokens":7210,"cache_read_input_tokens":41000,"cache_creation_input_tokens":200,"output_tokens":1893,"reasoning_tokens":412}}"#;
+        assert_eq!(
+            parse(line),
+            Ok(Line::ResultSuccess {
+                text: "done".to_owned(),
+                usage: Usage {
+                    input_tokens: Some(48_410),
+                    output_tokens: Some(1893),
+                    cached_input_tokens: Some(41_000),
+                    cache_write_input_tokens: Some(200),
+                    reasoning_output_tokens: Some(412),
+                },
+            })
+        );
+
+        let all_zero = r#"{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0}}"#;
+        assert_eq!(
+            parse(all_zero),
+            Ok(Line::ResultSuccess {
+                text: "done".to_owned(),
+                usage: Usage::default(),
+            })
+        );
+    }
+
+    #[test]
+    fn unsupported_effort_cli_and_model_errors_are_recognized() {
+        for message in [
+            "error: unexpected argument '--reasoning-effort=high' found\n",
+            "error: unknown option '--effort'\n",
+            "--effort/--reasoning-effort: unknown effort level 'max'; use one of: low, high",
+            "--effort/--reasoning-effort: unknown effort level 'max'; this model has no selectable effort levels",
+            "--effort/--reasoning-effort: current model does not support reasoning effort",
+            "Model grok-4 does not support parameter reasoningEffort",
+            "reasoning_effort is not supported for this model",
+        ] {
+            assert!(names_unsupported_effort(message), "{message}");
+        }
+        for message in [
+            "Usage: grok [--reasoning-effort <EFFORT>]\n",
+            "best effort delivery failed",
+            "HTTP 429 rate limit",
+        ] {
+            assert!(!names_unsupported_effort(message), "{message}");
+        }
+
+        let structured = parse(r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["--effort/--reasoning-effort: unknown effort level 'max'; use one of: low, high"]}"#).unwrap();
+        assert_eq!(
+            structured,
+            Line::ResultFailed {
+                error: UNAVAILABLE,
+                effort_unsupported: true,
+            }
         );
     }
 
@@ -329,7 +547,10 @@ mod tests {
         let line = parse(r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Not signed in. Run grok login."}"#).unwrap();
         assert!(matches!(
             line,
-            Line::ResultFailed(error) if error.reason == "AUTH_REJECTED"
+            Line::ResultFailed {
+                error,
+                effort_unsupported: false,
+            } if error.reason == "AUTH_REJECTED"
         ));
     }
 
