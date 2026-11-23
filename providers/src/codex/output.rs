@@ -155,23 +155,44 @@ pub fn turn_failure(message: &str) -> ErrorBody {
     }
 }
 
-/// Whether Codex's stderr says `-c agents.enabled=false` could not be parsed by
-/// an older CLI (`<= 0.135`) whose `[agents]` table only accepts named role
-/// sub-tables (`BTreeMap<String, AgentRoleToml>`).
-pub(super) fn names_unsupported_agents_enabled(stderr: &str) -> bool {
-    let lower = stderr.to_ascii_lowercase();
-    let names_key = lower.contains("agents.enabled")
-        || (lower.contains("agents") && lower.contains("enabled") && lower.contains("agentrole"));
-    let schema_mismatch = [
-        "invalid type",
-        "expected struct",
-        "expected a map",
-        "expected table",
-        "unknown field",
-    ]
-    .iter()
-    .any(|phrase| lower.contains(phrase));
-    names_key && schema_mismatch
+/// Whether `codex --version` reports a Codex release that knows
+/// `[agents].enabled = false` (`0.145.0` and later, or a `0.0.0` local dev
+/// build). Returns `None` when the output does not name a parseable version,
+/// so callers can fail closed without caching an unknown result.
+///
+/// Pre-`0.145` Codex releases lacked `AgentsToml.enabled` and flattened unknown
+/// keys under `[agents]` into `BTreeMap<String, AgentRoleToml>`, rejecting
+/// `-c agents.enabled=false` with `expected struct AgentRoleToml in agents`.
+/// Gating on `--version` avoids parsing stderr, where a malformed user role on
+/// a newer Codex produces the exact same diagnostic.
+pub(super) fn supports_agents_enabled_version(output: &[u8]) -> Option<bool> {
+    let text = std::str::from_utf8(output).ok()?;
+    for token in text.split_whitespace() {
+        let token = token.strip_prefix('v').unwrap_or(token);
+        let (core, has_prerelease) = match token.find(['-', '+']) {
+            Some(index) => (&token[..index], token.as_bytes()[index] == b'-'),
+            None => (token, false),
+        };
+        let mut parts = core.split('.');
+        let (Some(major), Some(minor), Some(patch), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        if let (Ok(major), Ok(minor), Ok(patch)) = (
+            major.parse::<u64>(),
+            minor.parse::<u64>(),
+            patch.parse::<u64>(),
+        ) {
+            if (major, minor, patch) == (0, 0, 0) {
+                return Some(true);
+            }
+            return Some(
+                major > 0 || minor > 145 || (minor == 145 && (patch > 0 || !has_prerelease)),
+            );
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -379,21 +400,40 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_agents_enabled_config_error_is_told_from_other_failures() {
-        for stderr in [
-            "Error loading config.toml:\ninvalid type: boolean `false`, expected struct AgentRoleToml\nin `agents.enabled`\n",
-            "invalid type: boolean `false`, expected a map for key `agents.enabled`",
-            "unknown field `enabled` in `agents.enabled`",
+    fn codex_version_gates_agents_enabled_from_0_145_onwards() {
+        for version in [
+            b"codex-cli 0.145.0\n".as_slice(),
+            b"codex-cli 0.145.1\n",
+            b"codex-cli 0.149.1\n",
+            b"codex-cli 0.156.1\n",
+            b"codex-cli 0.171.0\n",
+            b"codex-cli 0.173.0-alpha.4\n",
+            b"codex 1.0.0\n",
+            b"codex-cli v0.171.0+build.1\n",
+            b"codex-cli 0.0.0\n",
         ] {
-            assert!(names_unsupported_agents_enabled(stderr), "{stderr}");
+            assert_eq!(
+                supports_agents_enabled_version(version),
+                Some(true),
+                "{}",
+                String::from_utf8_lossy(version)
+            );
         }
-        for stderr in [
-            "Error: thread/resume: no rollout found",
-            "Error loading config.toml: invalid type in `features.shell_tool`",
-            "agents.enabled is false",
-            "",
+        for version in [
+            b"codex-cli 0.135.0\n".as_slice(),
+            b"codex-cli 0.142.0\n",
+            b"codex-cli 0.144.6\n",
+            b"codex-cli 0.145.0-alpha.1\n",
         ] {
-            assert!(!names_unsupported_agents_enabled(stderr), "{stderr}");
+            assert_eq!(
+                supports_agents_enabled_version(version),
+                Some(false),
+                "{}",
+                String::from_utf8_lossy(version)
+            );
+        }
+        for unparseable in [b"".as_slice(), b"codex-cli\n", b"not-a-version\n", b"\xff"] {
+            assert_eq!(supports_agents_enabled_version(unparseable), None);
         }
     }
 }

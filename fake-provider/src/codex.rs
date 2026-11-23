@@ -85,6 +85,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
     );
 
     match args.first().map(String::as_str) {
+        Some("--version") => version(&setting("version")),
         Some("login") if args.get(1).map(String::as_str) == Some("status") => {
             login_status(&setting("login"))
         }
@@ -95,6 +96,35 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
         _ => {
             let _ = writeln!(io::stderr(), "fake codex: unsupported command");
             ExitCode::from(2)
+        }
+    }
+}
+
+fn version(behavior: &str) -> ExitCode {
+    match behavior {
+        "" => {
+            let _ = writeln!(io::stdout(), "codex-cli 0.171.0");
+            ExitCode::SUCCESS
+        }
+        "hangs" => hang(),
+        "fails" => {
+            let _ = writeln!(io::stderr(), "fake codex: version unavailable");
+            ExitCode::from(1)
+        }
+        "garbled" => {
+            let _ = writeln!(io::stdout(), "not-a-version");
+            ExitCode::SUCCESS
+        }
+        other => {
+            let (slow, reported) = match other.strip_prefix("slow-") {
+                Some(rest) => (true, rest),
+                None => (false, other),
+            };
+            if slow {
+                thread::sleep(Duration::from_millis(1500));
+            }
+            let _ = writeln!(io::stdout(), "codex-cli {reported}");
+            ExitCode::SUCCESS
         }
     }
 }
@@ -166,14 +196,26 @@ fn exec(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCode> {
         );
         return Ok(ExitCode::from(2));
     }
-    if behavior == "no-agents-enabled-config"
+    if behavior == "reject-agents-enabled-0135"
         && args
             .windows(2)
             .any(|pair| pair == ["-c", "agents.enabled=false"])
     {
+        // Exact diagnostic emitted by Codex 0.135.0's flattened `[agents]`
+        // struct (`in \`agents\``, never naming `agents.enabled`).
         let _ = writeln!(
             io::stderr(),
-            "Error loading config.toml:\ninvalid type: boolean `false`, expected struct AgentRoleToml\nin `agents.enabled`"
+            "Error loading config.toml:\ninvalid type: boolean `false`, expected struct AgentRoleToml\nin `agents`"
+        );
+        return Ok(ExitCode::from(1));
+    }
+    if behavior == "malformed-user-agent-role" {
+        // Same diagnostic shape on a modern Codex when the user has a bad
+        // role entry in `[agents]`: must fail normally, never disable
+        // `agents.enabled=false` on subsequent restricted turns.
+        let _ = writeln!(
+            io::stderr(),
+            "Error loading config.toml:\ninvalid type: boolean `false`, expected struct AgentRoleToml\nin `agents`"
         );
         return Ok(ExitCode::from(1));
     }

@@ -518,7 +518,7 @@ fn claude_classification_uses_documented_auth_method_without_account_data() {
     let _fixture = fixture_lifetime();
     for (scenario, expected) in [
         ("subscription", SignInClassification::Subscription),
-        ("oauth-token", SignInClassification::Subscription),
+        ("oauth-token", SignInClassification::Unknown),
         ("api-key", SignInClassification::ApiKey),
         ("signed-in", SignInClassification::Unknown),
     ] {

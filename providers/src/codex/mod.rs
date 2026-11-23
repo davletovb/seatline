@@ -64,10 +64,6 @@ pub const CODEX_VARIABLES: &[&str] = &["CODEX_HOME", "CODEX_SQLITE_HOME", "CODEX
 /// long; a line past this ends the request instead of growing memory.
 pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 
-/// How much of Codex's stderr a turn keeps, solely to detect pre-0.149 CLI
-/// rejection of `-c agents.enabled=false`. Never logged or forwarded.
-const STDERR_TAIL_BYTES: usize = 4096;
-
 /// The adapter's time limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
@@ -204,48 +200,46 @@ impl Launch {
     }
 }
 
-/// Whether the installed Codex CLI knows `[agents].enabled = false` (`0.149+`).
+/// Whether the installed Codex CLI knows `[agents].enabled = false` (`0.145+`).
 ///
 /// Codex `0.171+` deprecated `[features].multi_agent` and requires
 /// `agents.enabled=false` so a model whose metadata selects a subagent version
-/// cannot re-enable subagent tools. Older builds (`<= 0.135`) lacked that key
-/// and failed TOML deserialization at startup; if one rejects it before
-/// starting a thread, the turn is tried once without it (retaining
-/// `features.multi_agent=false` and `features.multi_agent_v2=false`), and that
-/// executable is not offered it again until it changes.
+/// cannot re-enable subagent tools. Older builds (`<= 0.144`) lacked that key
+/// and failed TOML deserialization with the same `expected struct AgentRoleToml
+/// in agents` diagnostic as a malformed user role on a newer Codex. Gating the
+/// flag on `codex --version` avoids stderr parsing altogether; caching is keyed
+/// by executable path and launch-time [`FileStamp`] so an in-place upgrade
+/// never inherits a pre-0.145 answer.
 struct AgentsEnabledSupport {
-    unsupported: RefCell<Option<(PathBuf, FileStamp)>>,
+    cached: RefCell<Option<(PathBuf, FileStamp, bool)>>,
 }
 
 impl AgentsEnabledSupport {
     fn new() -> Self {
         Self {
-            unsupported: RefCell::new(None),
+            cached: RefCell::new(None),
         }
     }
 
-    fn applies(&self, executable: &Path, restrict_tools: bool) -> bool {
-        restrict_tools && !self.is_unsupported(executable)
-    }
-
-    fn is_unsupported(&self, executable: &Path) -> bool {
-        self.unsupported
+    fn cached(&self, executable: &Path, stamp: Option<&FileStamp>) -> Option<bool> {
+        let stamp = stamp?;
+        self.cached
             .borrow()
             .as_ref()
-            .is_some_and(|(path, stamp)| {
-                path == executable
-                    && FileStamp::read(executable).ok().flatten().as_ref() == Some(stamp)
+            .and_then(|(path, cached_stamp, supported)| {
+                (path == executable && cached_stamp == stamp).then_some(*supported)
             })
     }
 
-    fn remember_unsupported(&self, executable: &Path) {
-        if let Ok(Some(stamp)) = FileStamp::read(executable) {
-            *self.unsupported.borrow_mut() = Some((executable.to_path_buf(), stamp));
+    fn remember(&self, executable: &Path, launch_stamp: FileStamp, supported: bool) {
+        // Re-verify the executable did not change while `--version` ran.
+        if FileStamp::read(executable).ok().flatten().as_ref() == Some(&launch_stamp) {
+            *self.cached.borrow_mut() = Some((executable.to_path_buf(), launch_stamp, supported));
         }
     }
 
     fn forget(&self) {
-        self.unsupported.borrow_mut().take();
+        self.cached.borrow_mut().take();
     }
 }
 
@@ -442,9 +436,6 @@ impl Provider for Codex {
         }
 
         let restrict_tools = request.tools != ToolPolicy::ProviderDefault;
-        let disable_agents = self
-            .agents_enabled_support
-            .applies(&executable, restrict_tools);
 
         let mut turn = Turn {
             stage: Stage::Done,
@@ -454,11 +445,13 @@ impl Provider for Codex {
             resume: request.continuation,
             session_policy: request.session,
             finish_grace: self.limits.finish,
+            probe_limit: self.limits.probe,
             // Page text and search results are attacker-controlled: a turn
             // that isn't left to the user's own configuration runs answer-only.
             restrict_tools,
             agents_enabled_support: Rc::clone(&self.agents_enabled_support),
-            disable_agents,
+            disable_agents: restrict_tools,
+            version_rechecks: 0,
             context_turn: request.tools == ToolPolicy::None,
             native_search: request.tools == ToolPolicy::NativeWebSearch,
             model: request.model,
@@ -489,7 +482,7 @@ impl Provider for Codex {
                 };
             }
             // The sign-in can't be checked; the request itself will tell.
-            Some(Err(_)) | None => turn.start(false),
+            Some(Err(_)) | None => turn.prepare_and_start(),
         }
         Box::new(turn)
     }
@@ -857,7 +850,8 @@ fn classify_sign_in(
     )
 }
 
-/// One `conversation.send`: the sign-in probe, then the `codex exec` turn.
+/// One `conversation.send`: optional sign-in probe, optional version check for
+/// restricted turns, then the `codex exec` turn.
 struct Turn {
     stage: Stage,
     executable: PathBuf,
@@ -867,14 +861,15 @@ struct Turn {
     resume: Option<String>,
     session_policy: SessionPolicy,
     finish_grace: Duration,
+    probe_limit: Duration,
     /// Browser context or native search requires all unrelated Codex tool
     /// surfaces to be disabled.
     restrict_tools: bool,
     agents_enabled_support: Rc<AgentsEnabledSupport>,
-    /// Whether the run in progress passes `-c agents.enabled=false`. The prompt
-    /// is kept until `thread.started` so a pre-0.149 Codex that rejects the key
-    /// can be retried once without it.
+    /// Whether `codex exec` will pass `-c agents.enabled=false`.
     disable_agents: bool,
+    /// Bounds re-checking `--version` if the executable is replaced mid-probe.
+    version_rechecks: u8,
     /// Whether untrusted browser context is attached to this turn.
     context_turn: bool,
     /// Whether this same Codex turn may use its authenticated web search.
@@ -909,16 +904,61 @@ enum Stage {
         process: Process,
         give_up: Instant,
     },
+    CheckingVersion {
+        process: Process,
+        stamp: Option<FileStamp>,
+        give_up: Instant,
+        output: Vec<u8>,
+    },
     Running(LineStream),
     /// Finished: any process has been dropped, which reaps it.
     Done,
 }
 
 impl Turn {
-    /// Starts `codex exec` and hands it the question. `relaunch` says an
-    /// earlier run of this turn was rejected at startup before a thread began,
-    /// so the application has already heard that a process was launched.
-    fn start(&mut self, relaunch: bool) {
+    /// Checks cached or live `codex --version` for restricted turns so
+    /// `-c agents.enabled=false` is omitted only on verified pre-`0.145`
+    /// executables, then starts `codex exec`.
+    fn prepare_and_start(&mut self) {
+        self.probe_over();
+        if !self.restrict_tools {
+            self.disable_agents = false;
+            return self.start();
+        }
+        let stamp = FileStamp::read(&self.executable).ok().flatten();
+        if let Some(supported) = self
+            .agents_enabled_support
+            .cached(&self.executable, stamp.as_ref())
+        {
+            self.disable_agents = supported;
+            return self.start();
+        }
+        let Ok(workspace) = self.launch.workspace() else {
+            return self.end(Update::Failed(NO_WORKSPACE));
+        };
+        match Process::spawn(
+            &self
+                .launch
+                .command(&workspace, &self.executable, ["--version"]),
+        ) {
+            Ok(mut process) => {
+                process.close_stdin();
+                self.stage = Stage::CheckingVersion {
+                    process,
+                    stamp,
+                    give_up: after(self.probe_limit),
+                    output: Vec::new(),
+                };
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.end(Update::Failed(NOT_INSTALLED))
+            }
+            Err(_) => self.end(Update::Failed(START_FAILED)),
+        }
+    }
+
+    /// Starts `codex exec` and hands it the question.
+    fn start(&mut self) {
         self.probe_over();
         let Ok(workspace) = self.launch.workspace() else {
             return self.end(Update::Failed(NO_WORKSPACE));
@@ -969,18 +1009,12 @@ impl Turn {
         match Process::spawn(&self.launch.command(&workspace, &self.executable, args)) {
             Ok(mut process) => {
                 // The question goes on stdin: it can exceed the size one
-                // argument may have, and no shell ever sees it.
-                let _ = process.write(self.prompt.as_bytes());
+                // argument may have, and no shell ever sees it. Drop the buffer
+                // immediately once written.
+                let _ = process.write(std::mem::take(&mut self.prompt).as_bytes());
                 process.close_stdin();
-                if !self.disable_agents {
-                    self.prompt.clear();
-                }
-                if !relaunch {
-                    self.queue.push_back(Update::Launched);
-                }
-                self.stage = Stage::Running(
-                    LineStream::new(process, MAX_LINE_BYTES).keeping_stderr_tail(STDERR_TAIL_BYTES),
-                );
+                self.queue.push_back(Update::Launched);
+                self.stage = Stage::Running(LineStream::new(process, MAX_LINE_BYTES));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.end(Update::Failed(NOT_INSTALLED))
@@ -1011,10 +1045,7 @@ impl Turn {
         }
         match output::parse(line) {
             Err(_) => self.end(Update::Failed(MALFORMED_OUTPUT)),
-            Ok(Line::ThreadStarted(thread_id)) => {
-                self.prompt.clear();
-                self.thread_id = Some(thread_id);
-            }
+            Ok(Line::ThreadStarted(thread_id)) => self.thread_id = Some(thread_id),
             Ok(Line::TurnStarted) => self.turn_started(),
             Ok(Line::AgentMessage(text)) => {
                 if !self.started {
@@ -1153,7 +1184,7 @@ impl Exchange for Turn {
                 // Checked first, so output that keeps coming can't put it off.
                 Stage::Probing { process, give_up } if Instant::now() >= *give_up => {
                     process.kill();
-                    self.start(false);
+                    self.prepare_and_start();
                 }
                 Stage::Probing { process, give_up } => {
                     match process.next_event(deadline.min(*give_up)) {
@@ -1161,7 +1192,7 @@ impl Exchange for Turn {
                             Authentication::Unauthenticated => {
                                 self.end(Update::Failed(NOT_SIGNED_IN));
                             }
-                            _ => self.start(false),
+                            _ => self.prepare_and_start(),
                         },
                         // The probe's output names the account: never read.
                         Some(Event::Stdout(_) | Event::Stderr(_)) => {}
@@ -1170,6 +1201,62 @@ impl Exchange for Turn {
                         None => return None,
                     }
                 }
+                Stage::CheckingVersion {
+                    process, give_up, ..
+                } if Instant::now() >= *give_up => {
+                    process.kill();
+                    // Fail closed on timeout without caching.
+                    self.disable_agents = true;
+                    self.start();
+                }
+                Stage::CheckingVersion {
+                    process,
+                    stamp,
+                    give_up,
+                    output,
+                } => match process.next_event(deadline.min(*give_up)) {
+                    Some(Event::Exited(exit)) => {
+                        let launch_stamp = stamp.take();
+                        let parsed = exit
+                            .status
+                            .is_some_and(|status| status.success())
+                            .then(|| output::supports_agents_enabled_version(output))
+                            .flatten();
+                        let current_stamp = FileStamp::read(&self.executable).ok().flatten();
+                        if current_stamp != launch_stamp {
+                            // The binary changed while `--version` ran. Never
+                            // attribute the old binary's answer to the new one.
+                            if self.version_rechecks == 0 {
+                                self.version_rechecks += 1;
+                                self.prepare_and_start();
+                            } else {
+                                self.disable_agents = true;
+                                self.start();
+                            }
+                        } else if let Some(supported) = parsed {
+                            if let Some(launch_stamp) = launch_stamp {
+                                self.agents_enabled_support.remember(
+                                    &self.executable,
+                                    launch_stamp,
+                                    supported,
+                                );
+                            }
+                            self.disable_agents = supported;
+                            self.start();
+                        } else {
+                            // Fail closed when `--version` fails or is
+                            // unparseable, without caching the failure.
+                            self.disable_agents = true;
+                            self.start();
+                        }
+                    }
+                    Some(Event::Stdout(bytes)) => {
+                        crate::keep_bounded_output(output, &bytes, STATUS_OUTPUT_BYTES);
+                    }
+                    Some(Event::Stderr(_)) => {}
+                    None if Instant::now() >= *give_up => {}
+                    None => return None,
+                },
                 Stage::Running(stream) => {
                     // A finished turn has a fixed exit budget, even when
                     // stdout keeps arriving after its terminal provider event.
@@ -1188,25 +1275,6 @@ impl Exchange for Turn {
                     match stream.next(wait) {
                         Some(Output::Line(line)) => self.on_line(&line),
                         Some(Output::Final(exit) | Output::Stopped(exit)) => {
-                            let agents_enabled_rejected = !self.started
-                                && self.thread_id.is_none()
-                                && self.disable_agents
-                                && !self.cancelled
-                                && exit.status.is_some_and(|status| !status.success())
-                                && output::names_unsupported_agents_enabled(
-                                    &String::from_utf8_lossy(stream.stderr_tail()),
-                                );
-                            if agents_enabled_rejected {
-                                // Pre-0.149 Codex did not know `[agents].enabled`.
-                                // Retry once without it (keeping the feature
-                                // flags that disabled subagents there), and do
-                                // not offer it to this executable again.
-                                self.agents_enabled_support
-                                    .remember_unsupported(&self.executable);
-                                self.disable_agents = false;
-                                self.start(true);
-                                continue;
-                            }
                             let lost = !self.cancelled && !self.started && self.resume.is_some();
                             let update = if self.cancelled {
                                 Update::Stopped
@@ -1252,8 +1320,8 @@ impl Exchange for Turn {
         self.queue.clear();
         match &mut self.stage {
             Stage::Running(stream) => stream.cancel(grace),
-            // The probe is harmless to kill, and nothing has started.
-            Stage::Probing { .. } => self.end(Update::Stopped),
+            // Probes are harmless to kill, and nothing has started.
+            Stage::Probing { .. } | Stage::CheckingVersion { .. } => self.end(Update::Stopped),
             Stage::Done if finished => self.queue.push_back(Update::Stopped),
             Stage::Done => {}
         }
@@ -1309,16 +1377,20 @@ mod tests {
     }
 
     #[test]
-    fn agents_enabled_support_tracks_executables_until_forgotten() {
+    fn agents_enabled_support_caches_per_executable_stamp_until_forgotten() {
         let executable = std::env::current_exe().unwrap();
+        let stamp = FileStamp::read(&executable).unwrap().unwrap();
         let support = AgentsEnabledSupport::new();
-        assert!(support.applies(&executable, true));
-        assert!(!support.applies(&executable, false));
-        support.remember_unsupported(&executable);
-        assert!(!support.applies(&executable, true));
-        assert!(support.applies(&executable.with_extension("other"), true));
+        assert_eq!(support.cached(&executable, Some(&stamp)), None);
+        support.remember(&executable, stamp.clone(), false);
+        assert_eq!(support.cached(&executable, Some(&stamp)), Some(false));
+        assert_eq!(
+            support.cached(&executable.with_extension("other"), Some(&stamp)),
+            None
+        );
+        assert_eq!(support.cached(&executable, None), None);
         support.forget();
-        assert!(support.applies(&executable, true));
+        assert_eq!(support.cached(&executable, Some(&stamp)), None);
     }
 
     #[test]
