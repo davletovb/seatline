@@ -289,8 +289,8 @@ fn every_adapter_reports_when_it_read_the_providers_result_and_what_it_used() {
     assert_eq!(
         timeline.usage(),
         Some(Usage {
-            input_tokens: Some(17),
-            output_tokens: Some(9),
+            input_tokens: Some(137),
+            output_tokens: Some(54),
             cached_input_tokens: Some(120),
             cache_write_input_tokens: None,
             reasoning_output_tokens: Some(45),

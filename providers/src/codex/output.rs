@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use seatline_core::protocol::ErrorCode;
 use seatline_core::protocol::Failure as ErrorBody;
-use seatline_core::search::{MAX_SOURCES_PER_TURN, SearchResult};
+use seatline_core::search::SearchResult;
 use seatline_core::turn::Usage;
 
 /// One line of Codex output, reduced to what the adapter needs.
@@ -118,6 +118,12 @@ pub fn parse(line: &str) -> Result<Line, Malformed> {
     })
 }
 
+/// Upper bound on structured hits parsed from a single `web_search` item.
+/// Higher than `MAX_SOURCES_PER_TURN` so later hits cited in the answer can
+/// still be enriched with structured metadata before the turn caps emitted
+/// sources at `MAX_SOURCES_PER_TURN`.
+const MAX_WEB_SEARCH_ITEM_RESULTS: usize = 64;
+
 /// Extracts bounded, SEC-05 validated search results from Codex `0.171+`
 /// `WebSearchItem.results` entries (`{url, title, snippet, ...}`).
 fn parse_web_search_results(item: &Value) -> Vec<SearchResult> {
@@ -140,7 +146,7 @@ fn parse_web_search_results(item: &Value) -> Vec<SearchResult> {
                 .and_then(Value::as_str);
             SearchResult::new(title, url, snippet, source_name, age)
         })
-        .take(MAX_SOURCES_PER_TURN)
+        .take(MAX_WEB_SEARCH_ITEM_RESULTS)
         .collect()
 }
 

@@ -345,11 +345,33 @@ fn host_scanner_and_tool_variables_are_overridden_to_isolated_values() {
         ("GROK_WRITE_FILE", std::path::PathBuf::from("1")),
         ("GROK_LSP_TOOLS", std::path::PathBuf::from("1")),
         ("GROK_CRASH_HANDLER", std::path::PathBuf::from("1")),
-        ("GROK_SANDBOX", std::path::PathBuf::from("off")),
+        ("GROK_SANDBOX", std::path::PathBuf::from("read-only")),
     ]);
     let updates = run_to_end(adapter.send(ask("Say hello")).as_mut());
     assert_eq!(answer_text(&updates), "Grok answer");
     assert_eq!(updates.last(), Some(&Update::Completed));
+}
+
+#[test]
+fn oauth_token_renewal_persists_across_launches() {
+    let fake = FakeGrok::install(FIXTURES);
+    let auth_path = fake.home.join(".grok/auth.json");
+    std::fs::write(&auth_path, r#"{"token":"expired"}"#).unwrap();
+
+    let adapter = fake.adapter();
+    let first = run_to_end(adapter.send(model("grok-refresh-auth")).as_mut());
+    assert_eq!(first.last(), Some(&Update::Completed), "{first:?}");
+    assert_eq!(answer_text(&first), "token:refreshed");
+    assert!(fake.home.join(".grok/auth.json.lock").exists());
+    assert!(
+        std::fs::read_to_string(&auth_path)
+            .unwrap()
+            .contains("renewed")
+    );
+
+    let second = run_to_end(adapter.send(model("grok-refresh-auth")).as_mut());
+    assert_eq!(second.last(), Some(&Update::Completed), "{second:?}");
+    assert_eq!(answer_text(&second), "token:renewed");
 }
 
 #[test]
@@ -368,6 +390,12 @@ fn partial_deltas_stream_incrementally_without_duplicating_the_assistant_frame()
     assert!(deltas.len() >= 2, "expected incremental deltas: {deltas:?}");
     assert_eq!(answer_text(&updates), "Grok answer");
     assert_eq!(updates.last(), Some(&Update::Completed));
+
+    // Split `assistant` frames (thinking block first, then text block) must not
+    // clear `streamed_in_message` and show the streamed answer a second time.
+    let split = run_to_end(adapter.send(model("grok-split-assistant")).as_mut());
+    assert_eq!(answer_text(&split), "Grok answer");
+    assert_eq!(split.last(), Some(&Update::Completed));
 
     // Older Grok builds that emit only the complete `assistant` frame still
     // deliver the answer once without dropping it.
@@ -418,7 +446,7 @@ fn result_usage_sums_disjoint_buckets_and_omits_all_zero_usage() {
 }
 
 #[test]
-fn reasoning_effort_forwards_all_levels_and_maps_older_cli_rejection() {
+fn reasoning_effort_forwards_all_levels_and_maps_cli_or_model_rejections() {
     use seatline_core::turn::ReasoningEffort;
 
     let fake = FakeGrok::install(FIXTURES);
@@ -446,16 +474,23 @@ fn reasoning_effort_forwards_all_levels_and_maps_older_cli_rejection() {
         assert!(invocation.contains(&wanted), "{invocation}");
     }
 
-    let unsupported = run_to_end(
-        adapter
-            .send(Turn {
-                reasoning_effort: Some(ReasoningEffort::High),
-                ..model("grok-no-effort-flag")
-            })
-            .as_mut(),
-    );
-    assert_eq!(
-        failure(&unsupported),
-        (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
-    );
+    for rejected_model in [
+        "grok-no-effort-flag",
+        "grok-effort-stderr-unsupported",
+        "grok-effort-model-unsupported",
+    ] {
+        let unsupported = run_to_end(
+            adapter
+                .send(Turn {
+                    reasoning_effort: Some(ReasoningEffort::Max),
+                    ..model(rejected_model)
+                })
+                .as_mut(),
+        );
+        assert_eq!(
+            failure(&unsupported),
+            (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED"),
+            "{rejected_model}"
+        );
+    }
 }

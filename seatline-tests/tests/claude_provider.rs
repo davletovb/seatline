@@ -473,7 +473,11 @@ fn claude_inherits_node_extra_ca_certs_but_not_arbitrary_secrets() {
     assert_eq!(value["env"]["NODE_EXTRA_CA_CERTS"], "/tmp/company-ca.pem");
     assert_eq!(value["env"]["HTTPS_PROXY"], "http://proxy.example");
     assert!(value["env"].get("SECRET_TOKEN").is_none());
-    assert_eq!(value["env"]["CLAUDE_CODE_DISABLE_FEATURE_FLAGS"], "1");
+    assert!(
+        value["env"]
+            .get("CLAUDE_CODE_DISABLE_FEATURE_FLAGS")
+            .is_none()
+    );
     assert_eq!(
         value["env"]["CLAUDE_CODE_DISABLE_DEFERRED_TOOL_RESUME"],
         "1"
@@ -491,6 +495,28 @@ fn claude_inherits_node_extra_ca_certs_but_not_arbitrary_secrets() {
             .send(Turn {
                 tools: ToolPolicy::None,
                 check_sign_in: false,
+                ..ask("restricted")
+            })
+            .as_mut(),
+    );
+    let environment = claude.read("claude-environment");
+    let line = environment.lines().last().expect("restricted environment");
+    let value: Value = serde_json::from_str(line).unwrap();
+    assert_eq!(value["env"]["CLAUDE_CODE_DISABLE_ULTRATHINK"], "1");
+    assert!(
+        value["env"]
+            .get("CLAUDE_CODE_DISABLE_FEATURE_FLAGS")
+            .is_none()
+    );
+
+    // Opt-in isolated restricted turns disable GrowthBook feature-flag fetches;
+    // ProviderDefault keeps GrowthBook enabled even when isolated launch is on.
+    let isolated_adapter = adapter.with_isolated_launch(true);
+    run_to_end(
+        isolated_adapter
+            .send(Turn {
+                tools: ToolPolicy::None,
+                check_sign_in: false,
                 ..ask("isolated")
             })
             .as_mut(),
@@ -498,7 +524,25 @@ fn claude_inherits_node_extra_ca_certs_but_not_arbitrary_secrets() {
     let environment = claude.read("claude-environment");
     let line = environment.lines().last().expect("isolated environment");
     let value: Value = serde_json::from_str(line).unwrap();
-    assert_eq!(value["env"]["CLAUDE_CODE_DISABLE_ULTRATHINK"], "1");
+    assert_eq!(value["env"]["CLAUDE_CODE_DISABLE_FEATURE_FLAGS"], "1");
+
+    run_to_end(
+        isolated_adapter
+            .send(Turn {
+                tools: ToolPolicy::ProviderDefault,
+                check_sign_in: false,
+                ..ask("default-with-isolation-enabled")
+            })
+            .as_mut(),
+    );
+    let environment = claude.read("claude-environment");
+    let line = environment.lines().last().expect("default environment");
+    let value: Value = serde_json::from_str(line).unwrap();
+    assert!(
+        value["env"]
+            .get("CLAUDE_CODE_DISABLE_FEATURE_FLAGS")
+            .is_none()
+    );
 }
 
 #[test]

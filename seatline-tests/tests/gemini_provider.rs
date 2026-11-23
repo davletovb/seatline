@@ -876,6 +876,56 @@ fn reasoning_effort_forwards_supported_levels_and_normalizes_cli_or_model_refusa
         failure(&model_unsupported),
         (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
     );
+
+    let runtime_conflict = run_to_end(
+        adapter
+            .send(Turn {
+                reasoning_effort: Some(ReasoningEffort::High),
+                ..model("gemini-effort-conflict-runtime")
+            })
+            .as_mut(),
+    );
+    assert_eq!(
+        failure(&runtime_conflict),
+        (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+    );
+
+    // Matching embedded effort omits the redundant `--effort` flag.
+    let matching = run_to_end(
+        adapter
+            .send(Turn {
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                ..model("gemini-3.8-flash-medium")
+            })
+            .as_mut(),
+    );
+    assert_eq!(matching.last(), Some(&Update::Completed), "{matching:?}");
+    let matching_invocation = fake.invocations().last().unwrap().clone();
+    assert!(matching_invocation.contains("--model gemini-3.8-flash-medium"));
+    assert!(!matching_invocation.contains("--effort"));
+
+    // Conflicting embedded effort and `--effort` is refused before any probe
+    // or launch, both directly and through Ready.
+    let before = fake.invocations().len();
+    let conflicting_request = Turn {
+        reasoning_effort: Some(ReasoningEffort::High),
+        ..model("gemini-3.8-flash-medium")
+    };
+    let ready = seatline_providers::readiness::Ready::boxed(Box::new(fake.adapter()));
+    for mut exchange in [
+        adapter.send(conflicting_request.clone()),
+        ready.send_with_readiness(
+            conflicting_request,
+            seatline_core::readiness::Freshness::Fresh,
+        ),
+    ] {
+        let updates = run_to_end(exchange.as_mut());
+        assert_eq!(
+            failure(&updates),
+            (ErrorCode::InvalidRequest, "REASONING_EFFORT_UNSUPPORTED")
+        );
+    }
+    assert_eq!(fake.invocations().len(), before);
     assert_eq!(transcripts(&fake), 0);
 }
 
@@ -893,8 +943,8 @@ fn result_usage_reports_cache_read_and_thinking_tokens() {
     assert_eq!(
         usage,
         Some(Usage {
-            input_tokens: Some(17),
-            output_tokens: Some(9),
+            input_tokens: Some(137),
+            output_tokens: Some(54),
             cached_input_tokens: Some(120),
             cache_write_input_tokens: None,
             reasoning_output_tokens: Some(45),

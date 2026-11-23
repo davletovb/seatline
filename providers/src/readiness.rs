@@ -235,6 +235,14 @@ impl Provider for Ready {
     fn refuses_reasoning_effort(&self, effort: ReasoningEffort) -> bool {
         self.provider.refuses_reasoning_effort(effort)
     }
+    fn refuses_reasoning_effort_for_model(
+        &self,
+        model: Option<&str>,
+        effort: ReasoningEffort,
+    ) -> bool {
+        self.provider
+            .refuses_reasoning_effort_for_model(model, effort)
+    }
     fn status(&self) -> Box<dyn Exchange> {
         self.check(Freshness::Fresh)
     }
@@ -277,10 +285,10 @@ impl Ready {
         if turn.validate().is_err() {
             return Box::new(Scripted::failed(crate::INVALID_TURN));
         }
-        if turn
-            .reasoning_effort
-            .is_some_and(|effort| self.provider.refuses_reasoning_effort(effort))
-        {
+        if turn.reasoning_effort.is_some_and(|effort| {
+            self.provider
+                .refuses_reasoning_effort_for_model(turn.model.as_deref(), effort)
+        }) {
             return Box::new(Scripted::failed(crate::REASONING_EFFORT_UNSUPPORTED));
         }
         if turn.service_tier.is_some()

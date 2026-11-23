@@ -203,6 +203,22 @@ fn run(args: Vec<OsString>) -> Result<(), ()> {
         return Err(());
     }
 
+    if model.as_deref() == Some("gemini-effort-conflict-runtime") {
+        let level = value_after(&args, "--effort").unwrap_or_else(|| "high".to_owned());
+        line(
+            &mut stdout,
+            &serde_json::json!({
+                "event":"result",
+                "result":{
+                    "conversation_id":session,
+                    "status":"ERROR",
+                    "error":format!("invalid model selection (--model \"gemini-effort-conflict-runtime\" --effort \"{level}\"): --model gemini-effort-conflict-runtime conflicts with --effort={level}")
+                }
+            }),
+        )?;
+        return Err(());
+    }
+
     if model.as_deref() == Some("gemini-print-timeout") {
         line(
             &mut stdout,
@@ -352,10 +368,10 @@ fn run(args: Vec<OsString>) -> Result<(), ()> {
                 "response":answer,
                 "usage":{
                     "input_tokens":17,
-                    "output_tokens":9,
+                    "output_tokens":54,
                     "cache_read_tokens":120,
                     "thinking_tokens":45,
-                    "total_tokens":191
+                    "total_tokens":71
                 }
             }
         }),

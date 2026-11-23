@@ -29,7 +29,10 @@ pub enum Line {
         text: String,
         usage: Usage,
     },
-    ResultFailed(ErrorBody),
+    ResultFailed {
+        error: ErrorBody,
+        effort_unsupported: bool,
+    },
     Activity,
     Ignored,
 }
@@ -88,19 +91,36 @@ pub fn parse(line: &str) -> Result<Line, Malformed> {
                     usage: parse_usage(event.get("usage")),
                 }
             } else {
-                let message = event
+                let error_messages: Vec<&str> = event
                     .get("errors")
                     .and_then(Value::as_array)
-                    .and_then(|errors| errors.first())
-                    .and_then(|error| {
-                        error
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .or_else(|| error.as_str())
+                    .map(|errors| {
+                        errors
+                            .iter()
+                            .filter_map(|error| {
+                                error
+                                    .get("message")
+                                    .and_then(Value::as_str)
+                                    .or_else(|| error.as_str())
+                            })
+                            .collect()
                     })
-                    .or_else(|| event.get("result").and_then(Value::as_str))
                     .unwrap_or_default();
-                Line::ResultFailed(provider_failure(message))
+                let top_level = event.get("result").and_then(Value::as_str);
+                let primary = error_messages
+                    .first()
+                    .copied()
+                    .or(top_level)
+                    .unwrap_or_default();
+                let effort_unsupported = error_messages
+                    .iter()
+                    .copied()
+                    .chain(top_level)
+                    .any(names_unsupported_effort);
+                Line::ResultFailed {
+                    error: provider_failure(primary),
+                    effort_unsupported,
+                }
             }
         }
         "stream_event" => parse_stream_event(&event)?,
@@ -149,8 +169,9 @@ fn parse_stream_event(event: &Value) -> Result<Line, Malformed> {
 
 /// Grok's `streaming-messages-json` reports the three Messages API prompt-side
 /// buckets disjoint (`input_tokens` uncached, `cache_read_input_tokens`,
-/// `cache_creation_input_tokens`), and falls back to all zeros when the turn's
-/// usage ledger is absent or incomplete: read an all-zero object as unknown.
+/// `cache_creation_input_tokens`), counts reasoning tokens within
+/// `output_tokens`, and falls back to all zeros when the turn's usage ledger is
+/// absent or incomplete: read an all-zero object as unknown.
 fn parse_usage(usage: Option<&Value>) -> Usage {
     let Some(usage) = usage.filter(|value| value.is_object()) else {
         return Usage::default();
@@ -322,17 +343,37 @@ pub fn provider_failure(message: &str) -> ErrorBody {
     }
 }
 
-/// Whether Grok's pre-init stderr says the installed CLI rejected
-/// `--reasoning-effort` / `--effort` as an unknown flag or invalid effort value.
-pub fn names_unsupported_effort_option(stderr: &str) -> bool {
-    stderr.lines().any(|line| {
+/// Whether Grok's pre-init stderr or terminal error result says either the
+/// installed CLI rejected `--reasoning-effort` / `--effort` or the chosen
+/// model / API does not support the requested reasoning effort level.
+pub fn names_unsupported_effort(message: &str) -> bool {
+    message.lines().any(|line| {
         let lower = line.to_ascii_lowercase();
         let names_flag = lower.contains("--reasoning-effort") || lower.contains("--effort");
-        let unknown_flag = lower.contains("unexpected argument")
-            || lower.contains("unknown option")
-            || lower.contains("unrecognized option")
-            || lower.contains("invalid value");
-        names_flag && unknown_flag
+        let flag_rejected = names_flag
+            && (lower.contains("unexpected argument")
+                || lower.contains("unknown option")
+                || lower.contains("unrecognized option")
+                || lower.contains("invalid value")
+                || lower.contains("unknown effort level")
+                || lower.contains("no active model to apply effort")
+                || lower.contains("does not support")
+                || lower.contains("not supported"));
+        let names_effort = lower.contains("reasoning effort")
+            || lower.contains("reasoning_effort")
+            || lower.contains("reasoningeffort")
+            || lower.contains("effort level")
+            || lower.contains("effort levels");
+        let model_rejected = names_effort
+            && (lower.contains("unknown effort level")
+                || lower.contains("does not support")
+                || lower.contains("doesn't support")
+                || lower.contains("not supported")
+                || lower.contains("unsupported")
+                || lower.contains("invalid")
+                || lower.contains("no selectable effort")
+                || lower.contains("rejected"));
+        flag_rejected || model_rejected
     })
 }
 
@@ -471,16 +512,34 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_effort_option_errors_are_recognized() {
-        assert!(names_unsupported_effort_option(
-            "error: unexpected argument '--reasoning-effort=high' found\n"
-        ));
-        assert!(names_unsupported_effort_option(
-            "error: unknown option '--effort'\n"
-        ));
-        assert!(!names_unsupported_effort_option(
-            "Usage: grok [--reasoning-effort <EFFORT>]\n"
-        ));
+    fn unsupported_effort_cli_and_model_errors_are_recognized() {
+        for message in [
+            "error: unexpected argument '--reasoning-effort=high' found\n",
+            "error: unknown option '--effort'\n",
+            "--effort/--reasoning-effort: unknown effort level 'max'; use one of: low, high",
+            "--effort/--reasoning-effort: unknown effort level 'max'; this model has no selectable effort levels",
+            "--effort/--reasoning-effort: current model does not support reasoning effort",
+            "Model grok-4 does not support parameter reasoningEffort",
+            "reasoning_effort is not supported for this model",
+        ] {
+            assert!(names_unsupported_effort(message), "{message}");
+        }
+        for message in [
+            "Usage: grok [--reasoning-effort <EFFORT>]\n",
+            "best effort delivery failed",
+            "HTTP 429 rate limit",
+        ] {
+            assert!(!names_unsupported_effort(message), "{message}");
+        }
+
+        let structured = parse(r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["--effort/--reasoning-effort: unknown effort level 'max'; use one of: low, high"]}"#).unwrap();
+        assert_eq!(
+            structured,
+            Line::ResultFailed {
+                error: UNAVAILABLE,
+                effort_unsupported: true,
+            }
+        );
     }
 
     #[test]
@@ -488,7 +547,10 @@ mod tests {
         let line = parse(r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Not signed in. Run grok login."}"#).unwrap();
         assert!(matches!(
             line,
-            Line::ResultFailed(error) if error.reason == "AUTH_REJECTED"
+            Line::ResultFailed {
+                error,
+                effort_unsupported: false,
+            } if error.reason == "AUTH_REJECTED"
         ));
     }
 

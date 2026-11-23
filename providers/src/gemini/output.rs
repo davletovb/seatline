@@ -174,21 +174,7 @@ pub fn parse(line: &str) -> Result<Line, Malformed> {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_owned(),
-                    usage: Usage {
-                        input_tokens: result
-                            .pointer("/usage/input_tokens")
-                            .and_then(Value::as_u64),
-                        output_tokens: result
-                            .pointer("/usage/output_tokens")
-                            .and_then(Value::as_u64),
-                        cached_input_tokens: result
-                            .pointer("/usage/cache_read_tokens")
-                            .and_then(Value::as_u64),
-                        reasoning_output_tokens: result
-                            .pointer("/usage/thinking_tokens")
-                            .and_then(Value::as_u64),
-                        ..Usage::default()
-                    },
+                    usage: parse_usage(result.get("usage")),
                 }
             } else {
                 let message = result
@@ -204,6 +190,34 @@ pub fn parse(line: &str) -> Result<Line, Malformed> {
         }
         _ => Line::Ignored,
     })
+}
+
+/// Antigravity reports `input_tokens` (uncached prompt tokens) disjoint from
+/// `cache_read_tokens`, while `output_tokens` already includes `thinking_tokens`
+/// (verified against live `agy` headless captures). Seatline's `Usage` contract
+/// requires `cached_input_tokens` to be a subset of `input_tokens` and
+/// `reasoning_output_tokens` to be a subset of `output_tokens`, so sum the
+/// disjoint input buckets into `input_tokens`.
+fn parse_usage(usage: Option<&Value>) -> Usage {
+    let Some(usage) = usage.filter(|value| value.is_object()) else {
+        return Usage::default();
+    };
+    let uncached_input = usage.get("input_tokens").and_then(Value::as_u64);
+    let cache_read = usage.get("cache_read_tokens").and_then(Value::as_u64);
+    let output = usage.get("output_tokens").and_then(Value::as_u64);
+    let thinking = usage.get("thinking_tokens").and_then(Value::as_u64);
+    let total_input = (uncached_input.is_some() || cache_read.is_some()).then(|| {
+        uncached_input
+            .unwrap_or(0)
+            .saturating_add(cache_read.unwrap_or(0))
+    });
+    Usage {
+        input_tokens: total_input,
+        output_tokens: output,
+        cached_input_tokens: cache_read,
+        cache_write_input_tokens: None,
+        reasoning_output_tokens: thinking,
+    }
 }
 
 const AUTH_REJECTED: ErrorBody = ErrorBody {
@@ -270,9 +284,9 @@ pub fn provider_failure(message: &str) -> ErrorBody {
     }
 }
 
-/// Whether Antigravity's pre-init stderr or error result says either the
-/// installed CLI does not know `--effort` or the chosen model does not accept
-/// the requested effort level.
+/// Whether Antigravity's pre-init stderr or error result says the installed CLI
+/// rejected `--effort`, the chosen model does not accept the requested effort
+/// level, or an effort-qualified `--model` conflicts with `--effort`.
 pub fn names_unsupported_effort(message: &str) -> bool {
     message.lines().any(|line| {
         let lower = line.to_ascii_lowercase();
@@ -284,16 +298,46 @@ pub fn names_unsupported_effort(message: &str) -> bool {
                 || lower.contains("unrecognized option")
                 || lower.contains("unexpected argument")
                 || lower.contains("invalid argument")
-                || lower.contains("invalid value"));
+                || lower.contains("invalid value")
+                || lower.contains("invalid --effort"));
         let model_rejected = lower.contains("effort")
             && (lower.contains("unsupported effort")
                 || lower.contains("invalid effort")
+                || lower.contains("unrecognized effort")
                 || lower.contains("effort isn't adjustable")
                 || lower.contains("effort is not adjustable")
+                || lower.contains("effort is not supported")
+                || lower.contains("effort isn't supported")
+                || names_effort_eq_not_supported(&lower)
                 || lower.contains("does not support")
-                || lower.contains("has no \""));
+                || lower.contains("has no \"")
+                || lower.contains("conflict")
+                || lower.contains("mismatch")
+                || lower.contains("contradict")
+                || lower.contains("already specifies")
+                || lower.contains("already encodes")
+                || lower.contains("cannot combine")
+                || lower.contains("can't combine")
+                || lower.contains("fixed effort")
+                || lower.contains("fixed reasoning"));
         flag_rejected || model_rejected
     })
+}
+
+/// Matches `agy` 1.5.14's `--effort=<level> is not supported for model ...`
+/// without falsely matching `invalid model selection (... --effort ...): model ... is not supported`.
+fn names_effort_eq_not_supported(lower: &str) -> bool {
+    let mut rest = lower;
+    while let Some(pos) = rest.find("--effort=") {
+        let after_eq = &rest[pos + "--effort=".len()..];
+        let after_val = after_eq.trim_start_matches(|c: char| !c.is_whitespace());
+        let tail = after_val.trim_start();
+        if tail.starts_with("is not supported") || tail.starts_with("isn't supported") {
+            return true;
+        }
+        rest = after_eq;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -444,16 +488,19 @@ mod tests {
     }
 
     #[test]
-    fn result_usage_reads_thinking_and_cache_read_tokens() {
-        let line = r#"{"event":"result","result":{"conversation_id":"agy-123","status":"SUCCESS","response":"done","usage":{"input_tokens":17,"output_tokens":9,"cache_read_tokens":120,"thinking_tokens":45,"total_tokens":191}}}"#;
+    fn result_usage_sums_disjoint_cache_read_into_input_and_preserves_thinking_subset() {
+        // Mirrors live `agy` headless captures: `input_tokens` is uncached and
+        // disjoint from `cache_read_tokens`, while `output_tokens` already
+        // includes `thinking_tokens`.
+        let line = r#"{"event":"result","result":{"conversation_id":"agy-123","status":"SUCCESS","response":"done","usage":{"input_tokens":17,"output_tokens":54,"cache_read_tokens":120,"thinking_tokens":45,"total_tokens":71}}}"#;
         assert_eq!(
             parse(line),
             Ok(Line::ResultSuccess {
                 conversation_id: Some("agy-123".to_owned()),
                 response: "done".to_owned(),
                 usage: Usage {
-                    input_tokens: Some(17),
-                    output_tokens: Some(9),
+                    input_tokens: Some(137),
+                    output_tokens: Some(54),
                     cached_input_tokens: Some(120),
                     cache_write_input_tokens: None,
                     reasoning_output_tokens: Some(45),
@@ -497,9 +544,16 @@ mod tests {
         for message in [
             "Error: unknown flag: --effort\n",
             "flag provided but not defined: -effort\n",
+            "invalid --effort \"max\" (valid: low, medium, high)",
+            "unrecognized effort \"turbo\" for thinking level",
             "gemini-2.5-flash has no \"max\" effort (available: low, medium, high)",
             "effort isn't adjustable for gemini-2.5-flash",
             "invalid effort level",
+            "invalid model selection (--model \"gemini-3.8-flash-medium\" --effort \"high\"): --model gemini-3.8-flash-medium conflicts with --effort=high",
+            "invalid model selection (--model \"gemini-2.5-flash\" --effort \"max\"): --effort=max is not supported for model \"gemini-2.5-flash\"",
+            "invalid model selection (--model \"gemini-2.5-flash\" --effort \"high\"): --effort is not supported for model \"gemini-2.5-flash\"",
+            "--effort is not supported for the current model",
+            "model specifies effort \"medium\" which mismatches --effort \"high\"",
         ] {
             assert!(names_unsupported_effort(message), "{message}");
         }
@@ -507,6 +561,8 @@ mod tests {
             "Usage:\n  agy --effort <level>   Set reasoning effort\n",
             "best effort delivery failed",
             "server error: connection reset",
+            "invalid model selection (--model \"does-not-exist-model\" --effort \"\"): model does-not-exist-model is not recognized",
+            "invalid model selection (--model \"some-model\" --effort \"high\"): model some-model is not supported",
         ] {
             assert!(!names_unsupported_effort(message), "{message}");
         }

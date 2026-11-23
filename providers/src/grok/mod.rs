@@ -264,10 +264,13 @@ impl Launch {
             .env("GROK_FEEDBACK_ENABLED", "false")
             .env("GROK_FOLDER_TRUST", "0")
             .env("GROK_PROMPT_SUGGESTIONS", "false")
-            // Run Grok inside its built-in OS sandbox (Linux Landlock + seccomp
-            // child-network block, macOS Seatbelt read-only; graceful no-op on
-            // Windows or unsupported kernels, ignored by older `grok` CLIs).
-            .env("GROK_SANDBOX", "read-only")
+            // Do not set `GROK_SANDBOX=read-only` (and `environment::inherit`
+            // strips any host `GROK_SANDBOX`): `GROK_HOME` is a private temp
+            // directory while `GROK_AUTH_PATH` points at the user's credential
+            // file so OAuth refreshes can lock `auth.json.lock` and atomically
+            // replace `auth.json` in its original directory. `read-only` limits
+            // writes to `$GROK_HOME` + temp (breaking OAuth renewal) and on
+            // Linux also requires `bubblewrap` for hook write-deny.
             .current_dir(cwd);
         if let Some(auth_path) = &self.auth_path {
             spec = spec.env("GROK_AUTH_PATH", auth_path.as_os_str());
@@ -936,8 +939,10 @@ impl Turn {
                 if forbidden_tool {
                     return self.fail(BOUNDARY_VIOLATION);
                 }
-                let already_streamed = std::mem::replace(&mut self.streamed_in_message, false);
-                if !already_streamed {
+                // Keep `streamed_in_message` set across all `assistant` frames
+                // belonging to the same message (split thinking/text blocks);
+                // only `Line::MessageStart` resets it for the next message.
+                if !self.streamed_in_message {
                     if !text.is_empty() {
                         if self.saw_text {
                             self.break_before_text = true;
@@ -962,9 +967,16 @@ impl Turn {
                 self.outcome = Some(Ok(()));
                 self.finish_by = Some(private_fs::after(FINISH_GRACE));
             }
-            Ok(Line::ResultFailed(error)) => {
+            Ok(Line::ResultFailed {
+                error,
+                effort_unsupported,
+            }) => {
                 self.result_at.get_or_insert_with(Instant::now);
-                self.fail(error)
+                if self.requested_effort && effort_unsupported {
+                    self.fail(crate::REASONING_EFFORT_UNSUPPORTED);
+                } else {
+                    self.fail(error);
+                }
             }
             Ok(Line::Activity) if self.initialized => self.queue.push_back(Update::Activity),
             Ok(Line::Activity | Line::Ignored) => {}
@@ -986,7 +998,7 @@ impl Turn {
                 let stderr = String::from_utf8_lossy(self.stream.stderr_tail());
                 if !self.initialized
                     && self.requested_effort
-                    && output::names_unsupported_effort_option(&stderr)
+                    && output::names_unsupported_effort(&stderr)
                 {
                     return Update::Failed(crate::REASONING_EFFORT_UNSUPPORTED);
                 }

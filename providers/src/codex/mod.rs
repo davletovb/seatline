@@ -35,7 +35,9 @@ use seatline_core::protocol::Failure as ErrorBody;
 use seatline_core::protocol::{
     Authentication, Availability, Capabilities, Capability, ErrorCode, ProviderState,
 };
-use seatline_core::search::{NATIVE_SEARCH_NO_SOURCES, SourceCollector, codex_message_sources};
+use seatline_core::search::{
+    NATIVE_SEARCH_NO_SOURCES, SearchResult, SourceCollector, codex_message_sources,
+};
 use seatline_core::stream::{BUSY_LIMIT, LineStream, Output};
 use seatline_core::telemetry::Span;
 use seatline_core::turn::{
@@ -471,6 +473,7 @@ impl Provider for Codex {
             service_tier: request.service_tier,
             queue: VecDeque::new(),
             sources: SourceCollector::new(ID),
+            search_hits: Vec::new(),
             cancelled: false,
             thread_id: None,
             started: false,
@@ -902,6 +905,10 @@ struct Turn {
     /// Updates produced but not yet returned.
     queue: VecDeque<Update>,
     sources: SourceCollector,
+    /// Structured `WebSearchItem.results` buffered until the answer's cited
+    /// links have been emitted, so raw search hits never crowd citations out of
+    /// `MAX_SOURCES_PER_TURN`.
+    search_hits: Vec<SearchResult>,
     cancelled: bool,
     thread_id: Option<String>,
     started: bool,
@@ -919,6 +926,8 @@ struct Turn {
     /// The sign-in probe, when the request asked for one: for telemetry.
     probe_span: Option<Span>,
 }
+
+const MAX_BUFFERED_SEARCH_HITS: usize = 256;
 
 enum Stage {
     Probing {
@@ -1091,8 +1100,11 @@ impl Turn {
                 self.held = None;
                 if self.native_search {
                     for result in results {
-                        if let Some(source) = self.sources.push(result) {
-                            self.queue.push_back(Update::Source(source));
+                        if self.search_hits.len() >= MAX_BUFFERED_SEARCH_HITS {
+                            break;
+                        }
+                        if !self.search_hits.iter().any(|hit| hit.url == result.url) {
+                            self.search_hits.push(result);
                         }
                     }
                 }
@@ -1104,6 +1116,13 @@ impl Turn {
             }
             Ok(Line::TurnCompleted(usage)) => {
                 self.flush_held();
+                if self.native_search {
+                    for hit in std::mem::take(&mut self.search_hits) {
+                        if let Some(source) = self.sources.push(hit) {
+                            self.queue.push_back(Update::Source(source));
+                        }
+                    }
+                }
                 if usage.input_tokens.is_some() || usage.output_tokens.is_some() {
                     self.queue.push_back(Update::Usage(usage));
                 }
@@ -1111,6 +1130,7 @@ impl Turn {
             }
             Ok(Line::TurnFailed(message)) => {
                 self.flush_held();
+                self.search_hits.clear();
                 self.turn_ended(Err(output::turn_failure(&message)));
             }
             Ok(Line::Ignored) => {}
@@ -1123,11 +1143,24 @@ impl Turn {
         }
     }
 
-    /// One message of the answer. In a search turn, the links it cites are
-    /// its sources.
+    /// One message of the answer. In a search turn, links cited in the answer
+    /// are emitted ahead of uncited raw search hits so raw hits cannot crowd
+    /// citations out of the `MAX_SOURCES_PER_TURN` budget; matching buffered
+    /// structured hits enrich the cited entry with snippet/metadata.
     fn show_message(&mut self, text: String) {
         if self.native_search {
-            for result in codex_message_sources(&text) {
+            for mut result in codex_message_sources(&text) {
+                if let Some(hit) = self.search_hits.iter().find(|hit| hit.url == result.url) {
+                    if result.snippet.is_empty() {
+                        result.snippet = hit.snippet.clone();
+                    }
+                    if result.source_name.is_none() {
+                        result.source_name = hit.source_name.clone();
+                    }
+                    if result.age.is_none() {
+                        result.age = hit.age.clone();
+                    }
+                }
                 if let Some(source) = self.sources.push(result) {
                     self.queue.push_back(Update::Source(source));
                 }

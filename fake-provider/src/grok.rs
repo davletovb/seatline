@@ -102,6 +102,14 @@ fn run(args: Vec<OsString>) -> Result<(), ()> {
         eprintln!("error: unexpected argument '--reasoning-effort' found");
         return Err(());
     }
+    if requested_model == "grok-effort-stderr-unsupported"
+        && args
+            .iter()
+            .any(|arg| arg.to_string_lossy().starts_with("--reasoning-effort"))
+    {
+        eprintln!("--effort/--reasoning-effort: current model does not support reasoning effort");
+        return Err(());
+    }
 
     let cwd = std::env::current_dir().map_err(|_| ())?;
     let api_key_source = if requested_model == "grok-init-auth" {
@@ -178,6 +186,13 @@ fn run(args: Vec<OsString>) -> Result<(), ()> {
             hang_briefly();
             return Ok(());
         }
+        "grok-effort-model-unsupported" => {
+            line(&serde_json::json!({
+                "type":"result","subtype":"error_during_execution","is_error":true,
+                "errors":["--effort/--reasoning-effort: unknown effort level 'max'; use one of: low, high"]
+            }))?;
+            return Err(());
+        }
         "grok-result-auth" => {
             line(&serde_json::json!({
                 "type":"result","subtype":"error_during_execution","is_error":true,
@@ -192,7 +207,28 @@ fn run(args: Vec<OsString>) -> Result<(), ()> {
         _ => {}
     }
 
-    let answer = if prompt.contains("Earlier assistant answer") {
+    let answer = if requested_model == "grok-refresh-auth" {
+        let auth_path = PathBuf::from(std::env::var_os("GROK_AUTH_PATH").ok_or(())?);
+        let lock_path = auth_path.with_file_name("auth.json.lock");
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|_| ())?;
+        let current = fs::read_to_string(&auth_path).unwrap_or_default();
+        if current.contains("expired") {
+            let tmp = auth_path.with_file_name("auth.json.tmp");
+            fs::write(&tmp, r#"{"token":"renewed"}"#).map_err(|_| ())?;
+            fs::rename(&tmp, &auth_path).map_err(|_| ())?;
+            "token:refreshed"
+        } else if current.contains("renewed") {
+            "token:renewed"
+        } else {
+            "token:other"
+        }
+    } else if prompt.contains("Earlier assistant answer") {
         "Grok follow-up answer"
     } else {
         "Grok answer"
@@ -227,10 +263,21 @@ fn run(args: Vec<OsString>) -> Result<(), ()> {
             "event":{"type":"message_stop"}
         }))?;
     }
-    line(&serde_json::json!({
-        "type":"assistant",
-        "message":{"content":[{"type":"thinking","thinking":"done"},{"type":"text","text":answer}]}
-    }))?;
+    if requested_model == "grok-split-assistant" {
+        line(&serde_json::json!({
+            "type":"assistant",
+            "message":{"content":[{"type":"thinking","thinking":"done"}]}
+        }))?;
+        line(&serde_json::json!({
+            "type":"assistant",
+            "message":{"content":[{"type":"text","text":answer}]}
+        }))?;
+    } else {
+        line(&serde_json::json!({
+            "type":"assistant",
+            "message":{"content":[{"type":"thinking","thinking":"done"},{"type":"text","text":answer}]}
+        }))?;
+    }
     let usage = if requested_model == "grok-zero-usage" {
         serde_json::json!({
             "input_tokens":0,
@@ -259,12 +306,13 @@ fn assert_isolated_environment() -> Result<(), ()> {
     if home.as_ref() == Some(&grok_home) {
         return Err(());
     }
-    for secret in [
+    for stripped in [
         "XAI_API_KEY",
         "GROK_CODE_XAI_API_KEY",
         "GROK_MODELS_BASE_URL",
+        "GROK_SANDBOX",
     ] {
-        if std::env::var_os(secret).is_some() {
+        if std::env::var_os(stripped).is_some() {
             return Err(());
         }
     }
@@ -289,7 +337,6 @@ fn assert_isolated_environment() -> Result<(), ()> {
         ("GROK_CURSOR_AGENTS_ENABLED", "0"),
         ("GROK_CURSOR_MCPS_ENABLED", "0"),
         ("GROK_CURSOR_HOOKS_ENABLED", "0"),
-        ("GROK_SANDBOX", "read-only"),
     ] {
         if std::env::var_os(name).as_deref() != Some(OsStr::new(wanted)) {
             return Err(());

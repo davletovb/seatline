@@ -211,13 +211,19 @@ from Claude's CLI today.
 Gemini (`agy`) supports `low`, `medium`, `high`, `xhigh` and `max`, passed via
 `--effort <level>`. Like Claude, Antigravity has no `none`, so `none` is refused
 with `REASONING_EFFORT_UNSUPPORTED` before launching anything, including
-readiness probes on checked-send paths. Older `agy` CLIs that reject `--effort`
-and models that reject a specific effort level are normalized to
-`REASONING_EFFORT_UNSUPPORTED`.
+readiness probes on checked-send paths. Antigravity's `agy models` catalog also
+lists effort-qualified slugs such as `gemini-3.8-flash-medium`: when a turn
+specifies both an effort-qualified slug and a conflicting `reasoning_effort`,
+Seatline refuses it with `REASONING_EFFORT_UNSUPPORTED` before launching
+anything (when they agree, the redundant `--effort` flag is omitted). Older
+`agy` CLIs that reject `--effort` and models that reject a specific effort
+level are normalized to `REASONING_EFFORT_UNSUPPORTED`.
 
 Grok supports `none`, `low`, `medium`, `high`, `xhigh` and `max`, passed via
-`--reasoning-effort <level>`. Older `grok` CLIs that do not recognize
-`--reasoning-effort` are normalized to `REASONING_EFFORT_UNSUPPORTED`.
+`--reasoning-effort <level>`. Both older `grok` CLIs that reject
+`--reasoning-effort` and newer CLIs or models that reject an effort level via
+stderr or a terminal JSON error result are normalized to
+`REASONING_EFFORT_UNSUPPORTED`.
 Applications own whether this comes from a saved setting and which default
 they choose; Seatline does not impose a writing-specific budget.
 
@@ -242,8 +248,13 @@ and user config unchanged; Codex maps Fast to its priority request tier.
 availability for every installed CLI, model, plan or workspace. Applications
 must require Supported (`true`) before sending an explicit tier; older
 status records deserialize as Unknown and older companions reject the new
-turn field. Claude/Gemini/Grok refuse any explicit tier with
-`SERVICE_TIER_UNSUPPORTED` before executable discovery or readiness probes.
+turn field. Because `PROTOCOL_VERSION` stays `1`, a shared companion built
+before `ultrafast` was added already reports `service_tier: true` for Codex
+and will reject `"ultrafast"` as an unknown tier value; applications sending
+`"ultrafast"` should require a companion built with `ServiceTier::Ultrafast`
+support (or handle an invalid-request refusal from an older companion).
+Claude/Gemini/Grok refuse any explicit tier with `SERVICE_TIER_UNSUPPORTED`
+before executable discovery or readiness probes.
 Rust callers updating their pin add `service_tier: None` to full `Turn`
 literals and the field to full `Capabilities` literals. There is no automatic
 retry using another tier. See the official [Codex speed documentation](https://learn.chatgpt.com/docs/agent-configuration/speed)

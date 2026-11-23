@@ -1502,6 +1502,33 @@ fn structured_web_search_results_ground_a_turn_without_markdown_links_and_filter
 }
 
 #[test]
+fn cited_links_take_priority_over_raw_search_hits_when_filling_source_budget() {
+    let codex = FakeCodex::install(FIXTURES, "search-crowded", "signed-in");
+    let updates = visible(&run_to_end(
+        context_adapter(&codex)
+            .send(Turn {
+                tools: ToolPolicy::NativeWebSearch,
+                ..ask("what is new?")
+            })
+            .as_mut(),
+    ));
+    assert_eq!(updates.last(), Some(&Update::Completed), "{updates:?}");
+    let sources: Vec<_> = updates
+        .iter()
+        .filter_map(|update| match update {
+            Update::Source(source) => Some(source.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sources.len(), seatline_core::search::MAX_SOURCES_PER_TURN);
+    assert_eq!(sources[0].url, "https://example.com/cited-winner");
+    assert_eq!(sources[0].title, "Cited Winner");
+    assert_eq!(sources[1].url, "https://example.com/hit-24");
+    assert_eq!(sources[1].snippet, "Snippet 24");
+    assert_eq!(sources[2].url, "https://example.com/hit-0");
+}
+
+#[test]
 fn a_search_turn_asks_for_a_cited_search_and_shows_the_answer_not_the_narration() {
     let codex = FakeCodex::install(FIXTURES, "search-narrates", "signed-in");
     let updates = visible(&run_to_end(

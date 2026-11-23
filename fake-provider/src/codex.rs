@@ -308,6 +308,25 @@ fn exec(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCode> {
                     }
                 ]
             })
+        } else if behavior == "search-crowded" {
+            let results: Vec<_> = (0..25)
+                .map(|index| {
+                    json!({
+                        "type": "text_result",
+                        "ref_id": format!("turn0search{index}"),
+                        "url": format!("https://example.com/hit-{index}"),
+                        "title": format!("Hit {index}"),
+                        "snippet": format!("Snippet {index}")
+                    })
+                })
+                .collect();
+            json!({
+                "id": "search_1",
+                "type": "web_search",
+                "query": prompt.trim(),
+                "action": {"type": "search", "query": prompt.trim()},
+                "results": results
+            })
         } else {
             // Older Codex exec reports only the search query/action here, not results.
             json!({
@@ -436,6 +455,10 @@ fn exec(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCode> {
                 // options, shell, or markup (SEC-05).
                 format!(
                     "You asked: {prompt}\n\n[--config=evil $(touch pwned) <b>bold</b>](https://example.com/codex-hostile) [run](javascript:alert(1)) https://user@evil.example/ https://example.com/codex-hostile"
+                )
+            } else if native_search && behavior == "search-crowded" {
+                format!(
+                    "You asked: {prompt}\n\n[Cited Winner](https://example.com/cited-winner) and [Hit 24](https://example.com/hit-24)"
                 )
             } else if native_search && !matches!(behavior, "search-no-links" | "search-structured")
             {

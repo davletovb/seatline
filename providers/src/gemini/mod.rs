@@ -348,6 +348,17 @@ impl Provider for Gemini {
         effort_level(effort).is_none()
     }
 
+    fn refuses_reasoning_effort_for_model(
+        &self,
+        model: Option<&str>,
+        effort: ReasoningEffort,
+    ) -> bool {
+        self.refuses_reasoning_effort(effort)
+            || model
+                .and_then(model_embedded_effort)
+                .is_some_and(|embedded| embedded != effort)
+    }
+
     fn invalidate_readiness(&self) {
         self.search.invalidate();
     }
@@ -405,10 +416,9 @@ impl Provider for Gemini {
     }
 
     fn send(&self, request: TurnRequest) -> Box<dyn Exchange> {
-        if request
-            .reasoning_effort
-            .is_some_and(|effort| self.refuses_reasoning_effort(effort))
-        {
+        if request.reasoning_effort.is_some_and(|effort| {
+            self.refuses_reasoning_effort_for_model(request.model.as_deref(), effort)
+        }) {
             return Box::new(Scripted::failed(crate::REASONING_EFFORT_UNSUPPORTED));
         }
         if request.service_tier.is_some() {
@@ -1437,6 +1447,23 @@ fn clean_runtime(
     first_error.map_or(Ok(()), Err)
 }
 
+/// Returns the reasoning effort encoded in an Antigravity effort-qualified model
+/// slug such as `gemini-3.8-flash-medium` or `gemini-4-neon-xhigh`, if any.
+fn model_embedded_effort(model: &str) -> Option<ReasoningEffort> {
+    let (prefix, suffix) = model.rsplit_once('-')?;
+    if prefix.is_empty() {
+        return None;
+    }
+    match suffix.to_ascii_lowercase().as_str() {
+        "low" => Some(ReasoningEffort::Low),
+        "medium" => Some(ReasoningEffort::Medium),
+        "high" => Some(ReasoningEffort::High),
+        "xhigh" => Some(ReasoningEffort::Xhigh),
+        "max" => Some(ReasoningEffort::Max),
+        _ => None,
+    }
+}
+
 /// The level `agy --effort` takes for `effort`, or `None` when Antigravity has
 /// no such level. Antigravity accepts `low` through `max` and has no `none`, so
 /// `ReasoningEffort::None` is refused before any probe or launch.
@@ -1470,8 +1497,16 @@ fn agy_args(
     if let Some(model) = model {
         args.extend([OsString::from("--model"), OsString::from(model)]);
     }
-    if let Some(level) = reasoning_effort.and_then(effort_level) {
-        args.extend([OsString::from("--effort"), OsString::from(level)]);
+    // When the model slug already embeds the matching effort (e.g.
+    // `gemini-3.8-flash-medium` with `Medium`), omit the redundant `--effort`
+    // flag. Conflicting pairs are rejected before launch.
+    let matches_embedded = model
+        .and_then(model_embedded_effort)
+        .is_some_and(|embedded| Some(embedded) == reasoning_effort);
+    if !matches_embedded {
+        if let Some(level) = reasoning_effort.and_then(effort_level) {
+            args.extend([OsString::from("--effort"), OsString::from(level)]);
+        }
     }
     args
 }
@@ -1707,6 +1742,23 @@ mod tests {
         assert!(effort_level(ReasoningEffort::None).is_none());
         let no_effort = agy_args(&search_agent, None, None);
         assert!(!no_effort.iter().any(|arg| arg == "--effort"));
+
+        // Matching embedded effort omits the redundant `--effort` flag.
+        assert_eq!(
+            model_embedded_effort("gemini-3.8-flash-medium"),
+            Some(ReasoningEffort::Medium)
+        );
+        assert_eq!(
+            model_embedded_effort("gemini-4-neon-xhigh"),
+            Some(ReasoningEffort::Xhigh)
+        );
+        assert_eq!(model_embedded_effort("gemini-3-pro"), None);
+        let matching = agy_args(
+            &search_agent,
+            Some("gemini-3.8-flash-medium"),
+            Some(ReasoningEffort::Medium),
+        );
+        assert!(!matching.iter().any(|arg| arg == "--effort"));
     }
 
     #[test]
