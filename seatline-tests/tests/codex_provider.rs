@@ -263,13 +263,19 @@ fn native_search_uses_codex_subscription_search_and_emits_sources() {
     for setting in [
         "features.shell_tool=false",
         "features.view_image=false",
+        "features.image_generation=false",
+        "features.sleep_tool=false",
         "features.apps=false",
         "features.plugins=false",
         "features.hooks=false",
         "features.multi_agent=false",
         "features.multi_agent_v2=false",
         "features.standalone_web_search=false",
+        "features.daemon_auto_start=false",
+        "features.skill_search=false",
+        "features.code_mode_host=false",
         "orchestrator.mcp.enabled=false",
+        "agents.enabled=false",
     ] {
         assert!(
             invocation.contains(&format!("-c {setting}")),
@@ -786,6 +792,7 @@ fn processing_tier_overrides_config_without_changing_model_effort_or_later_turns
         for setting in [
             format!("service_tier=\"{value}\""),
             format!("features.fast_mode={gate}"),
+            "features.ultrafast_mode=false".to_owned(),
             "model_reasoning_effort=\"xhigh\"".to_owned(),
         ] {
             assert_eq!(invocation.matches(&setting).count(), 1, "{invocation}");
@@ -809,6 +816,10 @@ fn processing_tier_overrides_config_without_changing_model_effort_or_later_turns
     let invocation = codex.invocations().last().unwrap().clone();
     assert!(!invocation.contains("service_tier"), "{invocation}");
     assert!(!invocation.contains("features.fast_mode"), "{invocation}");
+    assert!(
+        !invocation.contains("features.ultrafast_mode"),
+        "{invocation}"
+    );
     assert!(
         !invocation.contains("model_reasoning_effort"),
         "{invocation}"
@@ -1143,20 +1154,25 @@ fn a_tool_free_turn_keeps_its_text_off_the_command_line_and_defends_in_depth() {
     for setting in [
         "features.shell_tool=false",
         "features.view_image=false",
+        "features.image_generation=false",
+        "features.sleep_tool=false",
         "features.apps=false",
         "features.plugins=false",
         "features.hooks=false",
         "features.multi_agent=false",
         "features.multi_agent_v2=false",
         "features.standalone_web_search=false",
+        "features.daemon_auto_start=false",
+        "features.skill_search=false",
+        "features.code_mode_host=false",
         "features.web_search_request=false",
         "features.web_search_cached=false",
         "web_search=\"disabled\"",
         "orchestrator.mcp.enabled=false",
+        "agents.enabled=false",
     ] {
         assert!(command.contains(&format!("-c {setting}")), "{command}");
     }
-    assert!(!command.contains("agents.enabled"), "{command}");
     assert!(!command.contains("SECRET"), "{command}");
 
     let status = run_to_end(adapter.status().as_mut());
@@ -1164,6 +1180,66 @@ fn a_tool_free_turn_keeps_its_text_off_the_command_line_and_defends_in_depth() {
         panic!("expected a status, got {status:?}");
     };
     assert_eq!(status.capabilities.tool_isolation, Capability::Supported);
+}
+
+#[test]
+fn a_codex_from_before_agents_enabled_is_retried_without_it_and_remembered() {
+    let codex = FakeCodex::install(FIXTURES, "no-agents-enabled-config", "signed-in");
+    // Give this test its own copy of the fake executable so parallel tests'
+    // link counts never perturb its FileStamp.
+    let executable = codex.dir.join(FakeCodex::file_name());
+    std::fs::remove_file(&executable).unwrap();
+    std::fs::copy(FIXTURES.provider(), &executable).unwrap();
+
+    let adapter = context_adapter(&codex);
+    let tool_free = |text: &str| Turn {
+        tools: ToolPolicy::None,
+        check_sign_in: false,
+        ..ask(text)
+    };
+
+    // First turn tries `-c agents.enabled=false`, sees the pre-0.149 TOML
+    // schema rejection before a thread starts, and retries once without it.
+    let first = run_to_end(adapter.send(tool_free("first")).as_mut());
+    assert_eq!(first.last(), Some(&Update::Completed), "{first:?}");
+    assert_eq!(answer_text(&first), "You asked: first");
+    assert_eq!(
+        first
+            .iter()
+            .filter(|update| **update == Update::Launched)
+            .count(),
+        1,
+        "{first:?}"
+    );
+    let runs = execs(&codex);
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert!(runs[0].contains("-c agents.enabled=false"), "{runs:?}");
+    assert!(!runs[1].contains("agents.enabled"), "{runs:?}");
+    assert!(
+        runs[1].contains("-c features.multi_agent=false"),
+        "{runs:?}"
+    );
+    assert!(
+        runs[1].contains("-c features.multi_agent_v2=false"),
+        "{runs:?}"
+    );
+
+    // Second turn remembers this executable lacks `agents.enabled` and runs once.
+    let second = run_to_end(adapter.send(tool_free("second")).as_mut());
+    assert_eq!(second.last(), Some(&Update::Completed), "{second:?}");
+    assert_eq!(answer_text(&second), "You asked: second");
+    let runs = execs(&codex);
+    assert_eq!(runs.len(), 3, "{runs:?}");
+    assert!(!runs[2].contains("agents.enabled"), "{runs:?}");
+
+    // Invalidating readiness forgets what was learned and tries again.
+    adapter.invalidate_readiness();
+    let third = run_to_end(adapter.send(tool_free("third")).as_mut());
+    assert_eq!(third.last(), Some(&Update::Completed), "{third:?}");
+    let runs = execs(&codex);
+    assert_eq!(runs.len(), 5, "{runs:?}");
+    assert!(runs[3].contains("-c agents.enabled=false"), "{runs:?}");
+    assert!(!runs[4].contains("agents.enabled"), "{runs:?}");
 }
 
 #[test]

@@ -208,6 +208,37 @@ impl Launch {
             )
             .current_dir(workspace)
     }
+
+    /// `claude -p` for a turn: adds defense-in-depth environment switches
+    /// against agentic surfaces added to Claude Code 2.1.x headless mode
+    /// (fork subagents enabled by default in 2.1.302, deferred-tool execution
+    /// on `--resume` in 2.1.328, pre-approval shell startup in 2.1.327,
+    /// WebFetch, Advisor tool, MCP tasks, and prompt-triggered ultrathink on
+    /// non-provider-default turns). Older Claude builds ignore unknown env vars.
+    fn turn_command<I>(
+        &self,
+        workspace: &Path,
+        executable: &Path,
+        args: I,
+        disable_ultrathink: bool,
+    ) -> ProcessSpec
+    where
+        I: IntoIterator,
+        I::Item: Into<OsString>,
+    {
+        let mut spec = self
+            .command(workspace, executable, args)
+            .env("CLAUDE_CODE_DISABLE_DEFERRED_TOOL_RESUME", "1")
+            .env("CLAUDE_CODE_FORK_SUBAGENT", "0")
+            .env("CLAUDE_CODE_DISABLE_WEB_FETCH", "1")
+            .env("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "1")
+            .env("CLAUDE_CODE_DISABLE_MCP_TASKS", "1")
+            .env("CLAUDE_CODE_DISABLE_SHELL_HEAD_START", "1");
+        if disable_ultrathink {
+            spec = spec.env("CLAUDE_CODE_DISABLE_ULTRATHINK", "1");
+        }
+        spec
+    }
 }
 
 /// Whether turns are started without the user's own customizations, and what
@@ -466,6 +497,7 @@ impl Provider for Claude {
             reasoning_effort: request.reasoning_effort,
             isolation: Rc::clone(&self.isolation),
             isolate,
+            disable_ultrathink: request.tools != ToolPolicy::ProviderDefault,
             native_search: request.tools == ToolPolicy::NativeWebSearch,
             queue: VecDeque::new(),
             sources: SourceCollector::new(ID),
@@ -716,7 +748,7 @@ fn classify_sign_in(output: &[u8]) -> seatline_core::turn::SignInClassification 
         .as_ref()
         .and_then(|value| value["authMethod"].as_str())
     {
-        Some("claude.ai") => SignInClassification::Subscription,
+        Some("claude.ai" | "oauth_token") => SignInClassification::Subscription,
         Some("api_key" | "api_key_helper") => SignInClassification::ApiKey,
         Some("third_party") => SignInClassification::Cloud,
         _ => SignInClassification::Unknown,
@@ -765,6 +797,8 @@ fn claude_args_for_session(
         "--strict-mcp-config",
         "--disallowedTools",
         "mcp__*",
+        "--disable-slash-commands",
+        "--no-chrome",
     ]
     .map(OsString::from)
     .into();
@@ -817,6 +851,7 @@ struct Turn {
     /// is kept until Claude starts, so that a Claude that does not know the
     /// option can be asked again without it.
     isolate: bool,
+    disable_ultrathink: bool,
     native_search: bool,
     queue: VecDeque<Update>,
     sources: SourceCollector,
@@ -876,7 +911,12 @@ impl Turn {
         })
         .to_string()
             + "\n";
-        match Process::spawn(&self.launch.command(&workspace, &self.executable, args)) {
+        match Process::spawn(&self.launch.turn_command(
+            &workspace,
+            &self.executable,
+            args,
+            self.disable_ultrathink,
+        )) {
             Ok(mut process) => {
                 let _ = process.write(input.as_bytes());
                 process.close_stdin();
@@ -1384,5 +1424,35 @@ mod tests {
         for model in MODELS {
             assert!(seatline_core::turn::is_model_id(&model.id), "{}", model.id);
         }
+    }
+
+    #[test]
+    fn print_arguments_disable_slash_commands_and_chrome() {
+        let args = claude_args(None, None, false);
+        let args: Vec<&str> = args.iter().map(|arg| arg.to_str().unwrap()).collect();
+        for expected in ["--disable-slash-commands", "--no-chrome"] {
+            assert!(args.contains(&expected), "{expected}: {args:?}");
+        }
+    }
+
+    #[test]
+    fn oauth_token_sign_in_classifies_as_subscription() {
+        use seatline_core::turn::SignInClassification;
+        assert_eq!(
+            classify_sign_in(br#"{"loggedIn":true,"authMethod":"oauth_token"}"#),
+            SignInClassification::Subscription
+        );
+        assert_eq!(
+            classify_sign_in(br#"{"loggedIn":true,"authMethod":"claude.ai"}"#),
+            SignInClassification::Subscription
+        );
+        assert_eq!(
+            classify_sign_in(br#"{"loggedIn":true,"authMethod":"api_key"}"#),
+            SignInClassification::ApiKey
+        );
+        assert_eq!(
+            classify_sign_in(br#"{"loggedIn":true,"authMethod":"third_party"}"#),
+            SignInClassification::Cloud
+        );
     }
 }

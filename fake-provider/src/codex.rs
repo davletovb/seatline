@@ -115,6 +115,18 @@ fn login_status(behavior: &str) -> ExitCode {
             let _ = writeln!(stderr, "Logged in using ChatGPT");
             ExitCode::SUCCESS
         }
+        "api-key-configured" => {
+            let _ = writeln!(stderr, "API key configured - sk-fake***0000");
+            ExitCode::SUCCESS
+        }
+        "bedrock" => {
+            let _ = writeln!(stderr, "Logged in using Amazon Bedrock API key");
+            ExitCode::SUCCESS
+        }
+        "workload-identity" => {
+            let _ = writeln!(stderr, "Logged in using workload identity");
+            ExitCode::SUCCESS
+        }
         "unknown-account-text" => {
             let _ = writeln!(stderr, "account api key chatgpt subscription: {SECRET}");
             ExitCode::SUCCESS
@@ -153,6 +165,17 @@ fn exec(dir: &Path, args: &[String], behavior: &str) -> io::Result<ExitCode> {
             "fake codex: expected --json and a prompt on stdin"
         );
         return Ok(ExitCode::from(2));
+    }
+    if behavior == "no-agents-enabled-config"
+        && args
+            .windows(2)
+            .any(|pair| pair == ["-c", "agents.enabled=false"])
+    {
+        let _ = writeln!(
+            io::stderr(),
+            "Error loading config.toml:\ninvalid type: boolean `false`, expected struct AgentRoleToml\nin `agents.enabled`"
+        );
+        return Ok(ExitCode::from(1));
     }
 
     // Like Codex, read the whole prompt before doing anything.

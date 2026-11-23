@@ -155,6 +155,25 @@ pub fn turn_failure(message: &str) -> ErrorBody {
     }
 }
 
+/// Whether Codex's stderr says `-c agents.enabled=false` could not be parsed by
+/// an older CLI (`<= 0.135`) whose `[agents]` table only accepts named role
+/// sub-tables (`BTreeMap<String, AgentRoleToml>`).
+pub(super) fn names_unsupported_agents_enabled(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    let names_key = lower.contains("agents.enabled")
+        || (lower.contains("agents") && lower.contains("enabled") && lower.contains("agentrole"));
+    let schema_mismatch = [
+        "invalid type",
+        "expected struct",
+        "expected a map",
+        "expected table",
+        "unknown field",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase));
+    names_key && schema_mismatch
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,5 +376,24 @@ mod tests {
         let secret = "unexpected status 401 Unauthorized: Incorrect API key provided: sk-abc***xyz";
         let error = turn_failure(secret);
         assert_eq!(error.code, ErrorCode::ProviderNotAuthenticated);
+    }
+
+    #[test]
+    fn unsupported_agents_enabled_config_error_is_told_from_other_failures() {
+        for stderr in [
+            "Error loading config.toml:\ninvalid type: boolean `false`, expected struct AgentRoleToml\nin `agents.enabled`\n",
+            "invalid type: boolean `false`, expected a map for key `agents.enabled`",
+            "unknown field `enabled` in `agents.enabled`",
+        ] {
+            assert!(names_unsupported_agents_enabled(stderr), "{stderr}");
+        }
+        for stderr in [
+            "Error: thread/resume: no rollout found",
+            "Error loading config.toml: invalid type in `features.shell_tool`",
+            "agents.enabled is false",
+            "",
+        ] {
+            assert!(!names_unsupported_agents_enabled(stderr), "{stderr}");
+        }
     }
 }

@@ -281,6 +281,7 @@ pub fn result_failure(message: &str) -> ErrorBody {
         "rate limit",
         "rate_limit_error",
         "usage limit",
+        "usage credits",
         "too many requests",
         "api error: 429",
         "billing limit",
@@ -423,6 +424,7 @@ mod tests {
             r#"API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#,
             "5-hour limit reached \u{2219} resets 3pm",
             "Claude AI usage limit reached|1760000000",
+            "You are out of usage credits",
         ] {
             assert_eq!(
                 result_failure(message).reason,

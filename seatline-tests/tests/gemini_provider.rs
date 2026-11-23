@@ -219,8 +219,8 @@ fn cancellation_before_init_scans_the_unique_workspace_and_cleans_transcript() {
 }
 
 /// Real `agy` echoes the prompt as a `user_input` step and can add
-/// `system_message` steps; neither is answer text or an action, and the
-/// answer's DONE update names only its step.
+/// `system_message` and `checkpoint` steps; none of them is answer text or an
+/// action, and the answer's DONE update names only its step.
 #[test]
 fn the_echoed_prompt_and_system_messages_are_not_answer_or_violations() {
     let fake = FakeGemini::install(FIXTURES);
@@ -229,6 +229,7 @@ fn the_echoed_prompt_and_system_messages_are_not_answer_or_violations() {
     let answer = answer_text(&updates);
     assert_eq!(answer, "Gemini answer");
     assert!(!answer.contains("Session ready"));
+    assert!(!answer.contains("Checkpoint saved"));
 }
 
 #[test]

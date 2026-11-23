@@ -23,8 +23,8 @@ pub enum Line {
     Tool(String),
     Subagent,
     /// A step Antigravity documents that is neither answer nor action: the
-    /// prompt echoed back (`user_input`), a `system_message`, or a step it
-    /// doesn't classify (`unknown`). Its text is never shown.
+    /// prompt echoed back (`user_input`), a `system_message`, a `checkpoint`,
+    /// or a step it doesn't classify (`unknown`). Its text is never shown.
     OtherStep {
         index: Option<u64>,
     },
@@ -124,7 +124,7 @@ pub fn parse(line: &str) -> Result<Line, Malformed> {
                     None | Some(Value::Null) => Line::Untyped { index, text, done },
                     Some(kind) => match kind.as_str() {
                         Some("agent_response") => Line::AgentDelta { index, text, done },
-                        Some("user_input" | "system_message" | "unknown") => {
+                        Some("user_input" | "system_message" | "checkpoint" | "unknown") => {
                             Line::OtherStep { index }
                         }
                         // Antigravity is an execution-capable runtime. A step
@@ -333,11 +333,17 @@ mod tests {
     }
 
     /// Every real run starts with the prompt echoed back as a `user_input`
-    /// step (seen in `agy` 1.2.x output); `system_message` and `unknown` steps
-    /// are documented too. None of them is answer text or an action.
+    /// step (seen in `agy` 1.2.x output); `system_message`, `checkpoint`, and
+    /// `unknown` steps are documented too. None of them is answer text or an
+    /// action.
     #[test]
     fn documented_non_answer_steps_are_not_answers_or_actions() {
-        for (kind, index) in [("user_input", 0), ("system_message", 1), ("unknown", 2)] {
+        for (kind, index) in [
+            ("user_input", 0),
+            ("system_message", 1),
+            ("checkpoint", 2),
+            ("unknown", 3),
+        ] {
             let line = serde_json::json!({
                 "event":"step_update",
                 "step_update":{"conversation_id":"agy-1","step_index":index,"state":"DONE","step_type":kind,"text_delta":"not answer"}

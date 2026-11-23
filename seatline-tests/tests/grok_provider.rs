@@ -329,3 +329,24 @@ fn turns_the_adapter_cannot_serve_are_refused_before_grok_runs() {
     }
     assert!(fake.turn_dirs().is_empty());
 }
+
+#[test]
+fn host_scanner_and_tool_variables_are_overridden_to_isolated_values() {
+    let fake = FakeGrok::install(FIXTURES);
+    let adapter = fake.adapter_with_environment(&[
+        ("GROK_CLAUDE_HOOKS_ENABLED", std::path::PathBuf::from("1")),
+        ("GROK_CLAUDE_MCPS_ENABLED", std::path::PathBuf::from("true")),
+        ("GROK_CURSOR_HOOKS_ENABLED", std::path::PathBuf::from("1")),
+        (
+            "GROK_CURSOR_RULES_ENABLED",
+            std::path::PathBuf::from("true"),
+        ),
+        ("GROK_GOAL", std::path::PathBuf::from("1")),
+        ("GROK_WRITE_FILE", std::path::PathBuf::from("1")),
+        ("GROK_LSP_TOOLS", std::path::PathBuf::from("1")),
+        ("GROK_CRASH_HANDLER", std::path::PathBuf::from("1")),
+    ]);
+    let updates = run_to_end(adapter.send(ask("Say hello")).as_mut());
+    assert_eq!(answer_text(&updates), "Grok answer");
+    assert_eq!(updates.last(), Some(&Update::Completed));
+}

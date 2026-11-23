@@ -89,6 +89,13 @@ fn auth_status(behavior: &str) -> ExitCode {
             );
             ExitCode::SUCCESS
         }
+        "oauth-token" => {
+            let _ = writeln!(
+                io::stdout(),
+                r#"{{"loggedIn":true,"authMethod":"oauth_token","email":"{SECRET}"}}"#
+            );
+            ExitCode::SUCCESS
+        }
         "api-key" => {
             let _ = writeln!(
                 io::stdout(),

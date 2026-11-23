@@ -232,13 +232,31 @@ impl Launch {
             )
             // Isolate every mutable/customizable Grok surface while keeping
             // the first-party cached OAuth file as the sole auth input.
+            // Because HOME is still inherited, explicitly disable Grok's
+            // default-on Claude/Cursor compatibility scanners (which otherwise
+            // read ~/.claude and ~/.cursor and run headless user hooks as
+            // trusted since Grok Build 1.0.64).
             .env("GROK_HOME", grok_home.as_os_str())
             .env("GROK_DISABLE_API_KEY_AUTH", "1")
             .env("GROK_DISABLE_AUTOUPDATER", "1")
             .env("GROK_SUBAGENTS", "0")
+            .env("GROK_GOAL", "0")
+            .env("GROK_WRITE_FILE", "0")
+            .env("GROK_LSP_TOOLS", "0")
             .env("GROK_MEMORY", "0")
             .env("GROK_WORKFLOWS", "0")
             .env("GROK_WEB_FETCH", "0")
+            .env("GROK_CRASH_HANDLER", "0")
+            .env("GROK_CLAUDE_SKILLS_ENABLED", "0")
+            .env("GROK_CLAUDE_RULES_ENABLED", "0")
+            .env("GROK_CLAUDE_AGENTS_ENABLED", "0")
+            .env("GROK_CLAUDE_MCPS_ENABLED", "0")
+            .env("GROK_CLAUDE_HOOKS_ENABLED", "0")
+            .env("GROK_CURSOR_SKILLS_ENABLED", "0")
+            .env("GROK_CURSOR_RULES_ENABLED", "0")
+            .env("GROK_CURSOR_AGENTS_ENABLED", "0")
+            .env("GROK_CURSOR_MCPS_ENABLED", "0")
+            .env("GROK_CURSOR_HOOKS_ENABLED", "0")
             .env("GROK_TELEMETRY_ENABLED", "false")
             .env("GROK_TELEMETRY_TRACE_UPLOAD", "false")
             .env("GROK_FEEDBACK_ENABLED", "false")
